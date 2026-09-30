@@ -7,7 +7,7 @@
 use mangle_syntax::{Dict, Object, Rect, Ref, Stream};
 
 use crate::error::{Error, Result};
-use crate::{MAX_TREE_DEPTH, MAX_TREE_ENTRIES, Resolver, follow, is_page, kids_of};
+use crate::{MAX_TREE_DEPTH, MAX_TREE_ENTRIES, Resolver, follow, is_page};
 
 /// The attributes a page inherits from its ancestors.
 ///
@@ -218,6 +218,7 @@ impl PageTree {
             .ok_or_else(|| Error::Dangling("the page tree root is missing".into()))?;
         walk(
             resolver,
+            root,
             &start,
             &Inheritable::default(),
             &mut pages,
@@ -259,8 +260,29 @@ impl PageTree {
     }
 }
 
+/// The object numbers a tree node's `/Kids` names, without resolving them.
+///
+/// The references are what a cycle is made of, so they have to survive until the walk
+/// can compare them. A `/Kids` array may also hold dictionaries directly, which is
+/// damage but not fatal: those are skipped here and the pages around them are kept.
+#[must_use]
+pub fn kid_refs_of(resolver: &dyn Resolver, node: &Dict) -> Vec<Ref> {
+    node.get("Kids")
+        .and_then(|k| follow(resolver, k.clone()))
+        .and_then(|o| o.as_array().map(<[Object]>::to_vec))
+        .map(|kids| kids.iter().filter_map(Object::as_ref_id).collect())
+        .unwrap_or_default()
+}
+
+/// Walk a node, tracking which object numbers have been entered.
+///
+/// The reference is carried alongside the dictionary because a dictionary has no
+/// identity of its own, and a cycle is a property of the references. A `/Self` key
+/// would do, but the specification has no such key: only a test that wrote one would
+/// carry it.
 fn walk(
     resolver: &dyn Resolver,
+    id: Ref,
     node: &Dict,
     inherited: &Inheritable,
     out: &mut Vec<Page>,
@@ -279,11 +301,11 @@ fn walk(
             limit: MAX_TREE_ENTRIES,
         });
     }
-    // A node may appear twice, but only once on any single path: a shared subtree is
-    // legal to *skip*, while a cycle must not be followed.
-    if let Some(r) = node.get("Self").and_then(Object::as_ref_id)
-        && !seen.insert(r)
-    {
+    // A node may appear twice, but only once on the walk: a shared subtree is legal to
+    // skip, and a cycle must not be followed. Both are handled the same way, because the
+    // only thing that differs is why the second visit happened and neither is a reason
+    // to lose the pages that are there.
+    if !seen.insert(id) {
         return Ok(());
     }
 
@@ -299,13 +321,14 @@ fn walk(
         return Ok(());
     }
 
-    for kid in kids_of(resolver, node) {
-        let Some(kid) = kid.as_dict().cloned() else {
-            // A `/Kids` entry that is not a dictionary is damage; skipping it keeps
-            // the pages around it.
+    for kid in kid_refs_of(resolver, node) {
+        // The reference is what identifies the node; the dictionary is what describes
+        // it. A `/Kids` entry that is neither is damage, and skipping it keeps the pages
+        // around it.
+        let Some(dict) = resolver.resolve(kid).and_then(|o| o.as_dict().cloned()) else {
             continue;
         };
-        walk(resolver, &kid, &here, out, seen, depth + 1)?;
+        walk(resolver, kid, &dict, &here, out, seen, depth + 1)?;
     }
     Ok(())
 }

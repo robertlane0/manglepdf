@@ -8,7 +8,7 @@ Where the work actually is. Updated whenever a milestone moves.
 |---|---|---|
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
-| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | not started |
+| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist; there is no renderer, so nothing is painted |
 | **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | not started |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
@@ -40,6 +40,11 @@ Where the work actually is. Updated whenever a milestone moves.
   a deletion and carries `/ID` forward.
 - **`mangle-doc`** — the page tree with attribute inheritance, name trees, outlines and
   destinations, page labels, optional-content groups, attachments and metadata.
+- **`mangle-content`** — content streams. Every token, every operator and every mark
+  carries the bytes it came from, which is what makes a selection a byte range and an
+  edit a single rewrite. The operator table is the specification's, the graphics state is
+  a value rather than a place, and a test proves across the whole corpus that every mark
+  names bytes that are inside the page it came from.
 - **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`.
   This is how "what does ManglePDF think of this file?" is asked without a window.
 - **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one
@@ -51,7 +56,7 @@ Where the work actually is. Updated whenever a milestone moves.
 
 ## Tests
 
-212, none ignored, no warnings. Three kinds matter:
+310, none ignored, no warnings. Four kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -62,18 +67,29 @@ Where the work actually is. Updated whenever a milestone moves.
 - **Corpus** — every Tier-A fixture is opened and checked against its manifest: the
   hash, the page count, whether a repair happened, whether a save reports a dangling
   reference, and that the secrets in `F33` really are in the file.
+- **Provenance** — a page is opened, its streams are read, tokenised and run, and every
+  mark is checked against the bytes it names. Rewriting a mark's string operand changes
+  that mark and leaves every other mark's content alone, which is the property the whole
+  content layer exists to provide.
 
 ## Gaps, in the order they block
 
-1. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
-   from the object model.
-2. **No renderer.** Nothing rasterizes a page, so the canvas draws paper and nothing else.
-3. **JBIG2 and JPX are not implemented.**
-4. **An object that came out of an object stream cannot keep its original bytes**,
+1. **No renderer.** Nothing rasterizes a page, so the canvas draws paper and nothing
+   else. `mangle-content` produces the marks and their byte ranges; `mangle-render` has
+   to turn those into pixels.
+2. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
+   from the marks the content layer now produces.
+3. **A glyph is one byte here.** Deciding which bytes of a string are glyphs, and how
+   wide each one is, needs the font and the encoding, so `mangle-content` uses the
+   conventional 500-unit average and says so. The font layer replaces it with real
+   metrics; until then text positions on a page are approximate and the *text itself* is
+   exact.
+4. **JBIG2 and JPX are not implemented.**
+5. **An object that came out of an object stream cannot keep its original bytes**,
    because it had none: it was compressed with everything else in its container. A full
    save writes it as a direct object, which every reader accepts but which is a
    re-serialisation rather than a copy.
-5. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
+6. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
 
 ## Known limitations in the finished layers
 

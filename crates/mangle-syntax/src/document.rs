@@ -212,6 +212,17 @@ impl Document {
 
     /// Fetch a shared object, avoiding a copy on repeated reads.
     #[must_use]
+    /// Follow a reference once.
+    ///
+    /// Every place that reads a dictionary entry which "may be a reference" needs this,
+    /// and each one writing its own version is a chance to get the indirect case wrong.
+    pub fn resolve_object(&self, obj: &Object) -> Option<Object> {
+        match obj {
+            Object::Ref(r) => self.object(*r),
+            other => Some(other.clone()),
+        }
+    }
+
     pub fn shared(&self, r: Ref) -> Option<Arc<Object>> {
         if self.removed.read().ok()?.contains(&r) {
             return None;
