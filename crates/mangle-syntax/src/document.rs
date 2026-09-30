@@ -445,6 +445,18 @@ impl Document {
     pub fn object_numbers(&self) -> Vec<u32> {
         self.with_xref(|x| x.object_numbers().collect())
     }
+
+    /// The object numbers that have been removed from the graph.
+    #[must_use]
+    pub fn removed_refs(&self) -> std::collections::BTreeSet<Ref> {
+        self.removed.read().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// The trailer's `/Info` reference, if the file has one.
+    #[must_use]
+    pub fn info_ref(&self) -> Option<Ref> {
+        self.with_xref(|x| x.trailer().get("Info").and_then(Object::as_ref_id))
+    }
 }
 
 fn merge_inherited(d: &Dict, parent: Option<&Dict>) -> Dict {

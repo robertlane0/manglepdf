@@ -21,7 +21,10 @@ pub enum StreamCompression {
 }
 
 /// Options for a full rewrite.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The defaults are the classic layout: no object streams, no cross-reference stream,
+/// every reader accepts it, and nothing is written in a form we cannot yet round trip.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WriteOptions {
     /// Pack non-stream objects into object streams.
     pub use_object_streams: bool,
@@ -31,17 +34,12 @@ pub struct WriteOptions {
     pub file_id: Vec<u8>,
     /// Put non-stream objects into an object stream.
     pub compress_streams: bool,
-}
-
-impl Default for WriteOptions {
-    fn default() -> Self {
-        Self {
-            use_object_streams: true,
-            use_xref_streams: true,
-            file_id: Vec::new(),
-            compress_streams: true,
-        }
-    }
+    /// The version to declare in the header. The document's own, when it has one.
+    pub header_version: Option<String>,
+    /// The lowest `/Size` to write. `/Size` must be one more than the highest object
+    /// number, and it must not shrink when the highest object is deleted, or a reader
+    /// counts objects and disagrees with the file.
+    pub minimum_size: u32,
 }
 
 /// Write a single object into `out`. Public so the object-stream builder can use it.
@@ -158,6 +156,8 @@ pub struct IncrementalUpdate {
     pub size: u32,
     /// `/Info` to record, if any.
     pub info: Option<Ref>,
+    /// Objects this revision removes.
+    freed: BTreeSet<(u32, u16)>,
 }
 
 impl IncrementalUpdate {
@@ -168,6 +168,7 @@ impl IncrementalUpdate {
             generations: BTreeMap::new(),
             size,
             info: None,
+            freed: BTreeSet::new(),
         }
     }
 
@@ -190,20 +191,52 @@ impl IncrementalUpdate {
     /// True when nothing would be written.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.objects.is_empty() && self.info.is_none()
+        self.objects.is_empty() && self.info.is_none() && self.freed.is_empty()
+    }
+
+    /// Mark an object as free in this revision. A deletion has to be expressed, or the
+    /// object stays live in every later reader.
+    pub fn free(&mut self, num: u32, generation: u16) {
+        self.freed.insert((num, generation));
     }
 
     /// Append the update to `existing`, which must be the whole file so far.
     #[must_use]
     pub fn append(&self, existing: &[u8], prev_offset: u64, root: Option<Ref>) -> Vec<u8> {
+        self.append_with_id(existing, prev_offset, root, &[])
+    }
+
+    /// Append the update, carrying the document's `/ID` into the new trailer.
+    ///
+    /// `/ID` is a pair whose first half is fixed for the document's life and whose
+    /// second changes with each revision. The new second half is derived from the
+    /// bytes this revision introduces, which is deterministic and distinguishes it from
+    /// every earlier one.
+    #[must_use]
+    pub fn append_with_id(
+        &self,
+        existing: &[u8],
+        prev_offset: u64,
+        root: Option<Ref>,
+        file_id: &[u8],
+    ) -> Vec<u8> {
         let mut out = existing.to_vec();
         if !out.ends_with(b"\n") && !out.is_empty() {
             out.push(b'\n');
         }
         let start = out.len();
+        let mut offsets: Vec<(u32, XrefEntry)> = Vec::new();
         for (num, obj) in &self.objects {
             let generation = self.generations.get(num).copied().unwrap_or(0);
+            let at = out.len();
             write_indirect(*num, generation, obj, &mut out);
+            offsets.push((
+                *num,
+                XrefEntry::InFile {
+                    offset: at,
+                    generation,
+                },
+            ));
         }
         let mut trailer = Dict::new();
         if let Some(r) = root {
@@ -212,13 +245,47 @@ impl IncrementalUpdate {
         if let Some(i) = self.info {
             trailer.set("Info", Object::Ref(i));
         }
+        if !file_id.is_empty() {
+            let second = revision_id(out.get(start..).unwrap_or_default());
+            trailer.set(
+                "ID",
+                Object::Array(vec![
+                    Object::String(file_id.to_vec()),
+                    Object::String(second),
+                ]),
+            );
+        }
         trailer.set("Size", Object::Int(i64::from(self.size)));
         trailer.set("Prev", Object::Int(i64::try_from(prev_offset).unwrap_or(0)));
-        out.extend_from_slice(b"trailer\n");
-        write_dict(&mut out, &trailer);
-        out.extend_from_slice(format!("\nstartxref\n{start}\n%%EOF\n").as_bytes());
+        // The free entries have to be in this revision's table, or the object they
+        // remove stays live.
+        let freed: Vec<(u32, XrefEntry)> = self
+            .freed
+            .iter()
+            .map(|(n, g)| {
+                (
+                    *n,
+                    XrefEntry::Free {
+                        next: 0,
+                        generation: *g,
+                    },
+                )
+            })
+            .collect();
+        let table_at = out.len() as u64;
+        write_xref_table(&mut out, &offsets, &trailer, table_at, freed);
         out
     }
+}
+
+/// The second half of `/ID` for a revision, derived from the bytes it introduced.
+fn revision_id(bytes: &[u8]) -> Vec<u8> {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h.to_be_bytes().to_vec()
 }
 
 /// A full rewrite: mark-and-sweep from the trailer roots, then a fresh cross-reference.
@@ -269,11 +336,25 @@ impl<'a> Writer<'a> {
     }
 
     /// Write the whole file.
+    ///
+    /// `roots` are the trailer's indirect entries. The first is `/Root`; the caller
+    /// puts anything else (`/Info` and so on) in `extra_trailer`, where its key is
+    /// explicit and cannot be guessed wrong.
     #[must_use]
     pub fn write(&self, roots: &[Ref], extra_trailer: &Dict) -> Vec<u8> {
-        let live = self.reachable(roots);
+        // Every object the caller gave us, not only what the roots reach: an object
+        // nothing we follow may still be named by something we do not understand,
+        // and dropping it would be data loss.
+        let live = self.objects.clone();
         let mut out: Vec<u8> = Vec::with_capacity(64 * 1024);
-        out.extend_from_slice(b"%PDF-1.7\n");
+        let version = self
+            .options
+            .header_version
+            .as_deref()
+            .filter(|v| v.starts_with("1.") && v.len() <= 4)
+            .unwrap_or("1.7");
+        out.extend_from_slice(format!("%PDF-{version}\n").as_bytes());
+        // The binary comment marks the file as containing binary data.
         out.extend_from_slice(b"%\xe2\xe3\xcf\xd3\n");
 
         let mut xref: Vec<(u32, XrefEntry)> = Vec::new();
@@ -292,10 +373,18 @@ impl<'a> Writer<'a> {
                 },
             ));
         }
-        let size = live.keys().copied().max().unwrap_or(0) + 1;
+        // `/Size` is one more than the highest object number, and must not shrink when
+        // the highest object is deleted: a reader that counts objects would then
+        // disagree with the file.
+        let size = live
+            .keys()
+            .copied()
+            .max()
+            .map_or(0, |m| m + 1)
+            .max(self.options.minimum_size);
 
         let mut trailer = extra_trailer.clone();
-        for r in roots {
+        if let Some(r) = roots.first() {
             trailer.set(ROOT_KEY, Object::Ref(*r));
         }
         trailer.set("Size", Object::Int(i64::from(size)));
@@ -312,7 +401,7 @@ impl<'a> Writer<'a> {
         if self.options.use_xref_streams {
             write_xref_stream(&mut out, &xref, &trailer, start as u64);
         } else {
-            write_xref_table(&mut out, &xref, &trailer, start as u64);
+            write_xref_table(&mut out, &xref, &trailer, start as u64, Vec::new());
         }
         out
     }
@@ -351,11 +440,29 @@ fn collect_refs(obj: &Object, out: &mut Vec<Ref>, depth: usize) {
     }
 }
 
-fn write_xref_table(out: &mut Vec<u8>, rows: &[(u32, XrefEntry)], trailer: &Dict, start: u64) {
+/// Write a classic cross-reference table.
+///
+/// `rows` and `freed` are merged and sorted, so a number in both is written once: an
+/// object this revision removes must not also be written as live.
+fn write_xref_table(
+    out: &mut Vec<u8>,
+    rows: &[(u32, XrefEntry)],
+    trailer: &Dict,
+    start: u64,
+    freed: Vec<(u32, XrefEntry)>,
+) {
     out.extend_from_slice(b"xref\n");
+    let mut all: BTreeMap<u32, XrefEntry> = freed.into_iter().collect();
+    all.extend(rows.iter().map(|(n, e)| (*n, *e)));
+    // Object 0 is always present and always free; a table that omits it is malformed
+    // even though most readers cope.
+    all.entry(0).or_insert(XrefEntry::Free {
+        next: 0,
+        generation: 65535,
+    });
+
+    let sorted: Vec<(u32, XrefEntry)> = all.into_iter().collect();
     // One subsection per contiguous run, which is what every producer does.
-    let mut sorted: Vec<(u32, XrefEntry)> = rows.to_vec();
-    sorted.sort_by_key(|(n, _)| *n);
     let mut i = 0usize;
     while let Some(&(start_num, _)) = sorted.get(i) {
         let mut j = i;
@@ -366,14 +473,14 @@ fn write_xref_table(out: &mut Vec<u8>, rows: &[(u32, XrefEntry)], trailer: &Dict
         }
         out.extend_from_slice(format!("{} {}\n", start_num, j - i + 1).as_bytes());
         for (_, e) in sorted.get(i..=j).unwrap_or_default() {
-            let (offset, generation) = match e {
+            let (offset, generation, kind) = match e {
                 XrefEntry::InFile { offset, generation } => {
-                    (u64::try_from(*offset).unwrap_or(0), *generation)
+                    (u64::try_from(*offset).unwrap_or(0), *generation, 'n')
                 }
-                XrefEntry::Free { next, generation } => (u64::from(*next), *generation),
-                _ => (0, 0),
+                XrefEntry::Free { next, generation } => (u64::from(*next), *generation, 'f'),
+                _ => (0, 0, 'f'),
             };
-            out.extend_from_slice(format!("{offset:010} {generation:05} n \n").as_bytes());
+            out.extend_from_slice(format!("{offset:010} {generation:05} {kind} \n").as_bytes());
         }
         i = j + 1;
     }
@@ -468,7 +575,7 @@ mod tests {
         assert!(!out.iter().any(|b| b.is_ascii_alphabetic()), "{out:?}");
         let mut out = Vec::new();
         write_object_into(&mut out, &Object::Real(f64::NAN));
-        assert_eq!(out, b"0");
+        assert_eq!(out, b"0.0");
     }
 
     #[test]

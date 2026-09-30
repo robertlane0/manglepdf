@@ -508,17 +508,20 @@ impl Rect {
 }
 
 /// Format a number the way the writer does: no exponents, at most six decimals, no
-/// negative zero, and never NaN or infinity.
+/// negative zero, never NaN or infinity, and always looking like a real.
 #[must_use]
 pub fn format_number(v: f64) -> String {
     if !v.is_finite() {
-        return "0".to_string();
+        return "0.0".to_string();
     }
     if v == 0.0 {
-        return "0".to_string();
+        return "0.0".to_string();
     }
+    // An integral real still has to look like a real: `3` and `3.0` are the same
+    // number to a reader but not the same object, and a round trip must not turn one
+    // into the other.
     if v.fract() == 0.0 && v.abs() < 1e15 {
-        return format!("{}", v as i64);
+        return format!("{v:.1}");
     }
     let mut s = format!("{v:.6}");
     if s.contains('.') {
@@ -532,6 +535,10 @@ pub fn format_number(v: f64) -> String {
     // `format!` can produce "-0"; never write that.
     if s == "-0" {
         s = "0".to_string();
+    }
+    // A value small enough to round away entirely still has to keep its point.
+    if !s.contains('.') {
+        s.push_str(".0");
     }
     s
 }
@@ -585,17 +592,17 @@ mod tests {
 
     #[test]
     fn numbers_are_written_without_exponents() {
-        assert_eq!(format_number(1.0), "1");
-        assert_eq!(format_number(-0.0), "0");
+        assert_eq!(format_number(1.0), "1.0");
+        assert_eq!(format_number(-0.0), "0.0");
         assert_eq!(format_number(1.5), "1.5");
         assert_eq!(format_number(1.500_000_1), "1.5");
-        assert_eq!(format_number(0.000_000_1), "0");
+        assert_eq!(format_number(0.000_000_1), "0.0");
         // Exponents are expanded, at the cost of the precision f64 already lost.
         let big = format_number(6.02e23);
         assert!(!big.contains('e') && !big.contains('E'), "{big}");
         assert!(big.parse::<f64>().is_ok());
-        assert_eq!(format_number(f64::NAN), "0");
-        assert_eq!(format_number(f64::INFINITY), "0");
+        assert_eq!(format_number(f64::NAN), "0.0");
+        assert_eq!(format_number(f64::INFINITY), "0.0");
         assert_eq!(format_number(-1.234_567_8), "-1.234568");
     }
 

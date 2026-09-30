@@ -26,6 +26,7 @@ pub mod object;
 pub mod objstm;
 pub mod parser;
 pub mod recovery;
+pub mod save;
 pub mod stream;
 pub mod writer;
 pub mod xref;
@@ -36,6 +37,7 @@ pub use lexer::{Lexer, Token};
 pub use object::{Dict, Name, Object, Rect, Ref, Stream};
 pub use objstm::ObjectStream;
 pub use parser::Parser;
+pub use save::{SaveMode, SaveOptions, SaveReport};
 pub use writer::{IncrementalUpdate, WriteOptions, Writer};
 pub use xref::{Xref, XrefEntry};
 

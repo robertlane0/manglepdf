@@ -26,6 +26,13 @@ pub enum Recovery {
 }
 
 impl Recovery {
+    /// Whether the file opened exactly as written. Anything else means the reader
+    /// should tell the user, because a repaired file behaves differently on save.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        matches!(self, Recovery::Clean)
+    }
+
     /// A banner for the UI, or `None` when the file was clean.
     #[must_use]
     pub fn banner(&self) -> Option<String> {
