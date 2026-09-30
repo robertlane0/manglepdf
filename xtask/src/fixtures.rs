@@ -14,7 +14,7 @@ pub(crate) fn cmd(args: &[String]) -> Result<(), String> {
     let mut check = false;
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        match args.get(i).map_or("", String::as_str) {
             "--seed" => {
                 i += 1;
                 seed = args
@@ -100,11 +100,11 @@ fn verify_determinism(
     }
 }
 
-fn diff_dirs(a: &std::path::Path, b: &std::path::Path) -> (usize, Vec<String>) {
+fn diff_dirs(expected: &std::path::Path, actual: &std::path::Path) -> (usize, Vec<String>) {
     let mut checked = 0usize;
     let mut differing = Vec::new();
-    let Ok(entries) = std::fs::read_dir(a) else {
-        return (0, vec![format!("{} is missing", a.display())]);
+    let Ok(entries) = std::fs::read_dir(expected) else {
+        return (0, vec![format!("{} is missing", expected.display())]);
     };
     for e in entries.flatten() {
         let p = e.path();
@@ -115,13 +115,14 @@ fn diff_dirs(a: &std::path::Path, b: &std::path::Path) -> (usize, Vec<String>) {
             continue;
         }
         checked += 1;
-        let other = b.join(e.file_name());
-        let (x, y) = match (std::fs::read(&p), std::fs::read(&other)) {
-            (Ok(x), Ok(y)) => (x, y),
-            _ => {
-                differing.push(format!("{} could not be regenerated", p.display()));
-                continue;
-            }
+        let other = actual.join(e.file_name());
+        let Ok(x) = std::fs::read(&p) else {
+            differing.push(format!("{} could not be read", p.display()));
+            continue;
+        };
+        let Ok(y) = std::fs::read(&other) else {
+            differing.push(format!("{} could not be regenerated", p.display()));
+            continue;
         };
         if x != y {
             differing.push(e.file_name().to_string_lossy().to_string());

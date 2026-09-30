@@ -418,7 +418,7 @@ fn g0_6_panics(ws: &Workspace) -> Check {
             || m.dir.clone(),
             |t| t.src_path.parent().unwrap_or(&m.dir).to_path_buf(),
         );
-        let lib = std::fs::read_to_string(&root.join("lib.rs")).unwrap_or_default();
+        let lib = std::fs::read_to_string(root.join("lib.rs")).unwrap_or_default();
         for deny in REQUIRED_DENIES {
             if !lib.contains(deny) {
                 findings.push(format!("{}: lib.rs does not deny {deny}", m.name));
@@ -628,5 +628,5 @@ fn justifications(path: &Path) -> BTreeSet<String> {
 fn tail(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(25);
-    lines[start..].join("\n")
+    lines.get(start..).unwrap_or_default().join("\n")
 }

@@ -98,7 +98,7 @@ impl Workspace {
         let first_party = |pkg: &serde_json::Value| -> bool {
             pkg.get("id")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| workspace_members.iter().any(|m| *m == id))
+                .is_some_and(|id| workspace_members.contains(&id))
         };
 
         let mut members = Vec::new();

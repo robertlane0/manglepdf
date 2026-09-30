@@ -28,7 +28,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map_or("help", String::as_str);
-    let rest = if args.is_empty() { &[] } else { &args[1..] };
+    let rest = args.get(1..).unwrap_or_default();
 
     let result = match command {
         "policy" => policy::cmd(rest),

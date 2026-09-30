@@ -297,9 +297,7 @@ fn call_path(call: &syn::ExprCall) -> Option<&syn::Path> {
 }
 
 fn path_mentions(path: &syn::Path, needle: &str) -> bool {
-    path.segments
-        .iter()
-        .any(|s| s.ident == needle || s.ident.to_string() == needle)
+    path.segments.iter().any(|s| s.ident == needle)
 }
 
 fn is_unsafe_allow(attr: &syn::Attribute) -> bool {

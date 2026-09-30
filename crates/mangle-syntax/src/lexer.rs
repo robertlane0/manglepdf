@@ -148,14 +148,9 @@ impl<'a> Lexer<'a> {
                 });
             };
             match b {
-                b'>' if self.data.get(self.pos + 1) != Some(&b'>') => {
-                    self.pos += 1;
-                    continue;
-                }
-                b')' => {
-                    self.pos += 1;
-                    continue;
-                }
+                // A lone `>` and a `)` cannot start a token.
+                b'>' if self.data.get(self.pos + 1) != Some(&b'>') => self.pos += 1,
+                b')' => self.pos += 1,
                 _ => break start,
             }
         };

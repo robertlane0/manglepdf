@@ -163,16 +163,14 @@ fn expected_size(stream: &Stream, _raw: &[u8]) -> usize {
             .unwrap_or(8);
         let colors = stream.dict.get("ColorSpace").map_or(3, color_components);
         // Untrusted dimensions: saturate rather than overflow.
-        let bits = i64::from(u16::try_from(w.clamp(0, u16::MAX as i64)).unwrap_or(u16::MAX))
-            .saturating_mul(i64::from(
-                u16::try_from(h.clamp(0, u16::MAX as i64)).unwrap_or(u16::MAX),
-            ))
-            .saturating_mul(i64::from(
-                u16::try_from(bpc.clamp(0, u16::MAX as i64)).unwrap_or(u16::MAX),
-            ))
-            .saturating_mul(i64::from(
-                u16::try_from(colors.clamp(0, u16::MAX as i64)).unwrap_or(u16::MAX),
-            ));
+        // Every factor is untrusted, so each is clamped before it can overflow the
+        // product, and the product itself saturates.
+        let factor =
+            |v: i64| i64::from(u16::try_from(v.clamp(0, i64::from(u16::MAX))).unwrap_or(0));
+        let bits = factor(w)
+            .saturating_mul(factor(h))
+            .saturating_mul(factor(bpc))
+            .saturating_mul(factor(colors));
         let bytes = bits.saturating_add(7) / 8;
         return usize::try_from(bytes.max(0)).unwrap_or(usize::MAX);
     }

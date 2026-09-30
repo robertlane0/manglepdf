@@ -61,7 +61,8 @@ fn lint(dir: &std::path::Path) -> Result<(), String> {
         let _ = where_;
     }
     // Duplicate shapes under different names defeat the point of a consistent set.
-    let mut by_hash: std::collections::BTreeMap<u64, Vec<String>> = Default::default();
+    let mut by_hash: std::collections::BTreeMap<u64, Vec<String>> =
+        std::collections::BTreeMap::new();
     for f in &files {
         let Ok(bytes) = std::fs::read(f) else {
             continue;
@@ -113,9 +114,11 @@ fn gallery(dir: &std::path::Path, root: &std::path::Path) -> Result<(), String> 
         let Ok(text) = std::fs::read_to_string(f) else {
             continue;
         };
-        html.push_str(&format!(
-            "<figure>{text}<figcaption>{name}</figcaption></figure>\n"
-        ));
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            html,
+            "<figure>{text}<figcaption>{name}</figcaption></figure>"
+        );
     }
     html.push_str("</div>\n");
     std::fs::write(&sheet, html).map_err(|e| format!("writing {}: {e}", sheet.display()))?;
