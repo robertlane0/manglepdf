@@ -13,11 +13,50 @@ A from-scratch desktop PDF viewer and editor written in safe Rust (edition 2024)
 
 ## Layout
 
-Filled in by `docs/ARCHITECTURE.md` once milestone M0 lands.
+One workspace; dependencies flow one way and a lower crate never names a higher one.
+
+| Path | What lives there |
+|---|---|
+| `crates/mangle-filters` | Flate, LZW, RunLength, ASCII85/Hex, predictors, CCITT |
+| `crates/mangle-crypto` | RC4, AES, MD5, SHA, the standard security handler |
+| `crates/mangle-syntax` | Object model, lexer, parser, cross-references, recovery, writer |
+| `crates/mangle-doc` | Catalogue, page tree, name trees, outlines, labels, layers |
+| `crates/mangle-font` | Font programs, encodings, CMaps, metrics, subsetting |
+| `crates/mangle-content` | Content streams with byte provenance, the interpreter |
+| `crates/mangle-render` | The rasterizer |
+| `crates/mangle-text` | Extraction, reading order, search |
+| `crates/mangle-edit` | Commands, undo, write-back, annotations, forms, redaction |
+| `crates/mangle-ui` | The application |
+| `tools/fixturegen` | Deterministic fixtures, with no dependency on the product |
+| `xtask` | `cargo xtask policy`, fixtures, icons, the acceptance run |
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how they fit together and
+[`docs/STATUS.md`](docs/STATUS.md) for what is actually built.
 
 ## Building
 
-See `docs/DEV.md` (created during M0).
+```sh
+cargo build
+cargo test --workspace
+cargo xtask policy
+```
+
+See [`docs/DEV.md`](docs/DEV.md).
+
+## Documentation
+
+| | |
+|---|---|
+| [`PLAN.md`](PLAN.md) | What is being built now, and in what order |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crates, losslessness, bounded work |
+| [`docs/STATUS.md`](docs/STATUS.md) | Milestone state and the honest gap list |
+| [`docs/DEV.md`](docs/DEV.md) | The development loop |
+| [`docs/TESTING.md`](docs/TESTING.md) | Test layers, oracles, tolerances |
+| [`docs/PDF-QUIRKS.md`](docs/PDF-QUIRKS.md) | Facts about the format that bite |
+| [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) | Every dependency and why it is not in-house |
+| [`docs/ICONS.md`](docs/ICONS.md) | The icon set and how it is drawn |
+| [`docs/decisions/`](docs/decisions/) | Architectural decision records |
+| [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) | Bundled assets and their licences |
 
 ## Trademarks
 
