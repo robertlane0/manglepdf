@@ -1,1 +1,65 @@
 AGENTS.md
+# NOTE: gitignore comments must be on their own lines (a trailing "# ..." becomes part of the pattern).
+
+# --- Rust ---
+/target/
+**/*.rs.bk
+*.profraw
+*.profdata
+# `cargo vendor` output: regenerate, don't commit
+/vendor/
+
+# --- Editors / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- Scratch space (agents and humans) ---
+/scratch/
+/tmp/
+
+# --- Secrets and key material ---
+# Test certificates are generated deterministically by tools/fixturegen. Never commit keys.
+.env
+.env.*
+*.p12
+*.pfx
+*.pem
+*.key
+*.jks
+
+# --- PDFs: ignored by default so stray outputs and downloads can't be committed ---
+# Tracked PDFs live only in fixtures/small/ and under tests/ (regression repros, goldens).
+# For anything else use `git add -f` deliberately, with a licence entry in a SOURCES.md.
+*.pdf
+!**/fixtures/small/**/*.pdf
+!**/tests/**/*.pdf
+
+# --- Corpora and generated fixtures ---
+# Ignore everything under corpus/ except directories (so git can descend), README.md and SOURCES.md.
+/corpus/**
+!/corpus/**/
+!/corpus/README.md
+!/corpus/**/SOURCES.md
+/fixtures/generated/
+
+# --- Downloaded reference material (specs and papers are not redistributable) ---
+/docs/reference/
+
+# --- Acceptance evidence: heavy directories stay local or archived out-of-band ---
+# REPORT.md, env.json and checks.jsonl inside each run directory ARE tracked.
+/docs/acceptance/RUN-*/*
+!/docs/acceptance/RUN-*/REPORT.md
+!/docs/acceptance/RUN-*/env.json
+!/docs/acceptance/RUN-*/checks.jsonl
+*.tar.zst
+
+# --- Profiling / fuzzing byproducts (tests/regressions/ is tracked) ---
+perf.data*
+flamegraph.svg
+*.trace
+/fuzz-artifacts/
+

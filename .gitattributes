@@ -1,0 +1,41 @@
+# Normalise line endings for text files only.
+* text=auto eol=lf
+
+# PDFs and other binaries must NEVER be touched by a line-ending filter.
+# Fixtures deliberately contain CR-only lines, CRLF, stray bytes and truncation that a
+# filter would silently "repair" (an ASCII-only PDF can look like text to git's heuristics).
+*.pdf   binary
+*.fdf   binary
+*.pfb   binary
+*.pfa   binary
+*.ttf   binary
+*.otf   binary
+*.ttc   binary
+*.woff  binary
+*.woff2 binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.jp2   binary
+*.j2k   binary
+*.jpx   binary
+*.jb2   binary
+*.jbig2 binary
+*.tif   binary
+*.tiff  binary
+*.p12   binary
+*.pfx   binary
+*.der   binary
+*.zst   binary
+*.gz    binary
+*.zip   binary
+
+# Data files that must round-trip byte-for-byte (CMaps, glyph lists, AFM metrics).
+/assets/cmaps/** -text
+/assets/data/**  -text
+
+# Scripts
+*.sh  text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+

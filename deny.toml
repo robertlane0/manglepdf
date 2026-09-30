@@ -1,0 +1,101 @@
+# cargo-deny policy for ManglePDF (project licence: MIT OR Apache-2.0).
+#
+# Written for cargo-deny >= 0.16. If your installed version rejects a key, fix the
+# schema, not the intent. Run:
+#   cargo deny check                          (everything; advisories need network)
+#   cargo deny check licenses bans sources    (offline-safe)
+# Changes to this file need an ADR (docs/decisions/).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Every ignore needs a comment: advisory id, reason, date.
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+# Permissive licences only. Deliberately NOT allowed: GPL, AGPL, LGPL, EUPL, SSPL,
+# CC-BY-NC and other copyleft or non-commercial licences.
+# MPL-2.0 (file-level copyleft) is not listed: using it needs an ADR.
+# Font licences (OFL-1.1, Ubuntu-font-1.0) belong to font *assets*: add a per-crate
+# exception below when a needed crate bundles fonts; never allow them globally.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]
+exceptions = [
+    # { allow = ["OFL-1.1", "Ubuntu-font-1.0"], crate = "example-font-crate" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+# PDF parsing / writing / rendering / extraction / signing libraries (Charter section 2.3).
+# Non-exhaustive: unknown names are harmless here, and `cargo xtask policy` additionally
+# scans crate metadata (name, description, keywords, repository) for PDF provenance.
+# Deliberately not listed: general graphics stacks (cairo, skia, GTK, ...). Those are
+# judged case by case (unused PDF backends only; no C/C++ for application-domain logic).
+deny = [
+    # Rust PDF crates
+    { crate = "lopdf" },
+    { crate = "pdf" },
+    { crate = "pdf_derive" },
+    { crate = "pdf-writer" },
+    { crate = "pdf_writer" },
+    { crate = "pdf-extract" },
+    { crate = "pdf_extract" },
+    { crate = "pdf-canvas" },
+    { crate = "printpdf" },
+    { crate = "genpdf" },
+    { crate = "krilla" },
+    { crate = "krilla-svg" },
+    { crate = "svg2pdf" },
+    { crate = "typst-pdf" },
+    { crate = "pdf-oxide" },
+    { crate = "pdf_oxide" },
+    { crate = "oxidize-pdf" },
+    { crate = "pdfrs" },
+    { crate = "pdf-form" },
+    { crate = "extractous" },
+    { crate = "hayro" },
+    { crate = "hayro-syntax" },
+    { crate = "hayro-interpret" },
+    { crate = "hayro-render" },
+    { crate = "hayro-jpeg2000" },
+    { crate = "hayro-jbig2" },
+    { crate = "hayro-ccitt" },
+    # Bindings to native PDF engines / tools
+    { crate = "pdfium-render" },
+    { crate = "pdfium-sys" },
+    { crate = "pdfium" },
+    { crate = "mupdf" },
+    { crate = "mupdf-sys" },
+    { crate = "poppler" },
+    { crate = "poppler-rs" },
+    { crate = "poppler-sys" },
+    { crate = "qpdf" },
+    { crate = "qpdf-sys" },
+    { crate = "ghostscript" },
+    { crate = "wkhtmltopdf" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
