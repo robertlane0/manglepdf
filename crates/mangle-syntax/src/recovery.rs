@@ -110,14 +110,15 @@ pub fn read_or_repair(data: &[u8]) -> Result<(Xref, Recovery)> {
         if scanned.is_empty() {
             return Ok((xref, Recovery::Failed { notes }));
         }
-        // Scanned entries fill gaps; the file's own entries still win where present and
-        // plausible, because a later definition is normally the live one.
+        // Once we are rebuilding, the scan is authoritative. A file's own offset is
+        // only preferred when it agrees, because a wrong offset very often lands on
+        // *another* object's header and so looks entirely plausible — which is exactly
+        // the case a reader must recover from rather than trust.
         for (num, offset) in scanned {
             let replace = match xref.get(num) {
                 None | Some(XrefEntry::Missing) => true,
-                Some(XrefEntry::InFile { offset: o, .. }) => {
-                    !looks_like_object(data, o) && looks_like_object(data, offset)
-                }
+                Some(XrefEntry::InFile { offset: o, .. }) => o != offset,
+                // An object stream is found by its own scan, not by scanning for `obj`.
                 Some(XrefEntry::InStream { .. }) => false,
                 Some(XrefEntry::Free { .. }) => false,
             };

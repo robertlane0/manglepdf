@@ -59,3 +59,8 @@ perf.data*
 flamegraph.svg
 *.trace
 /fuzz-artifacts/
+
+# Generated fixtures: regenerate with `cargo xtask fixtures`, do not hand-edit.
+# The small structural ones are checked in deliberately; the scale ones are not.
+/fixtures/F2[789]*_*.pdf
+/fixtures/F30_*.pdf

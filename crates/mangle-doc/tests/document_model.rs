@@ -7,6 +7,7 @@
 
 // A test states its expectations with `expect` and fails loudly when they are not met.
 // The panic-free rule is about what the product does with a file, not about tests.
+#![forbid(unsafe_code)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

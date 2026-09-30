@@ -288,6 +288,7 @@ fn g0_3_dependencies(ws: &Workspace) -> Check {
 
 fn g0_4_no_process_spawning(ws: &Workspace) -> Check {
     let mut findings = Vec::new();
+    let mut test_only = 0usize;
     for (name, scan) in scan_workspace(ws) {
         // The rule is about product code. `xtask` and `fixturegen` are build tooling
         // whose whole job is to run other programs.
@@ -305,11 +306,19 @@ fn g0_4_no_process_spawning(ws: &Workspace) -> Check {
             if allowed.iter().any(|a| rel == *a) {
                 continue;
             }
+            // The charter allows external tools as test oracles in dev and test
+            // scripts: never linked, never called from product code, never required
+            // for the tests to pass. A file under `tests/` is exactly that.
+            if rel.contains("/tests/") || rel.ends_with("/tests.rs") {
+                test_only += 1;
+                continue;
+            }
             findings.push(format!("{name}: {rel}:{}: {}", f.line, f.text));
         }
     }
     if findings.is_empty() {
         Check::pass("G0.4", "no process spawning outside the audited module")
+            .note(format!("{test_only} oracle calls are confined to tests"))
     } else {
         Check::fail(
             "G0.4",

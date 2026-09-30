@@ -5,6 +5,7 @@
 //! skip and returns. What it tells us that our own round trip cannot is whether the
 //! file is *valid*, rather than merely re-readable by the code that wrote it.
 
+#![forbid(unsafe_code)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

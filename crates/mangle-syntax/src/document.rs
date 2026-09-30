@@ -399,7 +399,11 @@ impl Document {
             });
         }
         if !seen.insert(node) {
-            return Err(Error::Cycle("the page tree"));
+            // A node reached twice is a loop. Skipping it keeps every page the file
+            // really has, which is what a reader must do: the pages around the cycle are
+            // perfectly readable, and failing on the whole document over one bad `/Kids`
+            // entry is the wrong trade.
+            return Ok(());
         }
         let Some(obj) = self.object(node) else {
             return Ok(());

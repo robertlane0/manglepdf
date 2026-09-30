@@ -7,6 +7,7 @@
 //! The files here are built by hand rather than by a fixture generator, so the
 //! expected bytes are visible in the test and cannot drift with the code.
 
+#![forbid(unsafe_code)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
