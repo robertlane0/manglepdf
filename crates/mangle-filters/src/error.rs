@@ -10,10 +10,16 @@ pub enum FilterError {
     UnsupportedFilter(String),
     /// A decode parameter was outside the range the specification allows.
     #[error("invalid decode parameter for `{filter}`: {reason}")]
-    BadParameters { filter: &'static str, reason: String },
+    BadParameters {
+        filter: &'static str,
+        reason: String,
+    },
     /// Decoding stopped early. The bytes produced so far are still valid.
     #[error("`{filter}` data is damaged: {reason}")]
-    Damaged { filter: &'static str, reason: String },
+    Damaged {
+        filter: &'static str,
+        reason: String,
+    },
     /// The output would exceed the configured cap.
     #[error("`{filter}` output exceeded the {limit} byte limit")]
     OutputTooLarge { filter: &'static str, limit: usize },

@@ -1,6 +1,12 @@
 //! The standard security handler: key derivation for revisions 2 to 6, and per-object
 //! decryption.
 
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 use crate::aes::{AesDecryptor, AesEncryptor, add_pkcs7};
 use crate::error::{CryptoError, Result};
 use crate::permissions::Permissions;
@@ -71,6 +77,19 @@ pub struct Decryptor {
     /// True once the key has been wrapped in AES-256 (revision 6).
     aesv3: bool,
     encrypt_metadata: bool,
+}
+
+impl Decryptor {
+    /// Build a decryptor for a known key. Used when a caller already has one.
+    #[must_use]
+    pub fn new(key: Vec<u8>, algorithm: Algorithm, encrypt_metadata: bool) -> Self {
+        Self {
+            aesv3: matches!(algorithm, Algorithm::AesV3),
+            key,
+            algorithm,
+            encrypt_metadata,
+        }
+    }
 }
 
 impl Decryptor {
@@ -175,7 +194,7 @@ impl Decryptor {
                 out.extend_from_slice(&iv);
                 // `AesEncryptor` keeps the chain, so one instance covers the whole
                 // message; creating it per block would restart the IV every time.
-                let mut enc = crate::aes::AesEncryptor::new(&key, &iv);
+                let mut enc = AesEncryptor::new(&key, &iv);
                 if let Some(e) = enc.as_mut() {
                     for chunk in padded.chunks(16) {
                         let mut block = [0u8; 16];
@@ -190,13 +209,6 @@ impl Decryptor {
                 out
             }
         }
-    }
-}
-
-impl crate::aes::AesEncryptor {
-    /// Apply the ECB core to one block, advancing the chain. Used by `Decryptor`.
-    pub(crate) fn as_mut(&mut self) -> Option<&mut Self> {
-        Some(self)
     }
 }
 
@@ -282,13 +294,12 @@ pub fn validate_user_password(
     if !constant_time_eq(&u, dict.u.get(..expected).unwrap_or(&[])) {
         return Err(CryptoError::BadPassword);
     }
-    let algorithm = if matches!(revision, Revision::R4)
-        && dict.sub_filter.as_deref() == Some("AESV2")
-    {
-        Algorithm::AesV2
-    } else {
-        Algorithm::Rc4
-    };
+    let algorithm =
+        if matches!(revision, Revision::R4) && dict.sub_filter.as_deref() == Some("AESV2") {
+            Algorithm::AesV2
+        } else {
+            Algorithm::Rc4
+        };
     Ok((
         Decryptor {
             key,
@@ -366,7 +377,10 @@ fn owner_key_256(dict: &EncryptionDict, password: &[u8]) -> Option<Vec<u8>> {
     input.extend_from_slice(dict.o.get(32..40)?);
     input.extend_from_slice(u_bytes);
     let revision = Revision::from_v(dict.revision);
-    if !constant_time_eq(&hash_2b(password, &input, u_bytes, revision), dict.o.get(..32)?) {
+    if !constant_time_eq(
+        &hash_2b(password, &input, u_bytes, revision),
+        dict.o.get(..32)?,
+    ) {
         return None;
     }
     let mut input = password.to_vec();
@@ -382,13 +396,12 @@ fn aes256_cbc_decrypt(key: &[u8], data: &[u8]) -> Vec<u8> {
     if data.len() < 16 || data.len() % 16 != 0 {
         return Vec::new();
     }
-    let mut chain = [0u8; 16];
+    let chain = [0u8; 16];
     let Some(mut d) = AesDecryptor::new(key, &chain) else {
         return Vec::new();
     };
     let mut out = vec![0u8; data.len()];
     d.decrypt_into(data, &mut out);
-    chain = [0u8; 16];
     out
 }
 
@@ -416,7 +429,6 @@ pub fn prepare_user_password(dict: &EncryptionDict, key: &[u8]) -> Vec<u8> {
 #[must_use]
 /// Build `/O`. Algorithm 3: the key comes from the **owner** password, the payload is
 /// the **user** password.
-#[must_use]
 pub fn prepare_owner_password(dict: &EncryptionDict, user_pw: &[u8], owner_pw: &[u8]) -> Vec<u8> {
     let n = key_bytes(dict);
     let mut h = Md5::new();
@@ -480,9 +492,8 @@ fn hash_2b(password: &[u8], input: &[u8], extra: &[u8], revision: Revision) -> V
             round_key.copy_from_slice(a);
             iv.copy_from_slice(b);
         }
-        let mut enc = match AesEncryptor::new(&round_key, &iv) {
-            Some(e) => e,
-            None => break,
+        let Some(mut enc) = AesEncryptor::new(&round_key, &iv) else {
+            break;
         };
         enc.apply(&mut buf);
         e = buf;
@@ -506,26 +517,6 @@ fn last_byte(v: &[u8]) -> u8 {
 /// A hard cap on algorithm 2.B rounds, so a crafted `/U` cannot spin forever.
 const MAX_ROUNDS: i32 = 8192;
 
-/// AES-CBC without padding, which is what the R5/R6 password hashes use.
-fn aes_cbc_nopad(key: &[u8], data: &[u8], iv: Option<&[u8; 16]>) -> Vec<u8> {
-    if data.len() < 16 {
-        return Vec::new();
-    }
-    let mut chain = [0u8; 16];
-    if let Some(v) = iv {
-        chain.copy_from_slice(v);
-    } else if let Some(src) = data.get(..16) {
-        chain.copy_from_slice(src);
-    }
-    let body = if iv.is_some() { data } else { data.get(16..).unwrap_or(&[]) };
-    let Some(mut d) = AesDecryptor::new(key, &chain) else {
-        return Vec::new();
-    };
-    let mut out = vec![0u8; body.len()];
-    d.decrypt_into(body, &mut out);
-    out
-}
-
 /// Constant-time comparison for secrets.
 #[must_use]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -539,24 +530,22 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// SHA-256, exposed for the signer.
-#[must_use]
-pub fn digest_sha256(data: &[u8]) -> [u8; 32] {
-    sha256(data)
-}
-
-/// SHA-512, exposed for PAdES.
-#[must_use]
-pub fn digest_sha512(data: &[u8]) -> [u8; 64] {
-    sha512(data)
-}
-
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
+    /// Hex-encode for readable assertions.
     fn hex(d: &[u8]) -> String {
-        d.iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(d.len() * 2);
+        for b in d {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
     }
 
     #[test]
@@ -692,8 +681,12 @@ mod tests {
             key_length_bits: 256,
             permissions: -4,
             encrypt_metadata: true,
-            o: unhex("319d4d063b010beea3055d822a8144bc298f670c776f2ca8599a3fc68647bb5d1986ff7c45e23c51af255971fa633aa6"),
-            u: unhex("76f63ea5cd0341b28cb777bee52e62ba3aaea233e48457a5bfd07741687d3dd742f5a440ae726eeabe094ab6526ef2e9"),
+            o: unhex(
+                "319d4d063b010beea3055d822a8144bc298f670c776f2ca8599a3fc68647bb5d1986ff7c45e23c51af255971fa633aa6",
+            ),
+            u: unhex(
+                "76f63ea5cd0341b28cb777bee52e62ba3aaea233e48457a5bfd07741687d3dd742f5a440ae726eeabe094ab6526ef2e9",
+            ),
             ue: unhex("cc7792d105a068fd17589f582d6e0a2af80ae2a6a74692f062a727da239eb889"),
             oe: unhex("a4716034bb12c0eb4d297b023309b689ad96a25f2dde8c48e8036cc6fe5ce673"),
             perms: unhex("852cad069cfa0f889d2e9ba93524bdd3"),
@@ -741,7 +734,11 @@ mod tests {
         let (user, perms) = validate_user_password(&dict, b"user").expect("user password");
         assert_eq!(perms.bits(), -4);
         let owner = owner_password_key(&dict, b"owner").expect("owner password");
-        assert_eq!(user.key(), owner.key(), "both passwords give the same file key");
+        assert_eq!(
+            user.key(),
+            owner.key(),
+            "both passwords give the same file key"
+        );
         assert!(validate_user_password(&dict, b"wrong").is_err());
         assert!(owner_password_key(&dict, b"wrong").is_err());
         // The key really does decrypt a stream.
@@ -770,8 +767,3 @@ mod tests {
         assert_eq!(hex(&md5(b"")), "d41d8cd98f00b204e9800998ecf8427e");
     }
 }
-
-
-
-
-

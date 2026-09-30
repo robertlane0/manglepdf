@@ -106,7 +106,6 @@ unimplemented = "warn"
 indexing_slicing = "warn"
 float_cmp = "warn"
 large_stack_arrays = "warn"
-sliced_string = "warn"
 # Style kept close to idiomatic Rust; `clippy::all` is a warn, not a hard gate, so a
 # fresh lint release cannot turn the build red.
 all = { level = "warn", priority = -1 }

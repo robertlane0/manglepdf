@@ -31,11 +31,11 @@ mod lzw;
 mod predict;
 mod runlength;
 
+pub use deflate::{DeflateLevel, deflate};
 pub use error::{FilterError, FilterResult};
 pub use inflate::{InflateOutcome, inflate, inflate_raw};
-pub use deflate::{DeflateLevel, deflate};
 
-pub use ascii::{ascii85_decode, ascii_hex_decode};
+pub use ascii::{ascii_hex_decode, ascii85_decode};
 pub use ccitt::{CcittParams, Variant as CcittVariant, ccitt_decode};
 pub use lzw::{EarlyChange, lzw_decode, lzw_encode};
 pub use predict::{PredictorParams, predict, unpredict};
@@ -71,6 +71,10 @@ pub const MAX_EXPANSION_RATIO: usize = 1200;
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     #[test]
@@ -90,7 +94,11 @@ mod tests {
             },
         ];
         for case in cases {
-            for level in [DeflateLevel::Fast, DeflateLevel::Default, DeflateLevel::Best] {
+            for level in [
+                DeflateLevel::Fast,
+                DeflateLevel::Default,
+                DeflateLevel::Best,
+            ] {
                 let packed = deflate(&case, level);
                 let back = inflate(&packed, case.len());
                 assert!(back.complete, "level {level:?} did not complete");
@@ -103,7 +111,7 @@ mod tests {
     fn truncated_deflate_returns_prefix() {
         let data: Vec<u8> = (0..50_000u32).map(|i| (i % 97) as u8).collect();
         let packed = deflate(&data, DeflateLevel::Default);
-        let cut = &packed[..packed.len() / 2];
+        let cut = packed.get(..packed.len() / 2).unwrap_or(&[]);
         let back = inflate(cut, data.len());
         assert!(!back.complete);
         assert!(!back.data.is_empty());

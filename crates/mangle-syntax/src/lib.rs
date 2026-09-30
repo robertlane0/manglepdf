@@ -18,16 +18,17 @@
 )]
 #![warn(missing_debug_implementations)]
 
-mod decrypt;
-mod document;
-mod error;
-mod lexer;
-mod object;
-mod objstm;
-mod parser;
-mod recovery;
-mod writer;
-mod xref;
+pub mod decrypt;
+pub mod document;
+pub mod error;
+pub mod lexer;
+pub mod object;
+pub mod objstm;
+pub mod parser;
+pub mod recovery;
+pub mod stream;
+pub mod writer;
+pub mod xref;
 
 pub use document::{Document, DocumentInfo, OpenOptions, PageRef};
 pub use error::{Error, Result, Severity};
@@ -35,7 +36,7 @@ pub use lexer::{Lexer, Token};
 pub use object::{Dict, Name, Object, Rect, Ref, Stream};
 pub use objstm::ObjectStream;
 pub use parser::Parser;
-pub use writer::{IncrementalWriter, WriteOptions, Writer};
+pub use writer::{IncrementalUpdate, WriteOptions, Writer};
 pub use xref::{Xref, XrefEntry};
 
 /// An indirect object number and generation.

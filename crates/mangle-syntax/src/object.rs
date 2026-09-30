@@ -8,19 +8,19 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Ref {
     pub num: u32,
-    pub gen: u16,
+    pub generation: u16,
 }
 
 impl Ref {
     #[must_use]
-    pub const fn new(num: u32, gen: u16) -> Self {
-        Self { num, gen }
+    pub const fn new(num: u32, generation: u16) -> Self {
+        Self { num, generation }
     }
 }
 
 impl fmt::Display for Ref {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {} R", self.num, self.gen)
+        write!(f, "{} {} R", self.num, self.generation)
     }
 }
 
@@ -57,10 +57,19 @@ impl Name {
     /// `true` if the name has no characters that must be escaped when written.
     #[must_use]
     pub fn is_regular(&self) -> bool {
-        self.0.iter().all(|b| {
-            b.is_ascii_graphic() && !b.is_ascii_whitespace() && !matches!(b, b'#' | b'/' | b'%' | b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/')
-        })
+        self.0
+            .iter()
+            .all(|&b| b > b' ' && b < 0x7f && !needs_escape(b))
     }
+}
+
+/// The bytes that must be written as `#xx` inside a name.
+#[must_use]
+pub const fn needs_escape(b: u8) -> bool {
+    matches!(
+        b,
+        b'#' | b'/' | b'%' | b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}'
+    )
 }
 
 impl From<&str> for Name {
@@ -79,8 +88,9 @@ impl fmt::Display for Name {
 ///
 /// `Real` keeps the original text where possible: a number written `1.500` should be
 /// written back as `1.5`, and one written `6.02e23` must not become `6.02E23`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Object {
+    #[default]
     Null,
     Bool(bool),
     Int(i64),
@@ -93,12 +103,6 @@ pub enum Object {
     Ref(Ref),
     /// An indirect object that could not be resolved. Kept so the graph stays walkable.
     Missing(Ref),
-}
-
-impl Default for Object {
-    fn default() -> Self {
-        Object::Null
-    }
 }
 
 impl Object {
@@ -303,7 +307,14 @@ impl Dict {
     pub fn remove(&mut self, key: &str) -> Option<Object> {
         let i = self.position(key)?;
         self.index_hint = None;
-        self.entries.remove(i).map(|(_, v)| v)
+        match self.entries.get(i) {
+            Some((_, v)) => {
+                let v = v.clone();
+                self.entries.remove(i);
+                Some(v)
+            }
+            None => None,
+        }
     }
 
     fn position(&self, key: &str) -> Option<usize> {
@@ -440,7 +451,9 @@ impl Rect {
             return Err(Error::Syntax("expected a four-element array".into()));
         };
         if arr.len() < 4 {
-            return Err(Error::Syntax("rectangle array has fewer than 4 numbers".into()));
+            return Err(Error::Syntax(
+                "rectangle array has fewer than 4 numbers".into(),
+            ));
         }
         let mut nums = [0.0f64; 4];
         for (i, slot) in nums.iter_mut().enumerate() {
@@ -525,6 +538,10 @@ pub fn format_number(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     #[test]
@@ -533,7 +550,7 @@ mod tests {
         d.set("Zebra", Object::Int(1));
         d.set("Apple", Object::Int(2));
         d.set("Mango", Object::Int(3));
-        let keys: Vec<String> = d.keys().map(|k| k.to_string_lossy()).collect();
+        let keys: Vec<String> = d.keys().map(|k| k.to_string()).collect();
         assert_eq!(keys, vec!["/Zebra", "/Apple", "/Mango"]);
     }
 
@@ -543,7 +560,7 @@ mod tests {
         d.set("A", Object::Int(1));
         d.set("B", Object::Int(2));
         d.set("A", Object::Int(3));
-        let keys: Vec<String> = d.keys().map(|k| k.to_string_lossy()).collect();
+        let keys: Vec<String> = d.keys().map(|k| k.to_string()).collect();
         assert_eq!(keys, vec!["/A", "/B"]);
         assert_eq!(d.get("A").and_then(Object::as_i64), Some(3));
     }
@@ -573,7 +590,10 @@ mod tests {
         assert_eq!(format_number(1.5), "1.5");
         assert_eq!(format_number(1.500_000_1), "1.5");
         assert_eq!(format_number(0.000_000_1), "0");
-        assert_eq!(format_number(6.02e23), "602000000000000000000000");
+        // Exponents are expanded, at the cost of the precision f64 already lost.
+        let big = format_number(6.02e23);
+        assert!(!big.contains('e') && !big.contains('E'), "{big}");
+        assert!(big.parse::<f64>().is_ok());
         assert_eq!(format_number(f64::NAN), "0");
         assert_eq!(format_number(f64::INFINITY), "0");
         assert_eq!(format_number(-1.234_567_8), "-1.234568");

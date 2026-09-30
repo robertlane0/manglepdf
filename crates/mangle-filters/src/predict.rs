@@ -1,7 +1,13 @@
 //! Predictors (ISO 32000-1 7.4.4.4): PNG predictors 10-15 and the TIFF predictor 2.
 
-use crate::error::FilterError;
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 use crate::FilterResult;
+use crate::error::FilterError;
 
 /// `/DecodeParms` for a predictor filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -18,7 +24,7 @@ pub struct PredictorParams {
 
 /// Bytes per pixel for a predictor, i.e. `/Colors * ceil(/BitsPerComponent / 8)`.
 #[must_use]
-pub fn bytes_per_pixel(p: &PredictorParams) -> usize {
+pub(crate) fn bytes_per_pixel(p: &PredictorParams) -> usize {
     let colors = usize::from(p.colors.max(1));
     let bpp_bits = usize::from(p.bpc.max(1));
     let bytes = bpp_bits.div_ceil(8);
@@ -27,7 +33,7 @@ pub fn bytes_per_pixel(p: &PredictorParams) -> usize {
 
 /// Row length in bytes, rounded up to whole bytes.
 #[must_use]
-pub fn row_length(p: &PredictorParams) -> usize {
+pub(crate) fn row_length(p: &PredictorParams) -> usize {
     let colors = usize::from(p.colors.max(1));
     let bpp = usize::from(p.bpc.max(1));
     let bits = colors * bpp * usize::from(p.columns.max(1));
@@ -77,6 +83,9 @@ fn tiff_unpredict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
 }
 
 /// PNG predictors: each row is preceded by a filter-type byte.
+// The rows are addressed as `a`, `b`, `c` because that is how the PNG specification
+// names the neighbours used by the Paeth filter.
+#[allow(clippy::many_single_char_names)]
 fn png_unpredict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
     let bpp = bytes_per_pixel(p);
     let row = row_length(p);
@@ -89,7 +98,9 @@ fn png_unpredict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
     let mut prev_row = vec![0u8; row];
 
     for r in 0..rows {
-        let Some(&ft) = data.get(r * stride) else { break };
+        let Some(&ft) = data.get(r * stride) else {
+            break;
+        };
         let src = data.get((r * stride + 1)..(r * stride + stride));
         let Some(src) = src else { break };
         let n = src.len().min(row);
@@ -116,16 +127,24 @@ fn png_unpredict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
             }
             3 => {
                 for i in 0..n {
-                    let left = if i >= bpp { *cur.get(i - bpp).unwrap_or(&0) } else { 0 };
+                    let left = if i >= bpp {
+                        *cur.get(i - bpp).unwrap_or(&0)
+                    } else {
+                        0
+                    };
                     let up = *prev_row.get(i).unwrap_or(&0);
                     if let Some(c) = cur.get_mut(i) {
-                        *c = c.wrapping_add(((u16::from(left) + u16::from(up)) / 2) as u8);
+                        *c = c.wrapping_add(u16::midpoint(u16::from(left), u16::from(up)) as u8);
                     }
                 }
             }
             4 => {
                 for i in 0..n {
-                    let a = if i >= bpp { *cur.get(i - bpp).unwrap_or(&0) } else { 0 };
+                    let a = if i >= bpp {
+                        *cur.get(i - bpp).unwrap_or(&0)
+                    } else {
+                        0
+                    };
                     let b = *prev_row.get(i).unwrap_or(&0);
                     let c = if i >= bpp {
                         *prev_row.get(i - bpp).unwrap_or(&0)
@@ -167,6 +186,7 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 }
 
 /// Apply the forward predictor. Used by the PNG writer and by round-trip tests.
+#[allow(clippy::many_single_char_names)]
 pub fn predict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
     match p.predictor {
         0 | 1 => Ok(data.to_vec()),
@@ -205,7 +225,11 @@ pub fn predict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
                 out.push(2);
                 for i in 0..row {
                     let u = *prev_row.get(i).unwrap_or(&0);
-                    let l = if i >= bpp { *cur.get(i - bpp).unwrap_or(&0) } else { 0 };
+                    let l = if i >= bpp {
+                        *cur.get(i - bpp).unwrap_or(&0)
+                    } else {
+                        0
+                    };
                     let v = cur.get(i).copied().unwrap_or(0);
                     let _ = l;
                     out.push(v.wrapping_sub(u));
@@ -223,6 +247,10 @@ pub fn predict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     #[test]
@@ -248,17 +276,27 @@ mod tests {
         let mut stream = Vec::new();
         for ft in 0..5usize {
             let this = &base[ft * row..(ft + 1) * row];
-            let prev: &[u8] = if ft == 0 { &[] } else { &base[(ft - 1) * row..ft * row] };
+            let prev: &[u8] = if ft == 0 {
+                &[]
+            } else {
+                &base[(ft - 1) * row..ft * row]
+            };
             stream.push(ft as u8);
             for i in 0..row {
                 let a = if i >= bpp { this[i - bpp] } else { 0 };
                 let b = prev.get(i).copied().unwrap_or(0);
-                let c = if i >= bpp { prev.get(i - bpp).copied().unwrap_or(0) } else { 0 };
+                let c = if i >= bpp {
+                    prev.get(i - bpp).copied().unwrap_or(0)
+                } else {
+                    0
+                };
                 let v = match ft {
                     0 => this[i],
                     1 => this[i].wrapping_sub(a),
                     2 => this[i].wrapping_sub(b),
-                    3 => this[i].wrapping_sub(((u16::from(a) + u16::from(b)) / 2) as u8),
+                    3 => this[i].wrapping_sub(
+                        u8::try_from(u16::from(a).midpoint(u16::from(b))).unwrap_or(0),
+                    ),
                     _ => this[i].wrapping_sub(paeth(a, b, c)),
                 };
                 stream.push(v);

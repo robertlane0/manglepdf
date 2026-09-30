@@ -2,6 +2,12 @@
 //! handler needs. These are thin wrappers over the `sha2` crate's compression function
 //! usage, kept separate so the rest of the crate does not care.
 
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 use sha2::Digest as _;
 
 /// SHA-256.
@@ -159,6 +165,8 @@ impl Sha1 {
         }
     }
 
+    // The working variables are named as the FIPS and RFC pseudocode names them.
+    #[allow(clippy::many_single_char_names)]
     fn compress(&mut self, block: &[u8; 64]) {
         let mut w = [0u32; 80];
         for i in 0..16 {
@@ -237,18 +245,33 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
+    /// Hex-encode for readable assertions.
     fn hex(d: &[u8]) -> String {
-        d.iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(d.len() * 2);
+        for b in d {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
     }
 
     #[test]
     fn sha1_vectors() {
         assert_eq!(hex(&sha1(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-        assert_eq!(hex(&sha1(b"abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
         assert_eq!(
-            hex(&sha1(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+            hex(&sha1(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        assert_eq!(
+            hex(&sha1(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
             "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
         );
     }
@@ -357,6 +380,8 @@ impl Md5 {
         }
     }
 
+    // The working variables are named as the FIPS and RFC pseudocode names them.
+    #[allow(clippy::many_single_char_names)]
     fn compress(&mut self, block: &[u8; 64]) {
         let mut m = [0u32; 16];
         for (i, slot) in m.iter_mut().enumerate() {
@@ -378,10 +403,7 @@ impl Md5 {
             let tmp = d;
             d = c;
             c = b;
-            let sum = a
-                .wrapping_add(f)
-                .wrapping_add(MD5_K[i])
-                .wrapping_add(m[g]);
+            let sum = a.wrapping_add(f).wrapping_add(MD5_K[i]).wrapping_add(m[g]);
             b = b.wrapping_add(sum.rotate_left(MD5_S[i]));
             a = tmp;
         }
@@ -433,8 +455,14 @@ pub fn md5(data: &[u8]) -> [u8; 16] {
 mod md5_tests {
     use super::md5;
 
+    /// Hex-encode for readable assertions.
     fn hex(d: &[u8]) -> String {
-        d.iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(d.len() * 2);
+        for b in d {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
     }
 
     #[test]
@@ -447,4 +475,3 @@ mod md5_tests {
         );
     }
 }
-

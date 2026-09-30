@@ -1,6 +1,12 @@
 //! `LZWDecode` (ISO 32000-1 7.4.4) and the `EarlyChange` parameter that different
 //! producers disagree about by exactly one code width.
 
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 use std::collections::BTreeMap;
 
 use crate::Partial;
@@ -167,7 +173,7 @@ impl BitOut {
 
 /// LZW encode, used for round-trip tests and for writing small image streams.
 #[must_use]
-pub fn lzw_encode(input: &[u8], early: EarlyChange) -> Vec<u8> {
+pub fn lzw_encode(input: &[u8], _early: EarlyChange) -> Vec<u8> {
     // The encoder always uses the plain rule; the decoder's `EarlyChange` accounts
     // for the one-entry lag (see `decoder_bias`).
     let early_v = 0u32;
@@ -215,6 +221,10 @@ pub fn lzw_encode(input: &[u8], early: EarlyChange) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     fn check(data: &[u8]) {

@@ -5,6 +5,12 @@
 //! decoded cleanly plus a note, instead of discarding the whole object. Off-the-shelf
 //! inflate implementations abort on the first error, which loses whole pages.
 
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 use crate::error::FilterError;
 use crate::{MAX_DECODED_BYTES, MAX_EXPANSION_RATIO, Partial};
 
@@ -60,9 +66,9 @@ impl Huffman {
         }
         // Reject over-subscribed sets; incomplete sets are legal for the distance tree.
         let mut left: i32 = 1;
-        for len in 1..=MAX_BITS {
+        for count in counts.iter().copied().take(MAX_BITS + 1).skip(1) {
             left <<= 1;
-            left -= i32::from(counts[len]);
+            left -= i32::from(count);
             if left < 0 {
                 return Err(FilterError::Malformed("deflate huffman (over-subscribed)"));
             }
@@ -251,7 +257,9 @@ impl<'a> BitReader<'a> {
 
     /// Bytes still physically available, used to salvage a truncated stored block.
     fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.pos.min(self.data.len()))
+        self.data
+            .len()
+            .saturating_sub(self.pos.min(self.data.len()))
     }
 }
 
@@ -314,12 +322,9 @@ pub fn inflate_raw(input: &[u8], hint: usize) -> InflateOutcome {
     let mut complete = false;
 
     'blocks: loop {
-        let bfinal = match br.bit() {
-            Some(b) => b,
-            None => {
-                note = Some("input ended before a block header".into());
-                break 'blocks;
-            }
+        let Some(bfinal) = br.bit() else {
+            note = Some("input ended before a block header".into());
+            break 'blocks;
         };
         let btype = br.field(2);
         match btype {
@@ -374,50 +379,24 @@ pub fn inflate_raw(input: &[u8], hint: usize) -> InflateOutcome {
                             break 'blocks;
                         }
                         out.push(sym as u8);
-                    } else if sym == 256 {
-                        break;
-                    } else {
-                        let li = (sym - 257) as usize;
-                        let Some(&base) = LENGTH_BASE.get(li) else {
-                            note = Some("invalid length symbol".into());
-                            break 'blocks;
-                        };
-                        let extra = *LENGTH_EXTRA.get(li).unwrap_or(&0);
-                        if br.eof {
-                            note = Some("truncated length extra bits".into());
-                            break 'blocks;
-                        }
-                        let extra_bits = br.field(extra as usize);
-                        let length = base as usize + extra_bits as usize;
-
-                        let Some(dsym) = dist.decode(&mut br) else {
-                            note = Some("input ended before a distance".into());
-                            break 'blocks;
-                        };
-                        let di = dsym as usize;
-                        let Some(&dbase) = DIST_BASE.get(di) else {
-                            note = Some("invalid distance symbol".into());
-                            break 'blocks;
-                        };
-                        let dextra = *DIST_EXTRA.get(di).unwrap_or(&0);
-                        if br.eof {
-                            note = Some("truncated distance extra bits".into());
-                            break 'blocks;
-                        }
-                        let dextra_bits = br.field(dextra as usize);
-                        let distance = dbase as usize + dextra_bits as usize;
-                        if distance > out.len() || distance == 0 {
-                            note = Some("distance points before the output start".into());
-                            break 'blocks;
-                        }
-                        if out.len() + length > cap {
-                            let room = cap.saturating_sub(out.len());
-                            copy_from_history(&mut out, distance, room);
-                            note = Some(format!("output capped at {cap} bytes"));
-                            break 'blocks;
-                        }
-                        copy_from_history(&mut out, distance, length);
+                        continue;
                     }
+                    if sym == 256 {
+                        // End of block.
+                        break;
+                    }
+                    let Some((length, distance)) =
+                        read_match(&mut br, &dist, sym, out.len(), &mut note)
+                    else {
+                        break 'blocks;
+                    };
+                    if out.len() + length > cap {
+                        let room = cap.saturating_sub(out.len());
+                        copy_from_history(&mut out, distance, room);
+                        note = Some(format!("output capped at {cap} bytes"));
+                        break 'blocks;
+                    }
+                    copy_from_history(&mut out, distance, length);
                 }
             }
             _ => {
@@ -437,6 +416,49 @@ pub fn inflate_raw(input: &[u8], hint: usize) -> InflateOutcome {
         note,
         consumed: br.pos.min(input.len()),
     }
+}
+
+/// Read one length/distance pair. Returns `None` and fills in `note` when the stream is
+/// damaged, which is the caller's signal to stop and keep what it already has.
+fn read_match(
+    br: &mut BitReader<'_>,
+    dist: &Huffman,
+    sym: u16,
+    out_len: usize,
+    note: &mut Option<String>,
+) -> Option<(usize, usize)> {
+    let li = usize::from(sym - 257);
+    let Some(&base) = LENGTH_BASE.get(li) else {
+        *note = Some("invalid length symbol".into());
+        return None;
+    };
+    if br.eof {
+        *note = Some("truncated length extra bits".into());
+        return None;
+    }
+    let extra = *LENGTH_EXTRA.get(li).unwrap_or(&0);
+    let length = base as usize + br.field(extra as usize) as usize;
+
+    let Some(dsym) = dist.decode(br) else {
+        *note = Some("input ended before a distance".into());
+        return None;
+    };
+    let di = usize::from(dsym);
+    let Some(&dbase) = DIST_BASE.get(di) else {
+        *note = Some("invalid distance symbol".into());
+        return None;
+    };
+    if br.eof {
+        *note = Some("truncated distance extra bits".into());
+        return None;
+    }
+    let dextra = *DIST_EXTRA.get(di).unwrap_or(&0);
+    let distance = dbase as usize + br.field(dextra as usize) as usize;
+    if distance == 0 || distance > out_len {
+        *note = Some("distance points before the output start".into());
+        return None;
+    }
+    Some((length, distance))
 }
 
 /// Copy `len` bytes from `distance` back in the output, byte at a time so overlapping
@@ -462,7 +484,7 @@ fn read_dynamic_tables(br: &mut BitReader<'_>) -> Result<(Huffman, Huffman), Fil
     for i in 0..hclen {
         let v = br.field(3) as u8;
         if let Some(slot) = CLEN_ORDER.get(i) {
-            clen[*slot] = v as u8;
+            clen[*slot] = v;
         }
     }
     const CLEN_ORDER: [usize; 19] = [
@@ -538,6 +560,10 @@ pub fn inflate(input: &[u8], hint: usize) -> Partial {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     #[test]
@@ -552,7 +578,10 @@ mod tests {
     #[test]
     fn dynamic_block_with_distance() {
         // "aaaaaaaaaa" compressed by zlib, raw deflate portion extracted.
-        let packed = crate::deflate::deflate(&b"aaaaaaaaaa".repeat(30), crate::deflate::DeflateLevel::Default);
+        let packed = crate::deflate::deflate(
+            &b"aaaaaaaaaa".repeat(30),
+            crate::deflate::DeflateLevel::Default,
+        );
         let r = inflate_raw(&packed, 300);
         assert!(r.complete, "{r:?}");
         assert_eq!(r.data, b"aaaaaaaaaa".repeat(30));

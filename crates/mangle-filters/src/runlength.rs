@@ -1,5 +1,11 @@
 //! `RunLengthDecode` (PDF 1.7, 7.4.5).
 
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 use crate::Partial;
 
 /// A copy run is 1..=128 bytes; a repeat run is 2..=128 copies of the next byte.
@@ -58,10 +64,7 @@ pub fn run_length_encode(input: &[u8]) -> Vec<u8> {
     while i < input.len() {
         // Find a run of at least 2 identical bytes.
         let mut run = 1usize;
-        while i + run < input.len()
-            && run < MAX_RUN
-            && input[i + run] == input[i]
-        {
+        while i + run < input.len() && run < MAX_RUN && input[i + run] == input[i] {
             run += 1;
         }
         if run >= 2 {
@@ -92,6 +95,10 @@ pub fn run_length_encode(input: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     #[test]

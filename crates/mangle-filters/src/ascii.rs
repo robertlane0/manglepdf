@@ -1,7 +1,13 @@
 //! ASCIIHexDecode and ASCII85Decode (PDF 1.7, 7.4.2 and 7.4.3).
 
-use crate::error::FilterError;
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 use crate::Partial;
+use crate::error::FilterError;
 
 const fn hexval(b: u8) -> Option<u8> {
     match b {
@@ -98,7 +104,7 @@ pub fn ascii85_decode(input: &[u8]) -> Partial {
                 n += 1;
                 if n == 5 {
                     let mut v = 0u32;
-                    for g in group.iter() {
+                    for g in &group {
                         v = v.wrapping_mul(85).wrapping_add(u32::from(*g));
                     }
                     out.extend_from_slice(&v.to_be_bytes());
@@ -126,7 +132,7 @@ pub fn ascii85_decode(input: &[u8]) -> Partial {
             *slot = 84;
         }
         let mut v = 0u32;
-        for g in group.iter() {
+        for g in &group {
             v = v.wrapping_mul(85).wrapping_add(u32::from(*g));
         }
         let full = v.to_be_bytes();
@@ -147,7 +153,7 @@ pub fn ascii85_decode(input: &[u8]) -> Partial {
 
 /// `ASCII85Decode` strict wrapper for tests and round trips.
 #[allow(dead_code)]
-pub fn ascii85_decode_strict(input: &[u8]) -> Result<Vec<u8>, FilterError> {
+pub(crate) fn ascii85_decode_strict(input: &[u8]) -> Result<Vec<u8>, FilterError> {
     let p = ascii85_decode(input);
     match p.note {
         Some(_) => Err(FilterError::Damaged {
@@ -160,6 +166,10 @@ pub fn ascii85_decode_strict(input: &[u8]) -> Result<Vec<u8>, FilterError> {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     #[test]

@@ -69,7 +69,10 @@ impl<'a> Parser<'a> {
             Token::ArrayOpen => Object::Array(self.parse_array()?),
             Token::DictOpen => Object::Dict(self.parse_dict()?),
             Token::Keyword(k) => {
-                return Err(Error::at(t.start, &format!("unexpected keyword `{}`", String::from_utf8_lossy(&k))));
+                return Err(Error::at(
+                    t.start,
+                    &format!("unexpected keyword `{}`", String::from_utf8_lossy(&k)),
+                ));
             }
             Token::Eof => return Ok(None),
             Token::ArrayClose | Token::DictClose | Token::BraceOpen | Token::BraceClose => {
@@ -85,7 +88,19 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| Error::at(self.position(), "unexpected end of input"))
     }
 
-    /// `num gen R` is a reference; anything else is left for the caller.
+    /// Consume the next token and check it is the given keyword.
+    pub fn next_keyword(&mut self, kw: &[u8]) -> bool {
+        let save = self.lexer.position();
+        match self.lexer.next_token() {
+            Ok(t) if t.is_keyword(kw) => true,
+            _ => {
+                self.lexer.seek(save);
+                false
+            }
+        }
+    }
+
+    /// `num generation R` is a reference; anything else is left for the caller.
     fn try_reference(&mut self) -> Result<Option<Object>> {
         let save = self.lexer.position();
         let first = self.lexer.next_token()?;
@@ -93,17 +108,17 @@ impl<'a> Parser<'a> {
             self.lexer.seek(save);
             return Ok(None);
         };
-        if num < 0 || num > u32::MAX as i64 {
+        if num < 0 || num > i64::from(u32::MAX) {
             self.lexer.seek(save);
             return Ok(None);
         }
         let save2 = self.lexer.position();
         let second = self.lexer.next_token()?;
-        let Token::Int(gen) = second.token else {
+        let Token::Int(generation) = second.token else {
             self.lexer.seek(save);
             return Ok(None);
         };
-        if !(0..=i64::from(u16::MAX)).contains(&gen) {
+        if !(0..=i64::from(u16::MAX)).contains(&generation) {
             self.lexer.seek(save);
             return Ok(None);
         }
@@ -111,7 +126,7 @@ impl<'a> Parser<'a> {
         if third.is_keyword(b"R") {
             return Ok(Some(Object::Ref(Ref::new(
                 u32::try_from(num).unwrap_or(0),
-                u16::try_from(gen).unwrap_or(0),
+                u16::try_from(generation).unwrap_or(0),
             ))));
         }
         self.lexer.seek(save2);
@@ -196,9 +211,9 @@ impl<'a> Parser<'a> {
                         self.depth -= 1;
                         return Err(Error::at(t.start, "dictionary key with no value"));
                     }
-                    let value = self.next_object()?.ok_or_else(|| {
-                        Error::at(t.start, "dictionary key with no value")
-                    })?;
+                    let value = self
+                        .next_object()?
+                        .ok_or_else(|| Error::at(t.start, "dictionary key with no value"))?;
                     d.insert(Name(key), value);
                 }
                 _ => {
@@ -226,19 +241,16 @@ impl<'a> Parser<'a> {
         len_hint: Option<i64>,
     ) -> Result<(Dict, Vec<u8>, usize)> {
         let mut p = Parser::at(data, dict_start);
-        let dict = match p.next_object()? {
-            Some(Object::Dict(d)) => d,
-            _ => return Err(Error::at(dict_start, "expected a stream dictionary")),
+        let Some(Object::Dict(dict)) = p.next_object()? else {
+            return Err(Error::at(dict_start, "expected a stream dictionary"));
         };
         p.lexer.skip_space();
-        if p.lexer.peek_byte() != Some(b's') {
-            return Err(Error::at(p.position(), "expected `stream`"));
-        }
-        // The keyword `stream` must be followed by CRLF or LF (a lone CR is tolerated).
         let mut i = p.position();
-        while data.get(i).is_some_and(|b| b.is_ascii_whitespace() && *b != b'\n' && *b != b'\r') {
-            i += 1;
+        // The keyword, then CRLF or LF; a lone CR is tolerated.
+        if data.get(i..i + 6) != Some(b"stream") {
+            return Err(Error::at(i, "expected `stream`"));
         }
+        i += 6;
         if data.get(i) == Some(&b'\r') {
             i += 1;
         }
@@ -253,24 +265,10 @@ impl<'a> Parser<'a> {
         {
             let n = usize::try_from(n).unwrap_or(usize::MAX);
             let candidate_end = body_start.saturating_add(n);
-            let ok = data
-                .get(candidate_end..candidate_end.saturating_add(20))
-                .is_some_and(|tail| {
-                    let mut t = tail;
-                    // Allow whitespace between the data and the keyword.
-                    while let Some(&b) = t.first() {
-                        if b.is_ascii_whitespace() {
-                            t = &t[1..];
-                        } else {
-                            break;
-                        }
-                    }
-                    t.starts_with(b"endstream")
-                });
-            if ok {
-                (data[body_start..candidate_end].to_vec(), candidate_end)
-            } else {
-                scan_for_endstream(data, body_start)
+            let ok = data.get(candidate_end..).is_some_and(endstream_follows_at);
+            match data.get(body_start..candidate_end) {
+                Some(body) if ok => (body.to_vec(), candidate_end),
+                _ => scan_for_endstream(data, body_start),
             }
         } else {
             scan_for_endstream(data, body_start)
@@ -285,18 +283,32 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        if data.get(j..j + 9) == Some(b"endstream") {
+        if data.get(j..j.saturating_add(9)) == Some(b"endstream".as_slice()) {
             j += 9;
         }
         Ok((dict, raw, j))
     }
 }
 
+/// Does `endstream` follow, allowing whitespace and NULs between the data and it?
+fn endstream_follows_at(tail: &[u8]) -> bool {
+    // Cap the skip: a megabyte of whitespace is not a length we should trust.
+    const MAX_SKIP: usize = 4;
+    let mut i = 0usize;
+    while i < MAX_SKIP {
+        match tail.get(i) {
+            Some(b) if b.is_ascii_whitespace() || *b == 0 => i += 1,
+            _ => break,
+        }
+    }
+    tail.get(i..).is_some_and(|t| t.starts_with(b"endstream"))
+}
+
 /// Find `endstream` by scanning, for when `/Length` lies or is an indirect reference.
 fn scan_for_endstream(data: &[u8], from: usize) -> (Vec<u8>, usize) {
     let mut i = from;
     while i + 9 <= data.len() {
-        if &data[i..i + 9] == b"endstream" {
+        if data.get(i..i + 9) == Some(b"endstream".as_slice()) {
             // The keyword is preceded by an EOL, which is not part of the data.
             let mut end = i;
             if end > from && data.get(end - 1) == Some(&b'\n') {
@@ -326,10 +338,17 @@ pub fn make_stream(dict: Dict, raw: Vec<u8>, offset: Option<usize>) -> Stream {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     fn parse(s: &[u8]) -> Object {
-        Parser::new(s).next_object().expect("parse").expect("object")
+        Parser::new(s)
+            .next_object()
+            .expect("parse")
+            .expect("object")
     }
 
     #[test]
@@ -355,7 +374,9 @@ mod tests {
         let d = o.as_dict().expect("dict");
         assert_eq!(d.get("Type").and_then(Object::as_name), Some(&b"Page"[..]));
         assert_eq!(
-            d.get("Kids").and_then(Object::as_array).map(<[Object]>::len),
+            d.get("Kids")
+                .and_then(Object::as_array)
+                .map(<[Object]>::len),
             Some(2)
         );
         assert_eq!(d.get("Count").and_then(Object::as_i64), Some(2));
@@ -367,7 +388,10 @@ mod tests {
         let a = o.as_array().expect("array");
         assert_eq!(a.len(), 2);
         assert_eq!(
-            a.get(1).and_then(|o| o.get("A")).and_then(Object::as_array).map(<[Object]>::len),
+            a.get(1)
+                .and_then(|o| o.get("A"))
+                .and_then(Object::as_array)
+                .map(<[Object]>::len),
             Some(1)
         );
     }

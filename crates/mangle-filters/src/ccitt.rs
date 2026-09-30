@@ -1,10 +1,16 @@
 //! CCITT Group 3 and Group 4 (ITU-T T.4 and T.6) facsimile decoding, as PDF uses it
 //! for bilevel scans.
 
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 use std::sync::OnceLock;
 
-use crate::error::FilterError;
 use crate::FilterResult;
+use crate::error::FilterError;
 
 /// The compression variant in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,17 +99,70 @@ const WHITE_MAKEUP: [(&str, u16); 27] = [
 ];
 
 const BLACK_TERMINATING: [&str; 64] = [
-    "0000110111", "010", "11", "10", "011", "0011", "0010", "00011", "000101", "000100",
-    "0000100", "0000101", "0000111", "00000100", "00000111", "000011000", "0000010111",
-    "0000011000", "0000001000", "00001100111", "00001101000", "00001101100", "00000110111",
-    "00000101000", "00000010111", "00000011000", "000011001010", "000011001011", "000011001100",
-    "000011001101", "000001101000", "000001101001", "000001101010", "000001101011",
-    "000011010010", "000011010011", "000011010100", "000011010101", "000011010110",
-    "000011010111", "000001101100", "000001101101", "000011011010", "000011011011",
-    "000001010100", "000001010101", "000001010110", "000001010111", "000001100100",
-    "000001100101", "000001010010", "000001010011", "000000100100", "000000110111",
-    "000000111000", "000000100111", "000000101000", "000001011000", "000001011001",
-    "000000101011", "000000101100", "000001011010", "000001100110", "000001100111",
+    "0000110111",
+    "010",
+    "11",
+    "10",
+    "011",
+    "0011",
+    "0010",
+    "00011",
+    "000101",
+    "000100",
+    "0000100",
+    "0000101",
+    "0000111",
+    "00000100",
+    "00000111",
+    "000011000",
+    "0000010111",
+    "0000011000",
+    "0000001000",
+    "00001100111",
+    "00001101000",
+    "00001101100",
+    "00000110111",
+    "00000101000",
+    "00000010111",
+    "00000011000",
+    "000011001010",
+    "000011001011",
+    "000011001100",
+    "000011001101",
+    "000001101000",
+    "000001101001",
+    "000001101010",
+    "000001101011",
+    "000011010010",
+    "000011010011",
+    "000011010100",
+    "000011010101",
+    "000011010110",
+    "000011010111",
+    "000001101100",
+    "000001101101",
+    "000011011010",
+    "000011011011",
+    "000001010100",
+    "000001010101",
+    "000001010110",
+    "000001010111",
+    "000001100100",
+    "000001100101",
+    "000001010010",
+    "000001010011",
+    "000000100100",
+    "000000110111",
+    "000000111000",
+    "000000100111",
+    "000000101000",
+    "000001011000",
+    "000001011001",
+    "000000101011",
+    "000000101100",
+    "000001011010",
+    "000001100110",
+    "000001100111",
 ];
 
 const BLACK_MAKEUP: [(&str, u16); 27] = [
@@ -309,7 +368,8 @@ const MODE_CODES: [(&str, Mode); 8] = [
 ];
 
 fn parse_bits(bits: &str) -> u32 {
-    bits.bytes().fold(0u32, |acc, b| (acc << 1) | u32::from(b == b'1'))
+    bits.bytes()
+        .fold(0u32, |acc, b| (acc << 1) | u32::from(b == b'1'))
 }
 
 /// Read a 2D mode code. `None` means the bits are not a valid mode.
@@ -429,7 +489,7 @@ pub fn ccitt_decode(data: &[u8], p: &CcittParams) -> FilterResult<Vec<u8>> {
     let width = p.columns;
     // A hostile /Columns x /Rows pair must not be able to ask for a terabyte.
     let max_pixels = 1usize << 30;
-    let row_cap: usize = if p.rows > 0 { usize::try_from(p.rows).unwrap_or(0) } else { usize::MAX };
+    let row_cap: usize = if p.rows > 0 { p.rows } else { usize::MAX };
 
     let mut out: Vec<u8> = Vec::new();
     let mut bits = Bits::new(data);
@@ -474,8 +534,17 @@ pub fn ccitt_decode(data: &[u8], p: &CcittParams) -> FilterResult<Vec<u8>> {
 
         let line = match p.variant {
             Variant::G3_1D => decode_line_1d(&mut bits, width, max_damage, &mut damaged),
-            Variant::G3_2D => decode_line_2d(&mut bits, width, &reference, false, max_damage, &mut damaged),
-            Variant::G4 => decode_line_2d(&mut bits, width, &reference, true, max_damage, &mut damaged),
+            Variant::G3_2D => decode_line_2d(
+                &mut bits,
+                width,
+                &reference,
+                false,
+                max_damage,
+                &mut damaged,
+            ),
+            Variant::G4 => {
+                decode_line_2d(&mut bits, width, &reference, true, max_damage, &mut damaged)
+            }
         };
         let Some(line) = line else {
             damaged += 1;
@@ -495,7 +564,7 @@ pub fn ccitt_decode(data: &[u8], p: &CcittParams) -> FilterResult<Vec<u8>> {
         };
         let mut row = line.samples(width);
         if !p.black_is_1 {
-            for b in row.iter_mut() {
+            for b in &mut row {
                 *b = u8::from(*b == 0);
             }
         }
@@ -519,7 +588,7 @@ fn decode_line_1d(
     // Runs alternate white, black, white... so the colour is implicit: an even number
     // of changes means white. Zero-length runs are legal and must be recorded, because
     // they are what lets a line start on black.
-    let mut black = false;
+    let black = false;
     loop {
         guard += 1;
         if guard > width * 4 + 64 {
@@ -658,6 +727,10 @@ fn decode_line_2d(
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     /// Pack a bit string MSB-first into bytes, zero padding the final byte.

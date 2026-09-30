@@ -7,6 +7,12 @@
 //! One block is emitted per ~16k tokens, choosing whichever of stored / fixed / dynamic
 //! Huffman is smallest. The result is deterministic: no timing, no randomness.
 
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 const MAX_BITS: u8 = 15;
 
 /// Compression effort.
@@ -125,11 +131,11 @@ fn build_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
     for _ in 0..24 {
         let lens = tree_lengths(&work);
         if lens.iter().all(|&l| u32::from(l) <= u32::from(max_bits)) {
-            return lens.into_iter().map(|l| l as u8).collect();
+            return lens;
         }
         // Too deep: flatten the distribution and retry. Converges in a few rounds.
-        for f in work.iter_mut() {
-            *f = (*f + 1) / 2;
+        for f in &mut work {
+            *f = (*f).div_ceil(2);
         }
     }
     // Last resort: a flat, shallow table is always within the limit.
@@ -211,11 +217,9 @@ fn tree_lengths(freqs: &[u64]) -> Vec<u8> {
                     *l = u8::try_from(depth.max(1)).unwrap_or(0);
                 }
             }
-            (None, Some((l, r))) => {
-                if depth < 32 {
-                    stack.push((l, depth + 1));
-                    stack.push((r, depth + 1));
-                }
+            (None, Some((l, r))) if depth < 32 => {
+                stack.push((l, depth + 1));
+                stack.push((r, depth + 1));
             }
             _ => {}
         }
@@ -393,14 +397,13 @@ impl Block {
             lit: 0,
         });
     }
-
-    fn is_empty(&self) -> bool {
-        self.tokens.is_empty()
-    }
 }
 
+/// A Huffman code: `(code, bit length)` pairs indexed by symbol.
+type Code = Vec<(u32, u8)>;
+
 /// Fixed-Huffman code tables, built once.
-fn fixed_tables() -> (Vec<(u32, u8)>, Vec<(u32, u8)>) {
+fn fixed_tables() -> (Code, Code) {
     let mut lengths = [0u8; 288];
     for (i, slot) in lengths.iter_mut().enumerate() {
         *slot = match i {
@@ -578,12 +581,20 @@ fn token_bits(block: &Block, lit: &[(u32, u8)], dist: &[(u32, u8)], fixed: bool)
                 } else {
                     usize::from(lit.get(257 + li).map_or(0, |c| c.1))
                 };
-                let dl = if fixed { 5 } else { usize::from(dist.get(di).map_or(0, |c| c.1)) };
+                let dl = if fixed {
+                    5
+                } else {
+                    usize::from(dist.get(di).map_or(0, |c| c.1))
+                };
                 bits += ll + usize::from(LENGTH_EXTRA[li]) + dl + usize::from(DIST_EXTRA[di]);
             }
         }
     }
-    bits + if fixed { 7 } else { usize::from(lit.get(256).map_or(0, |c| c.1)) }
+    bits + if fixed {
+        7
+    } else {
+        usize::from(lit.get(256).map_or(0, |c| c.1))
+    }
 }
 
 fn write_tokens(
@@ -630,7 +641,7 @@ fn write_block(bw: &mut BitWriter, block: &Block, last: bool) {
     let mut dist_freq = block.dist_freq;
     // The dynamic header needs at least one distance code. Give unused slots a token
     // frequency of one so the tree is complete and strict decoders are satisfied.
-    for f in dist_freq.iter_mut() {
+    for f in &mut dist_freq {
         if *f == 0 {
             *f = 1;
         }
@@ -654,21 +665,24 @@ fn write_block(bw: &mut BitWriter, block: &Block, last: bool) {
         .iter()
         .rposition(|&s| cl_lengths.get(s).copied().unwrap_or(0) != 0)
         .map_or(4, |p| p + 1)
-        .max(4)
-        .min(19);
+        .clamp(4, 19);
 
     let hlit = lit_lengths.len();
     let hdist = dist_lengths.len();
     let cl_bits: usize = cl_seq
         .iter()
-        .map(|s| usize::from(cl_codes.get(usize::from(s.sym)).map_or(0, |c| c.1)) + usize::from(s.extra_bits))
+        .map(|s| {
+            usize::from(cl_codes.get(usize::from(s.sym)).map_or(0, |c| c.1))
+                + usize::from(s.extra_bits)
+        })
         .sum();
-    let dynamic_bits = 3 + 5 + 5 + 4 + 3 * hclen + cl_bits + token_bits(block, &lit_codes, &dist_codes, false);
+    let dynamic_bits =
+        3 + 5 + 5 + 4 + 3 * hclen + cl_bits + token_bits(block, &lit_codes, &dist_codes, false);
     let (fixed_lit, fixed_dist) = fixed_tables();
     let fixed_bits = 3 + token_bits(block, &fixed_lit, &fixed_dist, true);
     // A stored block is only usable when the block fits the 16-bit length field.
     let stored_bits = 3 + 7 + 32 + 8 * block.raw.len();
-    let stored_ok = block.raw.len() <= usize::from(u16::MAX);
+    let stored_ok = u16::try_from(block.raw.len()).is_ok();
 
     if stored_ok && stored_bits <= dynamic_bits.min(fixed_bits) {
         write_stored(bw, &block.raw, last);
@@ -696,6 +710,10 @@ fn write_block(bw: &mut BitWriter, block: &Block, last: bool) {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     fn round_trip(data: &[u8]) {
@@ -718,7 +736,11 @@ mod tests {
         let text = b"the quick brown fox jumps over the lazy dog. ".repeat(40);
         round_trip(&text);
         let packed = deflate(&text, DeflateLevel::Default);
-        assert!(packed.len() < text.len() / 4, "poor ratio: {}", packed.len());
+        assert!(
+            packed.len() < text.len() / 4,
+            "poor ratio: {}",
+            packed.len()
+        );
     }
 
     #[test]
@@ -755,7 +777,11 @@ mod tests {
     #[test]
     fn all_levels_round_trip() {
         let data: Vec<u8> = (0..40_000u32).map(|i| ((i / 97) % 251) as u8).collect();
-        for level in [DeflateLevel::Fast, DeflateLevel::Default, DeflateLevel::Best] {
+        for level in [
+            DeflateLevel::Fast,
+            DeflateLevel::Default,
+            DeflateLevel::Best,
+        ] {
             let packed = deflate(&data, level);
             let back = crate::inflate_raw(&packed, data.len());
             assert!(back.complete, "{level:?}");
@@ -763,4 +789,3 @@ mod tests {
         }
     }
 }
-

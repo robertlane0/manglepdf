@@ -3,6 +3,12 @@
 //! In house so that the R5/R6 key wrap, the CBC IV handling, and the tolerant
 //! decrypt-then-ignore-padding behaviour are all under our control.
 
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 const SBOX: [u8; 256] = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -73,24 +79,26 @@ impl Aes {
         };
         let total_words = 4 * (rounds + 1);
         let mut w = vec![[0u8; 4]; total_words];
-        for i in 0..nk {
-            w[i].copy_from_slice(key.get(i * 4..i * 4 + 4)?);
+        for (i, word) in w.iter_mut().take(nk).enumerate() {
+            word.copy_from_slice(key.get(i * 4..i * 4 + 4)?);
         }
         for i in nk..total_words {
             let mut temp = w[i - 1];
             if i % nk == 0 {
                 temp.rotate_left(1);
-                for b in temp.iter_mut() {
+                for b in &mut temp {
                     *b = SBOX[usize::from(*b)];
                 }
                 temp[0] ^= RCON[i / nk];
             } else if nk > 6 && i % nk == 4 {
-                for b in temp.iter_mut() {
+                for b in &mut temp {
                     *b = SBOX[usize::from(*b)];
                 }
             }
-            for j in 0..4 {
-                w[i][j] = w[i - nk][j] ^ temp[j];
+            let (head, tail) = w.split_at_mut(i);
+            let source: &[u8; 4] = head.get(i - nk).unwrap_or(&[0u8; 4]);
+            for (slot, (&s, &t)) in tail[0].iter_mut().zip(source.iter().zip(temp.iter())) {
+                *slot = s ^ t;
             }
         }
         let mut round_keys = Vec::with_capacity(rounds + 1);
@@ -221,8 +229,8 @@ impl AesEncryptor {
             if chunk.len() < 16 {
                 break;
             }
-            for i in 0..16 {
-                chunk[i] ^= self.chain[i];
+            for (c, k) in chunk.iter_mut().zip(self.chain.iter()) {
+                *c ^= k;
             }
             let mut block = [0u8; 16];
             block.copy_from_slice(chunk);
@@ -276,8 +284,8 @@ impl AesDecryptor {
             block.copy_from_slice(chunk);
             let cipher = block;
             d.aes.decrypt_block(&mut block);
-            for j in 0..16 {
-                block[j] ^= d.chain[j];
+            for (b, k) in block.iter_mut().zip(d.chain.iter()) {
+                *b ^= k;
             }
             d.chain = cipher;
             if let Some(slot) = out.get_mut(i * 16..i * 16 + 16) {
@@ -295,8 +303,8 @@ impl AesDecryptor {
             block[..n].copy_from_slice(&chunk[..n]);
             let cipher = block;
             self.aes.decrypt_block(&mut block);
-            for j in 0..n {
-                block[j] ^= self.chain[j];
+            for (b, k) in block.iter_mut().zip(self.chain.iter()).take(n) {
+                *b ^= k;
             }
             self.chain = cipher;
             let end = (i * 16 + n).min(out.len());
@@ -310,7 +318,7 @@ impl AesDecryptor {
 
 /// Remove PKCS#7 padding when it is well formed; otherwise leave the data alone.
 #[must_use]
-pub fn strip_pkcs7(data: &[u8]) -> Vec<u8> {
+pub(crate) fn strip_pkcs7(data: &[u8]) -> Vec<u8> {
     let Some(&pad) = data.last() else {
         return data.to_vec();
     };
@@ -318,7 +326,10 @@ pub fn strip_pkcs7(data: &[u8]) -> Vec<u8> {
     if pad == 0 || pad > 16 || pad > data.len() {
         return data.to_vec();
     }
-    if data[data.len() - pad..].iter().all(|&b| usize::from(b) == pad) {
+    if data[data.len() - pad..]
+        .iter()
+        .all(|&b| usize::from(b) == pad)
+    {
         return data[..data.len() - pad].to_vec();
     }
     data.to_vec()
@@ -326,7 +337,7 @@ pub fn strip_pkcs7(data: &[u8]) -> Vec<u8> {
 
 /// Add PKCS#7 padding.
 #[must_use]
-pub fn add_pkcs7(data: &[u8]) -> Vec<u8> {
+pub(crate) fn add_pkcs7(data: &[u8]) -> Vec<u8> {
     let pad = 16 - (data.len() % 16);
     let mut out = data.to_vec();
     out.extend(std::iter::repeat_n(pad as u8, pad));
@@ -335,10 +346,20 @@ pub fn add_pkcs7(data: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
+    /// Hex-encode for readable assertions.
     fn hex(d: &[u8]) -> String {
-        d.iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(d.len() * 2);
+        for b in d {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
     }
 
     fn unhex(s: &str) -> Vec<u8> {

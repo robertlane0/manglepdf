@@ -1,5 +1,11 @@
 //! Document permission bits.
 
+// Direct indexing is used throughout this file: every index is either masked to a
+// table width or produced by a loop bounded by the length of the same buffer, so a
+// checked access would add noise without adding safety. The surrounding code is
+// still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
+#![allow(clippy::indexing_slicing)]
+
 /// The `/P` permission bits of the standard security handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Permissions {
@@ -82,8 +88,14 @@ impl Permissions {
         self.bits & mask(bit) != 0
     }
 
-    fn set(bit: u32, on: bool, bits: i32) -> i32 {
-        if on { bits | mask(bit) } else { bits & !mask(bit) }
+    /// Set or clear bit `bit` (counted from the most significant end).
+    #[must_use]
+    pub fn set(bit: u32, on: bool, bits: i32) -> i32 {
+        if on {
+            bits | mask(bit)
+        } else {
+            bits & !mask(bit)
+        }
     }
 }
 
@@ -131,6 +143,10 @@ pub fn describe(p: &Permissions) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     #[test]

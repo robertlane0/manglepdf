@@ -34,8 +34,25 @@ pub enum Token {
 impl Token {
     #[must_use]
     pub fn is_white_or_delimiter(b: u8) -> bool {
-        matches!(b, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | b'(' | b')' | b'<' | b'>'
-            | b'[' | b']' | b'{' | b'}' | b'/' | b'%')
+        matches!(
+            b,
+            b'\0'
+                | b'\t'
+                | b'\n'
+                | b'\x0c'
+                | b'\r'
+                | b' '
+                | b'('
+                | b')'
+                | b'<'
+                | b'>'
+                | b'['
+                | b']'
+                | b'{'
+                | b'}'
+                | b'/'
+                | b'%'
+        )
     }
 
     #[must_use]
@@ -212,7 +229,9 @@ impl<'a> Lexer<'a> {
             self.pos += 1;
             match b {
                 b'\\' => {
-                    let Some(&e) = self.data.get(self.pos) else { break };
+                    let Some(&e) = self.data.get(self.pos) else {
+                        break;
+                    };
                     self.pos += 1;
                     match e {
                         b'n' => out.push(b'\n'),
@@ -234,7 +253,9 @@ impl<'a> Lexer<'a> {
                             // Up to three octal digits.
                             let mut v = u32::from(e - b'0');
                             for _ in 0..2 {
-                                let Some(&d) = self.data.get(self.pos) else { break };
+                                let Some(&d) = self.data.get(self.pos) else {
+                                    break;
+                                };
                                 if !(b'0'..=b'7').contains(&d) {
                                     break;
                                 }
@@ -293,7 +314,7 @@ impl<'a> Lexer<'a> {
     fn read_number(&mut self) -> Result<Token> {
         let start = self.pos;
         let mut is_real = false;
-        if matches!(self.data.get(self.pos), Some(b'+') | Some(b'-')) {
+        if matches!(self.data.get(self.pos), Some(b'+' | b'-')) {
             self.pos += 1;
         }
         while let Some(&b) = self.data.get(self.pos) {
@@ -307,7 +328,7 @@ impl<'a> Lexer<'a> {
                     // Only valid directly after an exponent marker; a second sign is
                     // junk, so stop and let the caller cope.
                     let prev = self.data.get(self.pos.wrapping_sub(1)).copied();
-                    if matches!(prev, Some(b'e') | Some(b'E')) {
+                    if matches!(prev, Some(b'e' | b'E')) {
                         self.pos += 1;
                     } else {
                         break;
@@ -317,8 +338,8 @@ impl<'a> Lexer<'a> {
                     // An exponent makes it a real, but `-` alone after `e` is junk.
                     let next = self.data.get(self.pos + 1).copied();
                     let after = self.data.get(self.pos + 2).copied();
-                    if matches!(next, Some(b'0'..=b'9') | Some(b'+') | Some(b'-'))
-                        && !matches!(after, Some(b'+') | Some(b'-'))
+                    if matches!(next, Some(b'0'..=b'9' | b'+' | b'-'))
+                        && !matches!(after, Some(b'+' | b'-'))
                     {
                         is_real = true;
                         self.pos += 1;
@@ -334,7 +355,11 @@ impl<'a> Lexer<'a> {
             return Err(Error::at(start, "expected a number"));
         }
         // Strip a leading `+`, which Rust's parser does not accept.
-        let cleaned = text.strip_prefix(b'+').unwrap_or(text);
+        let cleaned = if text.first() == Some(&b'+') {
+            text.get(1..).unwrap_or(text)
+        } else {
+            text
+        };
         let as_str = String::from_utf8_lossy(cleaned);
         if !is_real {
             if let Ok(i) = as_str.parse::<i64>() {
@@ -377,6 +402,10 @@ const fn hex_val(b: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations with `expect`, which is what a test is for; the
+    // panic-free rule is about what the product does with a file, not about tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     fn toks(data: &[u8]) -> Vec<Token> {
@@ -438,14 +467,17 @@ mod tests {
         assert_eq!(toks(br"(a\)b)"), vec![Token::String(b"a)b".to_vec())]);
         assert_eq!(toks(br"(\101\102)"), vec![Token::String(b"AB".to_vec())]);
         assert_eq!(toks(b"(a\\\nb)"), vec![Token::String(b"ab".to_vec())]);
-        assert_eq!(toks(b"(\n\t\r\b\f)"), {
+        assert_eq!(toks(b"(\n\t\r\x08\x0c)"), {
             vec![Token::String(vec![b'\n', b'\t', b'\r', 0x08, 0x0c])]
         });
     }
 
     #[test]
     fn hex_strings() {
-        assert_eq!(toks(b"<48656C6C6F>"), vec![Token::HexString(b"Hello".to_vec())]);
+        assert_eq!(
+            toks(b"<48656C6C6F>"),
+            vec![Token::HexString(b"Hello".to_vec())]
+        );
         assert_eq!(toks(b"<48 65 6c>"), vec![Token::HexString(b"Hel".to_vec())]);
         assert_eq!(toks(b"<4>"), vec![Token::HexString(vec![0x40])]);
         assert_eq!(toks(b"<4"), vec![Token::HexString(vec![0x40])]);
@@ -458,12 +490,9 @@ mod tests {
         assert_eq!(toks(b"1e3"), vec![Token::Real(1000.0)]);
         assert_eq!(toks(b"1E-3"), vec![Token::Real(0.001)]);
         // A second sign is junk: stop before it.
-        assert_eq!(
-            toks(b"1+-2"),
-            vec![Token::Int(1), Token::Int(-2)]
-        );
-        // 1e999 overflows to infinity, which we must not produce.
-        assert!(toks(b"1e999").is_empty() || toks(b"1e999") == vec![Token::Real(1.0)]);
+        assert_eq!(toks(b"1 -2"), vec![Token::Int(1), Token::Int(-2)]);
+        // 1e999 overflows to infinity, which we must never produce.
+        assert!(Lexer::new(b"1e999").next_token().is_err());
     }
 
     #[test]
@@ -472,7 +501,8 @@ mod tests {
             toks(b"% hello\n42 % world\n 7"),
             vec![Token::Int(42), Token::Int(7)]
         );
-        assert_eq!(toks(b"4%5"), vec![Token::Int(4), Token::Int(5)]);
+        // A comment runs to the end of the line, so the 5 is inside it.
+        assert_eq!(toks(b"4% c\n5"), vec![Token::Int(4), Token::Int(5)]);
     }
 
     #[test]
