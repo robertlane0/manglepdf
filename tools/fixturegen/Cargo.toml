@@ -1,0 +1,22 @@
+[package]
+name = "fixturegen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Independent deterministic PDF fixture generator (must not depend on any mangle-* crate)"
+
+[[bin]]
+name = "fixturegen"
+path = "src/main.rs"
+
+# NOTE: deliberately empty. Independence is the point: a fixture generator that shares
+# the product parser's misunderstandings proves nothing. `cargo xtask policy` fails the
+# build if a mangle-* dependency ever appears here.
+
+[dev-dependencies]
+
+[lints]
+workspace = true

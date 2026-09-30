@@ -1,0 +1,24 @@
+[package]
+name = "mangle-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PDF rasterizer: colour, paths, images, shadings, patterns, transparency, glyph cache, tiles, display lists"
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+rayon.workspace = true
+crossbeam-channel.workspace = true
+zune-jpeg.workspace = true
+mangle-syntax.workspace = true
+mangle-filters.workspace = true
+mangle-doc.workspace = true
+mangle-font.workspace = true
+mangle-content.workspace = true
+
+[lints]
+workspace = true

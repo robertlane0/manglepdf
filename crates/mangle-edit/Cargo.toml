@@ -1,0 +1,24 @@
+[package]
+name = "mangle-edit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PDF editing: commands and undo, surgical write-back, annotations and appearances, forms, redaction, flatten, page ops, optimize"
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+mangle-syntax.workspace = true
+mangle-filters.workspace = true
+mangle-crypto.workspace = true
+mangle-doc.workspace = true
+mangle-font.workspace = true
+mangle-content.workspace = true
+mangle-render.workspace = true
+mangle-text.workspace = true
+
+[lints]
+workspace = true

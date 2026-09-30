@@ -1,0 +1,23 @@
+[package]
+name = "mangle-font"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PDF fonts: TrueType/OpenType, CFF, Type 1 programs, CMaps, encodings, glyph names, metrics, subsetting, substitution"
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+mangle-syntax.workspace = true
+mangle-doc.workspace = true
+ttf-parser.workspace = true
+rustybuzz.workspace = true
+unicode-bidi.workspace = true
+unicode-normalization.workspace = true
+unicode-segmentation.workspace = true
+
+[lints]
+workspace = true

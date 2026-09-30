@@ -1,0 +1,21 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "ManglePDF build automation: policy, fixtures, icons, gauntlet, fuzz, perf"
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+thiserror.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

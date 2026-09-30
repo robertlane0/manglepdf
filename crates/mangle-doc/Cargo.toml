@@ -1,0 +1,17 @@
+[package]
+name = "mangle-doc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PDF document model: catalog, page tree with inheritance, name/number trees, outlines, destinations, labels, OCGs, files, XMP/Info"
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+mangle-syntax.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "mangle-content"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PDF content streams: parse and serialise with byte provenance, graphics state, page object model"
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+mangle-syntax.workspace = true
+mangle-doc.workspace = true
+mangle-font.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "mangle-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PDF syntax layer: lossless object model, lexer, parser, xref with repair, writer"
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+smallvec.workspace = true
+mangle-filters.workspace = true
+mangle-crypto.workspace = true
+
+[lints]
+workspace = true

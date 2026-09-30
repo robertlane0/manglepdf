@@ -1,0 +1,18 @@
+[package]
+name = "mangle-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Test support: image differencing, invariants, fixture manifest, evidence writer"
+
+[dependencies]
+thiserror.workspace = true
+mangle-syntax.workspace = true
+mangle-render.workspace = true
+mangle-doc.workspace = true
+
+[lints]
+workspace = true

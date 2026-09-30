@@ -1,7 +1,4 @@
 AGENTS.md
-# NOTE: gitignore comments must be on their own lines (a trailing "# ..." becomes part of the pattern).
-
-# --- Rust ---
 /target/
 **/*.rs.bk
 *.profraw
@@ -62,4 +59,3 @@ perf.data*
 flamegraph.svg
 *.trace
 /fuzz-artifacts/
-

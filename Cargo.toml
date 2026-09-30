@@ -1,0 +1,157 @@
+# ManglePDF workspace.
+#
+# Design rules (GOAL.md section 7):
+#   * one workspace, edition 2024, resolver 3, `forbid(unsafe_code)` everywhere;
+#   * dependency direction may not invert:
+#     syntax -> filters/crypto -> doc -> font -> content -> render/text -> edit -> ui/cli;
+#   * no third-party PDF code (GOAL.md section 2.3), enforced by `cargo xtask policy`.
+[workspace]
+resolver = "3"
+members = [
+    "crates/mangle-syntax",
+    "crates/mangle-filters",
+    "crates/mangle-crypto",
+    "crates/mangle-doc",
+    "crates/mangle-font",
+    "crates/mangle-content",
+    "crates/mangle-render",
+    "crates/mangle-text",
+    "crates/mangle-edit",
+    "crates/mangle-testkit",
+    "crates/mangle-ui",
+    "crates/mangle-cli",
+    "tools/fixturegen",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/manglepdf/manglepdf"
+authors = ["The ManglePDF authors"]
+description = "A from-scratch PDF viewer and editor written in safe Rust"
+
+[workspace.dependencies]
+# ---- internal, in dependency order -------------------------------------------
+mangle-syntax = { path = "crates/mangle-syntax" }
+mangle-filters = { path = "crates/mangle-filters" }
+mangle-crypto = { path = "crates/mangle-crypto" }
+mangle-doc = { path = "crates/mangle-doc" }
+mangle-font = { path = "crates/mangle-font" }
+mangle-content = { path = "crates/mangle-content" }
+mangle-render = { path = "crates/mangle-render" }
+mangle-text = { path = "crates/mangle-text" }
+mangle-edit = { path = "crates/mangle-edit" }
+mangle-ui = { path = "crates/mangle-ui" }
+mangle-testkit = { path = "crates/mangle-testkit" }
+
+# ---- general purpose, non-PDF ------------------------------------------------
+# Every entry is justified in docs/DEPENDENCIES.md and screened by `cargo xtask policy`.
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rayon = "1"
+crossbeam-channel = "0.5"
+crossbeam-utils = "0.8"
+clap = { version = "4", features = ["derive"] }
+rfd = "0.17"
+arboard = "3"
+dirs = "7"
+log = "0.4"
+env_logger = "0.11"
+unicode-bidi = "0.3"
+unicode-linebreak = "0.1"
+unicode-segmentation = "1"
+unicode-normalization = "0.1"
+ttf-parser = "0.25"
+rustybuzz = "0.20"
+smallvec = { version = "1", features = ["union"] }
+zune-jpeg = "0.5"
+jpeg-encoder = "0.7"
+sha2 = "0.10"
+tempfile = "3"
+
+# GUI stack. See docs/decisions/0004-gui-toolkit.md.
+egui = "0.36"
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+    "accesskit",
+    "persistence",
+] }
+egui_extras = { version = "0.36", default-features = false, features = [
+    "all_loaders",
+] }
+winit = "0.30"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+# Hostile-input discipline (GOAL.md section 2.6). Library crates deny these; binaries
+# and tests may relax where a panic is genuinely the right answer (see each crate root).
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+indexing_slicing = "warn"
+float_cmp = "warn"
+large_stack_arrays = "warn"
+sliced_string = "warn"
+# Style kept close to idiomatic Rust; `clippy::all` is a warn, not a hard gate, so a
+# fresh lint release cannot turn the build red.
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+struct_excessive_bools = "allow"
+doc_markdown = "allow"
+inline_always = "allow"
+if_not_else = "allow"
+else_if_without_else = "allow"
+single_match_else = "allow"
+option_if_let_else = "allow"
+match_same_arms = "allow"
+wildcard_imports = "allow"
+used_underscore_binding = "allow"
+redundant_closure_for_method_calls = "allow"
+map_unwrap_or = "allow"
+unnecessary_wraps = "allow"
+needless_pass_by_value = "allow"
+trivially_copy_pass_by_ref = "allow"
+items_after_statements = "allow"
+return_self_not_must_use = "allow"
+struct_field_names = "allow"
+enum_glob_use = "allow"
+too_many_arguments = "allow"
+manual_string_new = "allow"
+string_slice = "allow"
+unreadable_literal = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+debug = 1
+
+[profile.dev]
+opt-level = 0
+debug = 2

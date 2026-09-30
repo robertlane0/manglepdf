@@ -1,0 +1,33 @@
+[package]
+name = "mangle-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "ManglePDF headless command line interface used by tests and the acceptance harness"
+
+[[bin]]
+name = "manglepdf-cli"
+path = "src/main.rs"
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+mangle-syntax.workspace = true
+mangle-filters.workspace = true
+mangle-crypto.workspace = true
+mangle-doc.workspace = true
+mangle-font.workspace = true
+mangle-content.workspace = true
+mangle-render.workspace = true
+mangle-text.workspace = true
+mangle-edit.workspace = true
+mangle-testkit.workspace = true
+
+[lints]
+workspace = true

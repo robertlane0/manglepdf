@@ -1,0 +1,6 @@
+# Latest stable toolchain at the time of writing. Pinned so a clean checkout builds
+# identically on every machine. Update deliberately (and re-run the full gauntlet).
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "default"
