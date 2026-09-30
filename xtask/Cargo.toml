@@ -16,6 +16,8 @@ path = "src/main.rs"
 [dependencies]
 thiserror.workspace = true
 serde_json.workspace = true
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 
 [lints]
 workspace = true
