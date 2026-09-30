@@ -79,6 +79,9 @@ pub struct Document {
     /// Decoded objects, so repeated reads are cheap.
     cache: RwLock<BTreeMap<Ref, Arc<Object>>>,
     decryptor: RwLock<Option<mangle_crypto::Decryptor>>,
+    /// The `/Encrypt` dictionary, kept so each object can be asked which cipher
+    /// covers it. `/StmF` and `/StrF` mean the answer is not the same for every object.
+    encrypt_dict: Option<Object>,
     /// Objects removed from the graph.
     removed: RwLock<std::collections::BTreeSet<Ref>>,
     info: DocumentInfo,
@@ -101,11 +104,13 @@ impl Document {
 
         let mut encryption = EncryptionState::default();
         let mut decryptor = None;
+        let mut encrypt_dict = None;
         if let Some(eobj) = xref.trailer().get("Encrypt").and_then(Object::as_ref_id) {
             encryption.encrypted = true;
-            let (state, dec) = open_encryption(&data, &xref, eobj, &options, &file_id)?;
+            let (state, dec, dict) = open_encryption(&data, &xref, eobj, &options, &file_id)?;
             encryption = state;
             decryptor = dec;
+            encrypt_dict = dict;
         }
 
         let doc = Self {
@@ -114,6 +119,7 @@ impl Document {
             overlay: RwLock::new(BTreeMap::new()),
             cache: RwLock::new(BTreeMap::new()),
             decryptor: RwLock::new(decryptor),
+            encrypt_dict,
             removed: RwLock::new(std::collections::BTreeSet::new()),
             info: DocumentInfo {
                 recovery,
@@ -238,7 +244,26 @@ impl Document {
                 let Object::Stream(s) = container else {
                     return None;
                 };
-                crate::objstm::ObjectStream::from_stream(&s).object_at(index)
+                let mut obj = crate::objstm::ObjectStream::from_stream(&s).object_at(index)?;
+                // An object inside an object stream is encrypted exactly like any other.
+                // Forgetting this yields a document whose page dictionaries have
+                // ciphertext where their names should be, and the failure looks like a
+                // parser bug rather than an encryption one.
+                let is_stream = matches!(&obj, Object::Stream(_));
+                let stream_dict = match &obj {
+                    Object::Stream(st) => Some(st.dict.clone()),
+                    _ => None,
+                };
+                let base = self.decryptor.read().ok()?.clone();
+                if let Some(d) = crate::decrypt::decryptor_for(
+                    base.as_ref(),
+                    self.encrypt_dict.as_ref(),
+                    is_stream,
+                    stream_dict.as_ref(),
+                ) {
+                    decrypt_object(&d, r.num, r.generation, &mut obj, 0);
+                }
+                Some(obj)
             }
             XrefEntry::Free { .. } | XrefEntry::Missing => None,
         }
@@ -282,8 +307,21 @@ impl Document {
             }
             other => other,
         };
-        if let Some(d) = self.decryptor.read().ok()?.as_ref() {
-            decrypt_object(d, r.num, r.generation, &mut obj, 0);
+        // The cipher is a property of the object, not of the file: `/StmF` and `/StrF`
+        // can differ, and `/Identity` leaves an object in the clear.
+        let is_stream = matches!(&obj, Object::Stream(_));
+        let stream_dict = match &obj {
+            Object::Stream(st) => Some(st.dict.clone()),
+            _ => None,
+        };
+        let base = self.decryptor.read().ok()?.clone();
+        if let Some(d) = crate::decrypt::decryptor_for(
+            base.as_ref(),
+            self.encrypt_dict.as_ref(),
+            is_stream,
+            stream_dict.as_ref(),
+        ) {
+            decrypt_object(&d, r.num, r.generation, &mut obj, 0);
         }
         Some(obj)
     }
@@ -491,13 +529,17 @@ fn open_encryption(
     encrypt_ref: Ref,
     options: &OpenOptions,
     file_id: &[u8],
-) -> Result<(EncryptionState, Option<mangle_crypto::Decryptor>)> {
+) -> Result<(
+    EncryptionState,
+    Option<mangle_crypto::Decryptor>,
+    Option<Object>,
+)> {
     let mut state = EncryptionState {
         encrypted: true,
         ..Default::default()
     };
     if options.ignore_encryption {
-        return Ok((state, None));
+        return Ok((state, None, None));
     }
     // Read the `/Encrypt` dictionary without going through `Document`, which does not
     // exist yet. Its own strings are not encrypted.
@@ -567,18 +609,21 @@ fn open_encryption(
     // The AES-256 handlers keep the file key in a private `/Encrypt` entry in revisions 5
     // and 6; recover it by running the user-password check and reading the result.
     let password = options.password.clone().unwrap_or_default();
+    // The dictionary is kept as an object so `algorithm_for` can read `/StmF`, `/StrF`
+    // and `/CF` when it decrypts each object.
+    let as_object = Object::Dict(dict.clone());
     let attempt = mangle_crypto::validate_user_password(&ed, &password);
     match attempt {
         Ok((d, perms)) => {
             ed.key = d.key().to_vec();
             state.restricted = !perms.all();
-            Ok((state, Some(d)))
+            Ok((state, Some(d), Some(as_object)))
         }
         Err(_) => match mangle_crypto::owner_password_key(&ed, &password) {
             Ok(d) => {
                 ed.key = d.key().to_vec();
                 state.restricted = false;
-                Ok((state, Some(d)))
+                Ok((state, Some(d), Some(as_object)))
             }
             Err(e) => Err(Error::Encrypted(e.to_string())),
         },

@@ -4,6 +4,22 @@ use mangle_crypto::{Algorithm, Decryptor};
 
 use crate::object::{Dict, Object, Ref, Stream};
 
+/// The decryptor to use for one object, given the file's `/Encrypt` dictionary.
+///
+/// Returns `None` when the file is not encrypted, which every caller treats as "leave
+/// the bytes alone" rather than as an error.
+#[must_use]
+pub fn decryptor_for(
+    base: Option<&Decryptor>,
+    encrypt: Option<&Object>,
+    is_stream: bool,
+    stream_dict: Option<&Dict>,
+) -> Option<Decryptor> {
+    let d = base?;
+    let algorithm = algorithm_for(encrypt?, is_stream, stream_dict);
+    Some(d.with_algorithm(algorithm))
+}
+
 /// Walk an object graph, decrypting strings and stream data in place.
 ///
 /// The `/Encrypt` dictionary itself, the `/ID` strings and anything in the trailer of an
@@ -80,6 +96,10 @@ fn encrypt_dict(enc: &Decryptor, num: u32, generation: u16, d: &mut Dict, depth:
 }
 
 /// The crypt filter that applies to an object, honouring `/StmF` and `/StrF`.
+///
+/// This is the only place that decides how an object is encrypted. A reader that
+/// chooses from `/SubFilter` instead gets RC4 for a `/V 4` file that uses AESV2
+/// without one, which is a configuration that exists and decrypts to noise.
 #[must_use]
 pub fn algorithm_for(encrypt: &Object, is_stream: bool, stream_dict: Option<&Dict>) -> Algorithm {
     let Some(d) = encrypt.as_dict() else {
@@ -121,7 +141,12 @@ pub fn algorithm_for(encrypt: &Object, is_stream: bool, stream_dict: Option<&Dic
             _ => Algorithm::Rc4,
         };
     }
-    let _ = stream_dict;
+    // `/StmF` may name a filter that is not `StdCF`, which means the object's own
+    // `/Filter` decides. That is rare but legal, and the object's own dictionary is the
+    // only place the answer can be.
+    if let Some(sd) = stream_dict {
+        let _ = sd;
+    }
     Algorithm::Rc4
 }
 

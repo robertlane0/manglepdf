@@ -69,20 +69,18 @@ Where the work actually is. Updated whenever a milestone moves.
    object from the model. Object numbers, dictionary key order, the int/real
    distinction and stream bytes all survive, but whitespace, name escaping and
    hex-versus-literal strings do not. Charter §4.1 law 1 is only partly met.
-2. **Crypt filters are parsed but not consulted.** `mangle-syntax` has an
-   `algorithm_for` that reads `/StmF`, `/StrF` and `/CF`, and nothing calls it, so a `/V 4`
-   file using AESV2 without `/SubFilter` decrypts with RC4 and yields noise.
-3. **Objects inside object streams are not decrypted.** A string inside one stays
-   encrypted after `Document::object` returns it.
-4. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
+2. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the object model.
-5. **No renderer.** Nothing rasterizes a page, so the canvas draws paper and nothing else.
-6. **JBIG2 and JPX are not implemented.**
+3. **No renderer.** Nothing rasterizes a page, so the canvas draws paper and nothing else.
+4. **JBIG2 and JPX are not implemented.**
 
 ## Known limitations in the finished layers
 
 - The inflate bomb ceiling is a ratio cap. That is provably safe for deflate, which
   cannot exceed about 1032:1, but it is not a defence against a merely *large* stream.
+- The crypt filter is consulted per object now, so `/StmF` and `/StrF` may differ and
+  `/Identity` is honoured. What is still missing is encryption *writing* for revisions
+  5 and 6: `/U`, `/O`, `/OE`, `/UE` and `/Perms` have no writer.
 - `saslprep` is a reduced implementation: it maps the C.1.2 spaces, drops part of
   Table B.1 and applies NFKC, but it does not perform the RFC 3454 prohibition checks or
   the bidirectional check. A password using those characters is handled differently

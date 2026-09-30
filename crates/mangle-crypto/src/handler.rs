@@ -90,6 +90,21 @@ impl Decryptor {
             encrypt_metadata,
         }
     }
+
+    /// The same key under a different algorithm.
+    ///
+    /// A file can name one crypt filter for streams and another for strings, and can
+    /// leave some objects out of encryption entirely, so the algorithm is a property of
+    /// the object rather than of the file. The key does not change; only the cipher.
+    #[must_use]
+    pub fn with_algorithm(&self, algorithm: Algorithm) -> Self {
+        Self {
+            algorithm,
+            aesv3: matches!(algorithm, Algorithm::AesV3),
+            key: self.key.clone(),
+            encrypt_metadata: self.encrypt_metadata,
+        }
+    }
 }
 
 impl Decryptor {
