@@ -288,12 +288,24 @@ fn revision_id(bytes: &[u8]) -> Vec<u8> {
     h.to_be_bytes().to_vec()
 }
 
-/// A full rewrite: mark-and-sweep from the trailer roots, then a fresh cross-reference.
+/// A full rewrite: the objects, then a fresh cross-reference.
 #[derive(Debug, Clone)]
 pub struct Writer<'a> {
     objects: &'a BTreeMap<u32, Object>,
     generations: &'a BTreeMap<u32, u16>,
     options: WriteOptions,
+    /// Where each object lives in the original file, for the objects we copy rather
+    /// than re-serialise. This is the whole of the lossless full save: an object whose
+    /// bytes we already have are not rebuilt from the model.
+    verbatim: Option<Verbatim<'a>>,
+}
+
+/// The original bytes, and the span of each object inside them.
+#[derive(Debug, Clone, Copy)]
+pub struct Verbatim<'a> {
+    pub bytes: &'a [u8],
+    /// Object number to `(start, end)`. A missing entry means "re-serialise this one".
+    pub spans: &'a BTreeMap<u32, (usize, usize)>,
 }
 
 impl<'a> Writer<'a> {
@@ -307,7 +319,35 @@ impl<'a> Writer<'a> {
             objects,
             generations,
             options,
+            verbatim: None,
         }
+    }
+
+    /// Copy untouched objects out of the original file instead of re-serialising them.
+    ///
+    /// An object in `spans` is written as the bytes it was found as, which is the only
+    /// way whitespace, name escaping and hex-versus-literal strings survive a save. The
+    /// cross-reference is still rebuilt, because a rewrite moves everything.
+    #[must_use]
+    pub fn copying_from(
+        mut self,
+        bytes: &'a [u8],
+        spans: &'a BTreeMap<u32, (usize, usize)>,
+    ) -> Self {
+        self.verbatim = Some(Verbatim { bytes, spans });
+        self
+    }
+
+    /// The original bytes of an object, when we have them.
+    fn verbatim_slice(&self, num: u32) -> Option<&'a [u8]> {
+        let v = self.verbatim.as_ref()?;
+        let (start, end) = *v.spans.get(&num)?;
+        let slice = v.bytes.get(start..end)?;
+        // A span that does not begin with an object header is not one of ours.
+        slice
+            .first()
+            .is_some_and(u8::is_ascii_digit)
+            .then_some(slice)
     }
 
     /// Objects reachable from `roots`, in ascending order.
@@ -364,7 +404,18 @@ impl<'a> Writer<'a> {
             }
             let at = out.len();
             let generation = self.generations.get(num).copied().unwrap_or(0);
-            write_indirect(*num, generation, obj, &mut out);
+            match self.verbatim_slice(*num) {
+                // The object is copied exactly as it was found.
+                Some(slice) => {
+                    out.extend_from_slice(slice);
+                    // A copied object keeps its original trailing whitespace, so the
+                    // next object starts wherever the original had it next.
+                    if !out.ends_with(b"\n") {
+                        out.push(b'\n');
+                    }
+                }
+                None => write_indirect(*num, generation, obj, &mut out),
+            }
             xref.push((
                 *num,
                 XrefEntry::InFile {

@@ -65,14 +65,15 @@ Where the work actually is. Updated whenever a milestone moves.
 
 ## Gaps, in the order they block
 
-1. **The full rewrite is not yet byte-preserving.** `Writer::write` re-serialises every
-   object from the model. Object numbers, dictionary key order, the int/real
-   distinction and stream bytes all survive, but whitespace, name escaping and
-   hex-versus-literal strings do not. Charter §4.1 law 1 is only partly met.
-2. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
+1. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the object model.
-3. **No renderer.** Nothing rasterizes a page, so the canvas draws paper and nothing else.
-4. **JBIG2 and JPX are not implemented.**
+2. **No renderer.** Nothing rasterizes a page, so the canvas draws paper and nothing else.
+3. **JBIG2 and JPX are not implemented.**
+4. **An object that came out of an object stream cannot keep its original bytes**,
+   because it had none: it was compressed with everything else in its container. A full
+   save writes it as a direct object, which every reader accepts but which is a
+   re-serialisation rather than a copy.
+5. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
 
 ## Known limitations in the finished layers
 
@@ -88,5 +89,6 @@ Where the work actually is. Updated whenever a milestone moves.
 - Object-stream writing is not implemented, so `WriteOptions::use_object_streams` has no
   effect. The defaults deliberately produce the classic layout, which every reader
   accepts.
-- A full save copies the original header version but not the original binary comment
-  or the exact bytes of anything.
+- A full save copies the original header version, but the cross-reference and trailer are
+  necessarily rebuilt: a rewrite moves every object, so their offsets change. Every
+  *object* keeps its bytes, which a test proves across the whole corpus.

@@ -104,7 +104,23 @@ impl Document {
                     trailer.set("Info", Object::Ref(info));
                 }
                 let roots: Vec<Ref> = self.catalog_ref().into_iter().collect();
-                let writer = Writer::new(&objects.0, &objects.1, wopts);
+                // An object that is neither in the overlay nor removed was never
+                // touched, so its original bytes are still the truth. Copying them is
+                // the difference between a lossless save and a re-serialisation that
+                // happens to parse.
+                let touched: std::collections::BTreeSet<u32> = self
+                    .overlay()
+                    .into_iter()
+                    .map(|(r, _)| r.num)
+                    .chain(self.removed_refs().into_iter().map(|r| r.num))
+                    .collect();
+                let spans: BTreeMap<u32, (usize, usize)> = self
+                    .object_spans()
+                    .into_iter()
+                    .filter(|(num, _)| !touched.contains(num))
+                    .collect();
+                let writer =
+                    Writer::new(&objects.0, &objects.1, wopts).copying_from(self.bytes(), &spans);
                 let bytes = writer.write(&roots, &trailer);
                 SaveReport {
                     bytes,

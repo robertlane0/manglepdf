@@ -78,6 +78,12 @@ pub struct Document {
     overlay: RwLock<BTreeMap<Ref, Object>>,
     /// Decoded objects, so repeated reads are cheap.
     cache: RwLock<BTreeMap<Ref, Arc<Object>>>,
+    /// Where each object starts and ends in the original file.
+    ///
+    /// This is what makes a full save lossless: an object we never touched is copied
+    /// out of these bytes rather than rebuilt from the model, so its whitespace, its
+    /// name escaping and its hex-versus-literal strings all survive.
+    spans: RwLock<BTreeMap<Ref, (usize, usize)>>,
     decryptor: RwLock<Option<mangle_crypto::Decryptor>>,
     /// The `/Encrypt` dictionary, kept so each object can be asked which cipher
     /// covers it. `/StmF` and `/StrF` mean the answer is not the same for every object.
@@ -118,6 +124,7 @@ impl Document {
             xref: RwLock::new(Arc::new(xref)),
             overlay: RwLock::new(BTreeMap::new()),
             cache: RwLock::new(BTreeMap::new()),
+            spans: RwLock::new(BTreeMap::new()),
             decryptor: RwLock::new(decryptor),
             encrypt_dict,
             removed: RwLock::new(std::collections::BTreeSet::new()),
@@ -284,6 +291,9 @@ impl Document {
         }
         let dict_start = p.position();
         let first = p.next_object().ok().flatten()?;
+        // How far the object reaches. A stream's own parse knows where `endstream`
+        // finished, which is further than the parser has read.
+        let mut end = p.position();
         let mut obj = match first {
             Object::Dict(d) => {
                 // A stream may follow the dictionary.
@@ -291,12 +301,15 @@ impl Document {
                 if has_stream {
                     let len = d.get("Length").and_then(|o| self.resolve_length(o));
                     match Parser::parse_stream(self.bytes(), dict_start, len) {
-                        Ok((sd, raw, _)) => Object::Stream(Stream {
-                            dict: sd,
-                            raw,
-                            file_offset: Some(offset),
-                            synthetic: false,
-                        }),
+                        Ok((sd, raw, after)) => {
+                            end = end.max(after);
+                            Object::Stream(Stream {
+                                dict: sd,
+                                raw,
+                                file_offset: Some(offset),
+                                synthetic: false,
+                            })
+                        }
                         // The keyword was there but the body is unreadable; keep the
                         // dictionary so the rest of the document still resolves.
                         Err(_) => Object::Dict(d),
@@ -307,6 +320,20 @@ impl Document {
             }
             other => other,
         };
+        // The span has to include `endobj`, or a copied object arrives without it and
+        // every reader has to guess where the next object begins. For a stream the
+        // parser has not read that far, so it is found by looking at the bytes.
+        if p.next_keyword(b"endobj") {
+            end = end.max(p.position());
+        } else if let Some(after) = self.bytes.get(end..) {
+            let lead = after
+                .iter()
+                .position(|b| !b.is_ascii_whitespace() && *b != 0)
+                .unwrap_or(after.len());
+            if after.get(lead..lead + 6) == Some(b"endobj") {
+                end += lead + 6;
+            }
+        }
         // The cipher is a property of the object, not of the file: `/StmF` and `/StrF`
         // can differ, and `/Identity` leaves an object in the clear.
         let is_stream = matches!(&obj, Object::Stream(_));
@@ -322,6 +349,12 @@ impl Document {
             stream_dict.as_ref(),
         ) {
             decrypt_object(&d, r.num, r.generation, &mut obj, 0);
+        }
+        // Remember the byte range this object occupies, so a full save can copy it.
+        if end > offset
+            && let Ok(mut spans) = self.spans.write()
+        {
+            spans.insert(r, (offset, end));
         }
         Some(obj)
     }
@@ -486,6 +519,19 @@ impl Document {
     #[must_use]
     pub fn object_numbers(&self) -> Vec<u32> {
         self.with_xref(|x| x.object_numbers().collect())
+    }
+
+    /// Where each object lives in the original file, for a byte-preserving save.
+    ///
+    /// Only objects that were read directly from the file have a span. An object that
+    /// came out of an object stream has no single range, and is re-serialised on save,
+    /// which is the one case where its original bytes cannot be kept.
+    #[must_use]
+    pub fn object_spans(&self) -> BTreeMap<u32, (usize, usize)> {
+        self.spans
+            .read()
+            .map(|s| s.iter().map(|(r, span)| (r.num, *span)).collect())
+            .unwrap_or_default()
     }
 
     /// The object numbers that have been removed from the graph.

@@ -508,3 +508,162 @@ fn a_repaired_file_is_rewritten_rather_than_appended_to() {
     assert!(reopened.info().recovery.is_clean());
     assert_eq!(reopened.page_count().expect("pages"), 2);
 }
+
+/// The property the whole syntax layer exists for: a full save that changes nothing
+/// preserves every object byte for byte, and a save that changes one object changes
+/// only that object.
+#[test]
+fn a_full_save_preserves_the_bytes_of_every_untouched_object() {
+    let original = sample();
+    let doc = open(original.clone());
+
+    // A save with no edit at all: the cross-reference moves, the objects do not.
+    let saved = doc.save(&SaveOptions::default()).expect("save");
+    let orig = object_bodies(&original);
+    let after = object_bodies(&saved.bytes);
+
+    for (num, body) in &orig {
+        let Some(after_body) = after.get(num) else {
+            panic!("object {num} went missing from the saved file");
+        };
+        assert_eq!(
+            body, after_body,
+            "object {num} changed even though nothing was edited"
+        );
+    }
+}
+
+/// The same, for every Tier-A fixture, so the property is not an accident of the
+/// hand-built sample.
+#[test]
+fn the_property_holds_for_the_whole_corpus() {
+    let Some(dir) = corpus_dir() else {
+        eprintln!("skipped: run `cargo xtask fixtures` first");
+        return;
+    };
+    for entry in manifest() {
+        let bytes = std::fs::read(dir.join(&entry.file)).expect("fixture file");
+        let doc = Document::open(bytes, OpenOptions::default())
+            .unwrap_or_else(|e| panic!("{}: {e}", entry.file));
+        // Read every object, so every object has a recorded span.
+        for num in doc.object_numbers() {
+            let _ = doc.object(Ref::new(num, 0));
+        }
+        let saved = doc
+            .save(&SaveOptions::default())
+            .unwrap_or_else(|e| panic!("{}: {e}", entry.file));
+        let original = std::fs::read(dir.join(&entry.file)).expect("fixture");
+        let before = object_bodies(&original);
+        let after = object_bodies(&saved.bytes);
+        for (num, body) in &before {
+            if let Some(after_body) = after.get(num) {
+                assert_eq!(
+                    body, after_body,
+                    "{}: object {num} changed on a save that edited nothing",
+                    entry.file
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn an_edit_changes_only_the_edited_object() {
+    let original = sample();
+    let doc = open(original.clone());
+    let mut stream = match doc.object(Ref::new(4, 0)).expect("stream 4") {
+        Object::Stream(s) => s,
+        other => panic!("expected a stream, got {other:?}"),
+    };
+    stream.raw = b"BT /F1 48 Tf (Explore) Tj ET".to_vec();
+    let len = i64::try_from(stream.raw.len()).unwrap_or(0);
+    stream.dict.set("Length", Object::Int(len));
+    doc.set(Ref::new(4, 0), Object::Stream(stream));
+
+    let saved = doc.save(&SaveOptions::default()).expect("save");
+    let before = object_bodies(&original);
+    let after = object_bodies(&saved.bytes);
+
+    for (num, body) in &before {
+        if *num == 4 {
+            assert_ne!(body, after.get(num).expect("object 4"), "the edit was lost");
+            continue;
+        }
+        assert_eq!(
+            body,
+            after.get(num).unwrap_or(body),
+            "object {num} changed even though only object 4 was edited"
+        );
+    }
+}
+
+/// Every indirect object's bytes, keyed by number: `N G obj` through `endobj`.
+fn object_bodies(data: &[u8]) -> std::collections::BTreeMap<u32, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut i = 0usize;
+    while i + 6 <= data.len() {
+        let Some(header) = data[i..].windows(6).position(|w| w == b" obj") else {
+            break;
+        };
+        let start = i + header;
+        // The number is the digits before ` obj`.
+        let mut j = start;
+        while j > 0 && data[j - 1].is_ascii_digit() {
+            j -= 1;
+        }
+        let num: u32 = data
+            .get(j..start.saturating_sub(1))
+            .and_then(|s| std::str::from_utf8(s).ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if num == 0 {
+            i = start + 4;
+            continue;
+        }
+        // The body runs to the `endobj` that follows.
+        let after = start + 4;
+        let end = data
+            .get(after..)
+            .and_then(|rest| rest.windows(7).position(|w| w == b"endobj"))
+            .map(|p| after + p + 6)
+            .unwrap_or(data.len());
+        out.insert(num, data.get(j..end).unwrap_or_default().to_vec());
+        i = end;
+    }
+    out
+}
+
+fn corpus_dir() -> Option<std::path::PathBuf> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)?;
+    let dir = root.join("fixtures");
+    dir.join("MANIFEST.toml").is_file().then_some(dir)
+}
+
+/// A minimal reader of the manifest, for the fields the corpus test needs.
+fn manifest() -> Vec<FixtureEntry> {
+    let Some(dir) = corpus_dir() else {
+        return Vec::new();
+    };
+    let Ok(raw) = std::fs::read_to_string(dir.join("MANIFEST.toml")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut file = String::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("file = \"") {
+            file = v.trim_end_matches('"').to_string();
+        } else if line == "]" && !file.is_empty() {
+            out.push(FixtureEntry {
+                file: std::mem::take(&mut file),
+            });
+        }
+    }
+    out
+}
+
+struct FixtureEntry {
+    file: String,
+}
