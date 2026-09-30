@@ -35,12 +35,20 @@ impl Permissions {
 
     #[must_use]
     pub fn all(&self) -> bool {
-        // Bits 1, 2 and 7-8 are reserved and must be 1 for the document to be valid.
-        self.allows_everything()
+        // Every permission the standard security handler defines is granted. Bits 7
+        // and 8 are reserved (they should be 1) and bits 13-32 are undefined; neither
+        // changes what the document permits, and real files vary in both, so neither
+        // is required here.
+        self.bits & DEFINED_PERMISSION_MASK == DEFINED_PERMISSION_MASK
     }
 
-    fn allows_everything(&self) -> bool {
-        self.bits & PERMISSION_MASK == PERMISSION_MASK
+    /// Whether the reserved bits are set as ISO 32000-1 requires.
+    ///
+    /// A file that fails this is malformed, but the specification still says to honour
+    /// its permissions, so this is a diagnostic for the UI and not a gate.
+    #[must_use]
+    pub fn well_formed(&self) -> bool {
+        self.bits & RESERVED_MASK == RESERVED_MASK
     }
 
     /// Printing is allowed.
@@ -104,10 +112,10 @@ fn mask(bit: u32) -> i32 {
     1i32 << (32 - bit.min(32))
 }
 
-/// Bits 1, 2, 7 and 8 (counting from the most significant) are reserved and must be 1.
+/// Bits 1, 2, 7 and 8 (counting from the most significant) are reserved and should be 1.
 const RESERVED_MASK: i32 = 0xC300_0000_u32 as i32;
-/// Every bit that is not reserved is a permission.
-const PERMISSION_MASK: i32 = !RESERVED_MASK;
+/// The permission bits ISO 32000-1 Table 22 actually defines (3-6 and 9-12).
+const DEFINED_PERMISSION_MASK: i32 = 0x3EF0_0000_u32 as i32;
 
 /// A short sentence for the UI's restriction banner.
 #[must_use]
@@ -151,9 +159,31 @@ mod tests {
 
     #[test]
     fn all_permissions() {
-        let p = Permissions::from_bits(!RESERVED_MASK);
-        assert!(p.all());
-        assert!(p.print() && p.modify() && p.extract() && p.annotate() && p.assemble());
+        // The values real producers write for "no restrictions": qpdf uses -4, many
+        // other writers use -1. The low bits must not change the answer.
+        for bits in [-4, -1] {
+            let p = Permissions::from_bits(bits);
+            assert!(p.all(), "/P = {bits}");
+            assert!(
+                p.print() && p.modify() && p.extract() && p.annotate() && p.assemble(),
+                "/P = {bits}"
+            );
+            assert_eq!(describe(&p), "no restrictions");
+        }
+    }
+
+    #[test]
+    fn clearing_one_permission_is_enough_to_restrict() {
+        for bit in [
+            BIT_PRINT,
+            BIT_MODIFY,
+            BIT_EXTRACT,
+            BIT_ANNOTATE,
+            BIT_ASSEMBLE,
+        ] {
+            let p = Permissions::from_bits(Permissions::set(bit, false, -4));
+            assert!(!p.all(), "bit {bit} was cleared");
+        }
     }
 
     #[test]

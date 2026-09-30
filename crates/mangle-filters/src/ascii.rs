@@ -84,15 +84,22 @@ pub fn ascii85_decode(input: &[u8]) -> Partial {
         i += 1;
     }
     if bytes.get(i) == Some(&b'<') {
-        // A `<~` marker is tolerated but not required.
+        // An optional `<~` start marker; both characters are part of it.
         i += 1;
+        if bytes.get(i) == Some(&b'~') {
+            i += 1;
+        }
     }
 
     while i < bytes.len() {
         let b = bytes[i];
         match b {
-            b'~' => {
+            b'~' if bytes.get(i + 1) == Some(&b'>') => {
                 seen_terminator = true;
+                break;
+            }
+            b'~' => {
+                note = Some(format!("bare `~` at offset {i} is not the `~>` terminator"));
                 break;
             }
             b'z' if n == 0 => {
@@ -225,5 +232,24 @@ mod tests {
         let p = ascii85_decode(b"9jqo");
         assert!(!p.complete);
         assert_eq!(p.data, b"Man");
+    }
+
+    #[test]
+    fn a85_start_marker_is_part_of_the_data_header() {
+        // Regression: `<~` used to consume only the `<`, so the `~` was read as the
+        // terminator and the whole stream decoded to nothing while claiming success.
+        let p = ascii85_decode(b"<~87cURD]j7BEbo80~>");
+        assert!(p.complete, "{p:?}");
+        assert!(p.note.is_none(), "{p:?}");
+        assert_eq!(p.data, b"Hello world!");
+    }
+
+    #[test]
+    fn a85_bare_tilde_does_not_terminate() {
+        // A `~` that is not followed by `>` is not the EOD marker.
+        let p = ascii85_decode(b"9jqo~87cURD]j7BEbo80~>");
+        assert!(!p.complete, "{p:?}");
+        assert_eq!(p.data, b"Man");
+        assert!(p.note.unwrap_or_default().contains("bare `~`"));
     }
 }

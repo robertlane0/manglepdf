@@ -542,10 +542,15 @@ fn read_dynamic_tables(br: &mut BitReader<'_>) -> Result<(Huffman, Huffman), Fil
     Ok((lit, dist))
 }
 
-fn output_cap(compressed: usize, hint: usize) -> usize {
+/// The largest output a stream may produce, from its compressed size alone.
+///
+/// The `hint` is deliberately *not* allowed to raise this: hints come from `/Width`,
+/// `/Height` and friends, which an attacker controls, and a declared 20000x20000 image
+/// would otherwise turn a 1 KiB bomb into a 1 GiB allocation. Real Flate data tops out
+/// around 1000:1, so the ratio ceiling only ever bites on a bomb.
+fn output_cap(compressed: usize, _hint: usize) -> usize {
     let ratio_cap = compressed.saturating_mul(MAX_EXPANSION_RATIO).max(4096);
-    let cap = hint.max(ratio_cap).min(MAX_DECODED_BYTES);
-    cap.max(4096)
+    ratio_cap.min(MAX_DECODED_BYTES)
 }
 
 /// Inflate, guessing the output size from `hint` (a `/Length` or an image's row stride).
@@ -604,5 +609,29 @@ mod tests {
         let r = inflate_raw(&data, 0);
         assert!(!r.complete);
         assert!(r.data.len() <= MAX_DECODED_BYTES);
+    }
+
+    #[test]
+    fn an_attacker_supplied_hint_cannot_raise_the_bomb_limit() {
+        // Regression: the cap was `hint.max(ratio_cap)`, and the hint comes from
+        // `/Width` and `/Height`, which the file controls. A 1 KiB image stream that
+        // declared 20000x20000 would have been allowed to produce 1 GiB.
+        assert_eq!(output_cap(1000, 0), 1000 * MAX_EXPANSION_RATIO);
+        assert_eq!(output_cap(1000, usize::MAX), 1000 * MAX_EXPANSION_RATIO);
+        assert_eq!(output_cap(0, 0), 4096);
+        assert_eq!(output_cap(usize::MAX, usize::MAX), MAX_DECODED_BYTES);
+    }
+
+    #[test]
+    fn ordinary_data_still_decodes_whole() {
+        // The ratio ceiling is above what any valid deflate stream can reach (a match
+        // returns at most 258 bytes for a couple of bytes of code, so roughly 1032:1),
+        // so real content is never truncated by the bomb guard.
+        let src = b"the quick brown fox jumps over the lazy dog. ".repeat(20_000);
+        let packed = crate::deflate::deflate(&src, crate::deflate::DeflateLevel::Default);
+        let hinted = inflate_raw(&packed, usize::MAX);
+        assert!(hinted.complete, "{hinted:?}");
+        assert_eq!(hinted.data, src);
+        assert_eq!(inflate_raw(&packed, 0).data, hinted.data);
     }
 }

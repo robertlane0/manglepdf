@@ -158,7 +158,10 @@ impl<'a> Parser<'a> {
                     return Err(Error::at(t.start, "unterminated array"));
                 }
                 Token::DictClose | Token::BraceOpen | Token::BraceClose => {
-                    self.lexer.seek(t.start);
+                    // Not a legal array element. Report it instead of rewinding, which
+                    // would re-read the same token forever.
+                    self.depth -= 1;
+                    return Err(Error::at(t.start, "unexpected token inside an array"));
                 }
                 _ => {
                     self.lexer.seek(t.start);
@@ -434,5 +437,29 @@ mod tests {
         assert!(Parser::new(b"[1 2 3").next_object().is_err());
         assert!(Parser::new(b"<< /A 1").next_object().is_err());
         assert!(Parser::new(b"(abc").next_object().is_err());
+    }
+
+    #[test]
+    fn illegal_token_in_an_array_is_an_error_not_a_hang() {
+        // Regression: these used to rewind to the same token and spin forever.
+        for bad in [
+            &b"[1 2 >>"[..],
+            b"[1 2 {",
+            b"[1 2 }",
+            b"[[[>>",
+            b"[<< /A 1 >> 2",
+        ] {
+            let r = Parser::new(bad).next_object();
+            assert!(r.is_err(), "{bad:?} parsed as {r:?}");
+        }
+    }
+
+    #[test]
+    fn stray_closing_bytes_do_not_exhaust_the_stack() {
+        // Regression: the lexer skipped these by recursing, so a file made entirely of
+        // them overflowed the stack rather than tokenising.
+        let data = vec![b')'; 2_000_000];
+        let mut lx = Lexer::new(&data);
+        assert!(matches!(lx.next_token().expect("token").token, Token::Eof));
     }
 }

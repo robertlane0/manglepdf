@@ -32,13 +32,15 @@ pub fn decode_stream(stream: &Stream) -> Decoded {
         notes: Vec::new(),
     };
     // Image and colour-space filters do not go through the generic chain.
-    if is_image_filter(stream) {
-        return out;
-    }
     let filters = stream.filters();
     let parms = stream.decode_parms();
     // Filters were applied in the order they are listed, so decoding runs backwards.
     for (i, name) in filters.iter().enumerate().rev() {
+        if is_image_filter_name(name) {
+            // Everything below an image filter is image samples (or, for a chain like
+            // `/ASCII85Decode /DCTDecode`, the bytes the image codec itself wants).
+            return out;
+        }
         let parm = parms.get(i).copied().flatten();
         let result: Option<Vec<u8>> = match *name {
             b"FlateDecode" | b"Fl" => {
@@ -122,11 +124,12 @@ pub fn decode_stream(stream: &Stream) -> Decoded {
             && let Some(pp) = predictor_params(p)
             && pp.predictor > 1
         {
-            match unpredict(&out.data, &pp) {
-                Ok(d) => out.data = d,
-                Err(e) => {
-                    out.notes.push(format!("Predictor: {e}"));
-                    out.complete = false;
+            let r = unpredict(&out.data, &pp);
+            out.data = r.data;
+            if !r.complete {
+                out.complete = false;
+                if let Some(n) = r.note {
+                    out.notes.push(n);
                 }
             }
         }
@@ -135,9 +138,9 @@ pub fn decode_stream(stream: &Stream) -> Decoded {
 }
 
 /// Filters whose output is image samples rather than bytes we hand to other filters.
-fn is_image_filter(stream: &Stream) -> bool {
+fn is_image_filter_name(name: &[u8]) -> bool {
     const NAMES: [&[u8]; 4] = [b"DCTDecode", b"DCT", b"JPXDecode", b"JBIG2Decode"];
-    stream.filters().iter().any(|f| NAMES.contains(f))
+    NAMES.contains(&name)
 }
 
 /// A size hint for inflate, from the image dimensions when we can work them out.
@@ -159,9 +162,19 @@ fn expected_size(stream: &Stream, _raw: &[u8]) -> usize {
             .and_then(Object::as_i64)
             .unwrap_or(8);
         let colors = stream.dict.get("ColorSpace").map_or(3, color_components);
-        let bits = w * h * bpc * colors;
-        let bytes = (bits + 7) / 8;
-        return usize::try_from(bytes.max(0)).unwrap_or(0);
+        // Untrusted dimensions: saturate rather than overflow.
+        let bits = i64::from(u16::try_from(w.clamp(0, u16::MAX as i64)).unwrap_or(u16::MAX))
+            .saturating_mul(i64::from(
+                u16::try_from(h.clamp(0, u16::MAX as i64)).unwrap_or(u16::MAX),
+            ))
+            .saturating_mul(i64::from(
+                u16::try_from(bpc.clamp(0, u16::MAX as i64)).unwrap_or(u16::MAX),
+            ))
+            .saturating_mul(i64::from(
+                u16::try_from(colors.clamp(0, u16::MAX as i64)).unwrap_or(u16::MAX),
+            ));
+        let bytes = bits.saturating_add(7) / 8;
+        return usize::try_from(bytes.max(0)).unwrap_or(usize::MAX);
     }
     0
 }

@@ -67,6 +67,10 @@ impl Partial {
 pub const MAX_DECODED_BYTES: usize = 1 << 30;
 
 /// How much a stream may expand before it is treated as a decompression bomb.
+///
+/// A deflate match returns at most 258 bytes for a few bits of code, so no valid
+/// stream can exceed roughly 1032:1. Sitting above that means this ceiling can only
+/// ever stop a crafted or corrupt stream, never a real one.
 pub const MAX_EXPANSION_RATIO: usize = 1200;
 
 #[cfg(test)]

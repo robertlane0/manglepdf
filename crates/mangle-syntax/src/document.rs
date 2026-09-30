@@ -5,7 +5,7 @@
 //! exactly the objects that differ.
 
 use std::collections::BTreeMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::decrypt::decrypt_object;
 use crate::error::{Error, Result};
@@ -72,12 +72,12 @@ const MAX_PAGES: usize = 1_000_000;
 /// A document: the file bytes, the cross-reference, and a copy-on-write overlay.
 #[derive(Debug)]
 pub struct Document {
-    bytes: std::sync::Arc<Vec<u8>>,
-    xref: RwLock<Xref>,
+    bytes: Arc<Vec<u8>>,
+    xref: RwLock<Arc<Xref>>,
     /// Objects that have been changed or created. This is what gets written.
     overlay: RwLock<BTreeMap<Ref, Object>>,
     /// Decoded objects, so repeated reads are cheap.
-    cache: RwLock<BTreeMap<Ref, std::sync::Arc<Object>>>,
+    cache: RwLock<BTreeMap<Ref, Arc<Object>>>,
     decryptor: RwLock<Option<mangle_crypto::Decryptor>>,
     /// Objects removed from the graph.
     removed: RwLock<std::collections::BTreeSet<Ref>>,
@@ -109,8 +109,8 @@ impl Document {
         }
 
         let doc = Self {
-            bytes: std::sync::Arc::new(data),
-            xref: RwLock::new(xref),
+            bytes: Arc::new(data),
+            xref: RwLock::new(Arc::new(xref)),
             overlay: RwLock::new(BTreeMap::new()),
             cache: RwLock::new(BTreeMap::new()),
             decryptor: RwLock::new(decryptor),
@@ -140,11 +140,13 @@ impl Document {
         &self.info
     }
 
-    /// The cross-reference state.
+    /// The cross-reference state, shared without copying.
     #[must_use]
-    pub fn xref(&self) -> std::sync::Arc<Xref> {
-        drop(self.xref.read());
-        std::sync::Arc::new(Xref::default())
+    pub fn xref(&self) -> Arc<Xref> {
+        match self.xref.read() {
+            Ok(g) => Arc::clone(&g),
+            Err(p) => Arc::clone(p.get_ref()),
+        }
     }
 
     /// A snapshot of the cross-reference, for callers that need to read it.
@@ -190,19 +192,19 @@ impl Document {
         }
         let obj = self.load_from_file(r)?;
         if let Ok(mut c) = self.cache.write() {
-            c.insert(r, std::sync::Arc::new(obj.clone()));
+            c.insert(r, Arc::new(obj.clone()));
         }
         Some(obj)
     }
 
     /// Fetch a shared object, avoiding a copy on repeated reads.
     #[must_use]
-    pub fn shared(&self, r: Ref) -> Option<std::sync::Arc<Object>> {
+    pub fn shared(&self, r: Ref) -> Option<Arc<Object>> {
         if self.removed.read().ok()?.contains(&r) {
             return None;
         }
         if let Some(o) = self.overlay.read().ok()?.get(&r) {
-            return Some(std::sync::Arc::new(o.clone()));
+            return Some(Arc::new(o.clone()));
         }
         if let Ok(c) = self.cache.read()
             && let Some(a) = c.get(&r)
@@ -210,7 +212,7 @@ impl Document {
             return Some(a.clone());
         }
         let obj = self.load_from_file(r)?;
-        let arc = std::sync::Arc::new(obj);
+        let arc = Arc::new(obj);
         if let Ok(mut c) = self.cache.write() {
             c.insert(r, arc.clone());
         }
@@ -327,7 +329,7 @@ impl Document {
     pub fn alloc(&self) -> Ref {
         let num = self.with_xref(|x| x.size());
         if let Ok(mut x) = self.xref.write() {
-            x.set_trailer_key_size(num + 1);
+            Arc::make_mut(&mut *x).set_trailer_key_size(num + 1);
         }
         Ref::new(num, 0)
     }

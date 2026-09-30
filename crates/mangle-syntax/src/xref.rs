@@ -424,36 +424,31 @@ pub fn find_root(data: &[u8], xref: &Xref) -> Option<crate::object::Ref> {
     if let Some(r) = xref.trailer.get("Root").and_then(Object::as_ref_id) {
         return Some(r);
     }
-    // Scan for `/Type /Catalog` as a fallback.
+    // Scan the objects the xref knows about for `/Type /Catalog`.
     for (num, entry) in xref.live_objects() {
         let XrefEntry::InFile { offset, .. } = entry else {
             continue;
         };
-        let Some(chunk) = data.get(offset..) else {
-            continue;
-        };
-        if find_type_catalog(chunk) {
+        // Parse only the object at this offset; lexing to end-of-file per candidate
+        // would make recovery quadratic in the file size.
+        if let Some(Object::Dict(d)) = indirect_dict_at(data, offset)
+            && d.get("Type").and_then(Object::as_name) == Some(&b"Catalog"[..])
+        {
             return Some(crate::object::Ref::new(num, 0));
         }
     }
     None
 }
 
-fn find_type_catalog(chunk: &[u8]) -> bool {
-    let mut lx = Lexer::new(chunk);
-    while let Ok(t) = lx.next_token() {
-        if t.is_keyword(b"obj") {
-            if let Ok(Some(Object::Dict(d))) = Parser::at(chunk, t.end).next_object() {
-                if d.get("Type").and_then(Object::as_name) == Some(&b"Catalog"[..]) {
-                    return true;
-                }
-            }
-        }
-        if lx.at_end() {
-            break;
-        }
+/// The dictionary of the `N G obj` whose header starts at `offset`, if it has one.
+fn indirect_dict_at(data: &[u8], offset: usize) -> Option<Object> {
+    let mut p = Parser::at(data, offset);
+    p.next_object().ok().flatten()?;
+    p.next_object().ok().flatten()?;
+    if !p.next_keyword(b"obj") {
+        return None;
     }
-    false
+    p.next_object().ok().flatten()
 }
 
 /// A minimal `Dict` helper used by the writer when it must synthesise a trailer.

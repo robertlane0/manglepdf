@@ -132,16 +132,34 @@ impl<'a> Lexer<'a> {
     }
 
     /// The next token with its byte span. Comments are skipped.
+    ///
+    /// Bytes that cannot start a token (`>` and `)`, which only ever appear from
+    /// damage) are skipped by looping, not by recursing, so a file made entirely of
+    /// them cannot exhaust the stack.
     pub fn next_token(&mut self) -> Result<Spanned> {
-        self.skip_space();
-        let start = self.pos;
-        let Some(&b) = self.data.get(self.pos) else {
-            return Ok(Spanned {
-                token: Token::Eof,
-                start,
-                end: start,
-            });
+        let start = loop {
+            self.skip_space();
+            let start = self.pos;
+            let Some(&b) = self.data.get(self.pos) else {
+                return Ok(Spanned {
+                    token: Token::Eof,
+                    start,
+                    end: start,
+                });
+            };
+            match b {
+                b'>' if self.data.get(self.pos + 1) != Some(&b'>') => {
+                    self.pos += 1;
+                    continue;
+                }
+                b')' => {
+                    self.pos += 1;
+                    continue;
+                }
+                _ => break start,
+            }
         };
+        let b = self.data.get(start).copied().unwrap_or(0);
         let token = match b {
             b'[' => {
                 self.pos += 1;
@@ -177,19 +195,8 @@ impl<'a> Lexer<'a> {
                 }
             }
             b'>' => {
-                if self.data.get(self.pos + 1) == Some(&b'>') {
-                    self.pos += 2;
-                    Token::DictClose
-                } else {
-                    // A lone `>` is illegal; skip it so parsing can continue.
-                    self.pos += 1;
-                    return self.next_token();
-                }
-            }
-            b')' => {
-                // Unbalanced; skip.
-                self.pos += 1;
-                return self.next_token();
+                self.pos += 2;
+                Token::DictClose
             }
             b'+' | b'-' | b'.' | b'0'..=b'9' => self.read_number()?,
             _ => self.read_keyword(),

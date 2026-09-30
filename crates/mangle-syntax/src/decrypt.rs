@@ -2,7 +2,7 @@
 
 use mangle_crypto::{Algorithm, Decryptor};
 
-use crate::object::{Dict, Name, Object, Ref, Stream};
+use crate::object::{Dict, Object, Ref, Stream};
 
 /// Walk an object graph, decrypting strings and stream data in place.
 ///
@@ -43,23 +43,11 @@ pub fn decrypt_object(dec: &Decryptor, num: u32, generation: u16, obj: &mut Obje
 }
 
 fn decrypt_dict(dec: &Decryptor, num: u32, generation: u16, d: &mut Dict, depth: usize) {
-    let skip: Vec<Name> = d
-        .iter()
-        .filter(|(k, _)| k.as_bytes() == b"Encrypt" || k.as_bytes() == b"ID")
-        .map(|(k, _)| k.clone())
-        .collect();
-    for key in skip {
-        if let Some(v) = d.get_mut(
-            key.as_bytes()
-                .iter()
-                .map(|b| *b as char)
-                .collect::<String>()
-                .as_str(),
-        ) {
-            decrypt_object(dec, num, generation, v, depth + 1);
+    for (key, v) in d.iter_mut() {
+        // `/Encrypt` and `/ID` are stored in the clear by the specification.
+        if matches!(key.as_bytes(), b"Encrypt" | b"ID") {
+            continue;
         }
-    }
-    for (_, v) in d.iter_mut() {
         decrypt_object(dec, num, generation, v, depth + 1);
     }
 }
@@ -193,6 +181,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
+    use crate::object::Name;
     use mangle_crypto::Rc4;
 
     const KEY: &[u8] = b"0123456789abcdef";

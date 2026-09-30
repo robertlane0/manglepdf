@@ -7,6 +7,7 @@
 #![allow(clippy::indexing_slicing)]
 
 use crate::FilterResult;
+use crate::Partial;
 use crate::error::FilterError;
 
 /// `/DecodeParms` for a predictor filter.
@@ -22,13 +23,13 @@ pub struct PredictorParams {
     pub columns: u16,
 }
 
-/// Bytes per pixel for a predictor, i.e. `/Colors * ceil(/BitsPerComponent / 8)`.
+/// Bytes per pixel for a PNG predictor: `ceil(/Colors * /BitsPerComponent / 8)`, never
+/// less than 1. Sub-byte components share a byte, so 1-bit RGB has a stride of 1.
 #[must_use]
 pub(crate) fn bytes_per_pixel(p: &PredictorParams) -> usize {
     let colors = usize::from(p.colors.max(1));
-    let bpp_bits = usize::from(p.bpc.max(1));
-    let bytes = bpp_bits.div_ceil(8);
-    colors * bytes.max(1)
+    let bpc_bits = usize::from(p.bpc.max(1));
+    colors.saturating_mul(bpc_bits).div_ceil(8).max(1)
 }
 
 /// Row length in bytes, rounded up to whole bytes.
@@ -41,15 +42,26 @@ pub(crate) fn row_length(p: &PredictorParams) -> usize {
 }
 
 /// Apply the inverse predictor.
-pub fn unpredict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
+///
+/// Like every other decoder here this yields whatever decoded cleanly: a damaged row is
+/// passed through untouched rather than discarding every row before it.
+#[must_use]
+pub fn unpredict(data: &[u8], p: &PredictorParams) -> Partial {
+    let intact = |data: Vec<u8>| Partial {
+        data,
+        complete: true,
+        note: None,
+    };
+    let bad = |reason: String| Partial {
+        data: data.to_vec(),
+        complete: false,
+        note: Some(format!("Predictor: {reason}")),
+    };
     match p.predictor {
-        0 | 1 => Ok(data.to_vec()),
-        2 => tiff_unpredict(data, p),
+        0 | 1 => intact(data.to_vec()),
+        2 => tiff_unpredict(data, p).map_or_else(|e| bad(e.to_string()), intact),
         10..=15 => png_unpredict(data, p),
-        other => Err(FilterError::BadParameters {
-            filter: "Predictor",
-            reason: format!("unsupported predictor {other}"),
-        }),
+        other => bad(format!("unsupported predictor {other}")),
     }
 }
 
@@ -86,23 +98,39 @@ fn tiff_unpredict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
 // The rows are addressed as `a`, `b`, `c` because that is how the PNG specification
 // names the neighbours used by the Paeth filter.
 #[allow(clippy::many_single_char_names)]
-fn png_unpredict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
+fn png_unpredict(data: &[u8], p: &PredictorParams) -> Partial {
     let bpp = bytes_per_pixel(p);
     let row = row_length(p);
     if row == 0 {
-        return Ok(Vec::new());
+        return Partial {
+            data: Vec::new(),
+            complete: true,
+            note: None,
+        };
     }
     let stride = row + 1;
     let rows = data.len().div_ceil(stride);
-    let mut out = vec![0u8; rows.saturating_mul(row)];
+    let mut out: Vec<u8> = Vec::with_capacity(rows.saturating_mul(row));
     let mut prev_row = vec![0u8; row];
+    let mut damaged: Option<String> = None;
 
     for r in 0..rows {
-        let Some(&ft) = data.get(r * stride) else {
+        let ft = data.get(r * stride).copied();
+        let src = data.get(r * stride + 1..(r + 1) * stride);
+        let (Some(ft), Some(src)) = (ft, src) else {
+            // The stream stopped mid-row. Keep what is left of it, zero-padded, so a
+            // truncated image still shows the rows the file actually contains.
+            if let Some(rest) = data.get(r * stride + 1..)
+                && !rest.is_empty()
+            {
+                let mut cur = vec![0u8; row];
+                let n = rest.len().min(row);
+                cur[..n].copy_from_slice(&rest[..n]);
+                out.extend_from_slice(&cur);
+            }
+            damaged.get_or_insert_with(|| format!("row data ended after {r} of {rows} rows"));
             break;
         };
-        let src = data.get((r * stride + 1)..(r * stride + stride));
-        let Some(src) = src else { break };
         let n = src.len().min(row);
         let mut cur = vec![0u8; row];
         cur[..n].copy_from_slice(&src[..n]);
@@ -157,18 +185,19 @@ fn png_unpredict(data: &[u8], p: &PredictorParams) -> FilterResult<Vec<u8>> {
                 }
             }
             other => {
-                return Err(FilterError::BadParameters {
-                    filter: "Predictor",
-                    reason: format!("PNG filter type {other} is not defined"),
-                });
+                // Undefined filter type. The row's bytes are still the best guess we
+                // have, and the rows already decoded are worth more than a hard error.
+                damaged.get_or_insert_with(|| format!("PNG filter type {other} at row {r}"));
             }
         }
-        if let Some(slot) = out.get_mut(r * row..(r + 1) * row) {
-            slot.copy_from_slice(&cur[..row.min(row)]);
-        }
+        out.extend_from_slice(&cur);
         prev_row.copy_from_slice(&cur);
     }
-    Ok(out)
+    Partial {
+        data: out,
+        complete: damaged.is_none(),
+        note: damaged,
+    }
 }
 
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
@@ -263,8 +292,7 @@ mod tests {
         };
         let data: Vec<u8> = (0..36u8).collect();
         let enc = predict(&data, &p).expect("predict");
-        let dec = unpredict(&enc, &p).expect("unpredict");
-        assert_eq!(dec, data);
+        assert_eq!(unpredict(&enc, &p).data, data);
     }
 
     #[test]
@@ -308,8 +336,9 @@ mod tests {
             bpc: 8,
             columns: 4,
         };
-        let dec = unpredict(&stream, &p).expect("unpredict");
-        assert_eq!(dec, base);
+        let dec = unpredict(&stream, &p);
+        assert!(dec.complete, "{dec:?}");
+        assert_eq!(dec.data, base);
     }
 
     #[test]
@@ -322,21 +351,53 @@ mod tests {
         };
         let data: Vec<u8> = (0..100u8).collect();
         let enc = predict(&data, &p).expect("predict");
-        let dec = unpredict(&enc, &p).expect("unpredict");
+        let dec = unpredict(&enc, &p);
         // The final row is zero-padded out to a whole number of rows.
-        assert_eq!(dec.len(), 112);
-        assert_eq!(&dec[..100], &data[..]);
+        assert_eq!(dec.data.len(), 112);
+        assert_eq!(&dec.data[..100], &data[..]);
     }
 
     #[test]
-    fn unknown_filter_type_is_an_error() {
+    fn unknown_filter_type_keeps_the_rows_around_it() {
         let p = PredictorParams {
             predictor: 15,
             colors: 1,
             bpc: 8,
             columns: 4,
         };
-        let r = unpredict(&[9, 1, 2, 3, 4], &p);
-        assert!(r.is_err());
+        // Two good rows, one damaged, one good.
+        let r = unpredict(&[0, 1, 2, 3, 4, 9, 9, 9, 9, 9, 0, 5, 6, 7, 8], &p);
+        assert!(!r.complete);
+        assert_eq!(r.data, vec![1, 2, 3, 4, 9, 9, 9, 9, 5, 6, 7, 8]);
+        assert!(r.note.unwrap_or_default().contains("filter type 9"));
+    }
+
+    #[test]
+    fn truncated_rows_keep_what_decoded() {
+        let p = PredictorParams {
+            predictor: 15,
+            colors: 1,
+            bpc: 8,
+            columns: 4,
+        };
+        let r = unpredict(&[0, 1, 2, 3, 4, 0, 5, 6], &p);
+        assert!(!r.complete);
+        assert_eq!(r.data, vec![1, 2, 3, 4, 5, 6, 0, 0]);
+    }
+
+    #[test]
+    fn sub_byte_components_share_a_byte() {
+        // 1-bit RGB: all three components of a pixel live in one byte, so the filter
+        // stride is one byte, not three.
+        let p = PredictorParams {
+            predictor: 15,
+            colors: 3,
+            bpc: 1,
+            columns: 3,
+        };
+        // Two rows, both "Sub" filtered with a one-byte stride.
+        let r = unpredict(&[1, 0xAA, 0xAB, 1, 0xFF, 0x01], &p);
+        assert!(r.complete, "{r:?}");
+        assert_eq!(r.data, vec![0xAA, 0x55, 0xFF, 0x00]);
     }
 }
