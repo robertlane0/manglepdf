@@ -4,7 +4,7 @@
 //! and rely on an ancestor, and the tree may be a `Pages` node, a `Page` leaf, a
 //! mixture of both with missing `/Type` keys, or a cycle.
 
-use mangle_syntax::{Dict, Object, Rect, Ref};
+use mangle_syntax::{Dict, Object, Rect, Ref, Stream};
 
 use crate::error::{Error, Result};
 use crate::{MAX_TREE_DEPTH, MAX_TREE_ENTRIES, Resolver, follow, is_page, kids_of};
@@ -109,7 +109,7 @@ impl Page {
     }
 
     /// The page's content streams, concatenated with a newline between them, exactly
-    /// as the specification says to treat `/Contents`.
+    /// as the specification says to treat `/Contents`. The bytes are still encoded.
     #[must_use]
     pub fn contents(&self, resolver: &dyn Resolver) -> Vec<u8> {
         let Some(contents) = self.dict.get("Contents") else {
@@ -139,6 +139,46 @@ impl Page {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The page's content streams with their filters applied.
+    ///
+    /// `/Contents` may be a stream, an array of streams, or references to either, and a
+    /// filter is as likely to be in the way as not. A caller that wants the text of a
+    /// page should not have to know that.
+    #[must_use]
+    pub fn decoded_contents(&self, resolver: &dyn Resolver) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (i, part) in self.content_streams(resolver).into_iter().enumerate() {
+            if i > 0 {
+                out.push(b'\n');
+            }
+            out.extend_from_slice(&resolver.decoded(&part));
+        }
+        out
+    }
+
+    /// The page's content streams, decoded one by one.
+    #[must_use]
+    pub fn content_streams(&self, resolver: &dyn Resolver) -> Vec<Stream> {
+        let Some(contents) = self.dict.get("Contents") else {
+            return Vec::new();
+        };
+        let parts: Vec<Object> = match contents {
+            Object::Array(a) => a.clone(),
+            other => vec![other.clone()],
+        };
+        parts
+            .iter()
+            .filter_map(|p| match p {
+                Object::Ref(r) => resolver.resolve(*r),
+                other => Some(other.clone()),
+            })
+            .filter_map(|o| match o {
+                Object::Stream(s) => Some(s),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The annotations, in the order they are drawn.

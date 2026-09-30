@@ -542,6 +542,22 @@ fn g0_8_icons(ws: &Workspace) -> Check {
     }
 }
 
+/// Every SVG element an icon is allowed to be made of.
+const DRAWABLE: &[&str] = &[
+    "<path",
+    "<circle",
+    "<ellipse",
+    "<line",
+    "<polyline",
+    "<polygon",
+    "<rect",
+];
+
+/// Whether the document actually draws something.
+fn draws_something(svg: &str) -> bool {
+    DRAWABLE.iter().any(|tag| svg.contains(tag))
+}
+
 /// Enough of an SVG lint to catch the ways an icon goes wrong: no viewBox, an
 /// embedded raster, or a script.
 fn svg_findings(path: &Path, name: &str) -> Vec<String> {
@@ -561,6 +577,9 @@ fn svg_findings(path: &Path, name: &str) -> Vec<String> {
     }
     if !text.contains("<svg") {
         out.push(format!("{name}: not an SVG document"));
+    }
+    if !draws_something(&text) {
+        out.push(format!("{name}: nothing is drawn"));
     }
     out
 }

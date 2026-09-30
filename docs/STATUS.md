@@ -6,8 +6,8 @@ Where the work actually is. Updated whenever a milestone moves.
 
 | M | Deliverable | State |
 |---|---|---|
-| **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **in progress** — workspace, lints and the policy gate are done; fixturegen, the window shell and the icon set are not |
-| **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **partly done** — everything except the page tree (`mangle-doc`), the save path and the round-trip tests |
+| **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
+| **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
 | **M2** | Interpreter, paths/clips/text, tiles, viewer shell | not started |
 | **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | not started |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
@@ -16,48 +16,79 @@ Where the work actually is. Updated whenever a milestone moves.
 ## What exists
 
 - **Workspace** — one crate graph, edition 2024, `resolver = "3"`, pinned toolchain,
-  shared lints, `forbid(unsafe_code)` everywhere.
-- **`cargo xtask policy`** — Gate 0. An AST scan (not a regex) for `unsafe`, an audit of
-  the dependency graph against the banned and PDF-provenance lists, a process-spawning
-  audit, doc and licence presence, an icon lint, and the fmt/clippy/test/release run.
+  shared lints, `forbid(unsafe_code)` everywhere, and `cargo clippy` clean.
+- **`cargo xtask policy`** — Gate 0, and it passes. An AST scan (with `syn`, not a
+  regex) proves there is no `unsafe` and no `allow(unsafe_code)`; the dependency graph
+  is audited against the banned and PDF-provenance lists with every crate accounted for
+  in `docs/DEPENDENCIES.md`; process spawning is confined to one audited module and to
+  test oracles; the docs, the licences and the icons are checked; and fmt, clippy, the
+  tests and a release build all run.
+- **`tools/fixturegen`** — 12 Tier-A fixtures with a manifest, generated from the
+  specification by a writer that shares no code with the product. Each records what an
+  independent validator is expected to say about it, and whether our reader has to
+  rebuild its structure — two different questions, both answered.
 - **`mangle-filters`** — in-house inflate and deflate, LZW, RunLength, ASCII85, ASCIIHex,
   PNG and TIFF predictors, CCITT G3-1D/2D and G4. Every decoder returns partial output
   with a note rather than failing.
-- **`mangle-crypto`** — RC4, AES-CBC (128/192/256), MD5, SHA-1, SHA-2. The standard
-  security handler for revisions 2, 3, 4, 5 and 6, with the R5/R6 key derivation and
-  permissions. Checked against dictionaries produced by an independent implementation.
+- **`mangle-crypto`** — RC4, AES-CBC, MD5, SHA-1, SHA-2. The standard security handler
+  for revisions 2 to 6, checked against dictionaries an independent implementation
+  produced.
 - **`mangle-syntax`** — the object model, lexer, parser, cross-reference tables and
   streams with `/Prev` and hybrid `/XRefStm` chains, object streams, recovery by
-  scanning, standard-security decryption, a copy-on-write document overlay, and the
-  full and incremental writers.
-- **Docs** — this set, plus the decision records under `docs/decisions/`.
+  scanning, decryption, a copy-on-write document overlay, and **both writers**: a full
+  rewrite that keeps every object number, and an incremental revision that can express
+  a deletion and carries `/ID` forward.
+- **`mangle-doc`** — the page tree with attribute inheritance, name trees, outlines and
+  destinations, page labels, optional-content groups, attachments and metadata.
+- **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`.
+  This is how "what does ManglePDF think of this file?" is asked without a window.
+- **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one
+  stroke weight, a light and a dark theme, and a contrast test that both themes must
+  pass.
+- **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
+- **Docs** — architecture, status, development, testing, PDF quirks, dependencies,
+  icons, and the decision records.
 
-## What is missing, in the order it blocks
+## Tests
 
-1. **`mangle-doc`** is an empty crate. The page tree with attribute inheritance, name
-   trees, outlines, destinations and page labels are the next real piece of work, and
-   the Inspector and the Organizer both sit on them.
-2. **No save path.** `Document` has an overlay and there is a writer, but nothing
-   connects them. Until it does, the first round-trip test cannot be written.
-3. **No round-trip tests.** Every test is a unit test on one function. Nothing yet opens
-   a file, writes it, reopens it and compares.
-4. **`fixturegen` is empty**, so there is no Tier-A corpus and `fixtures/MANIFEST.toml`
-   does not exist.
-5. **The window shell does not exist.** `mangle-ui` is an empty crate.
-6. **No icons.** `assets/icons/` does not exist.
+212, none ignored, no warnings. Three kinds matter:
 
-## Known gaps in the finished layers
+- **Unit** — one behaviour, stated expectations, including a documented quirk for each.
+- **Round trip** — open a file, change it, write it, open it again, compare. This is
+  what makes the lossless claim testable rather than asserted.
+- **Oracle** — `qpdf` reads what we write. It caught a wrong `/Size`, a cross-reference
+  that padded sparse numbering, and a fixture that was wrong rather than damaged. When
+  `qpdf` is absent these tests skip and say so; `cargo test` never needs it.
+- **Corpus** — every Tier-A fixture is opened and checked against its manifest: the
+  hash, the page count, whether a repair happened, whether a save reports a dangling
+  reference, and that the secrets in `F33` really are in the file.
 
-Recorded so they are not mistaken for done:
+## Gaps, in the order they block
 
-- The writer re-serialises every reachable object; it does **not** yet copy untouched
-  objects verbatim. That is the single largest correctness gap against Charter §4.1.
-- Crypt filters (`/StmF`, `/StrF`, `/CF`, `/Identity`) are parsed but not consulted when
-  the decryptor is built, so a `/V 4` file using AESV2 without `/SubFilter` decrypts
-  with the wrong algorithm.
-- Objects inside object streams are not decrypted.
-- Incremental updates cannot express a deletion, and do not carry `/ID` forward.
-- JBIG2 and JPX are not implemented.
-- The inflate bomb ceiling is a ratio cap only. That is provably safe for deflate (a
-  match cannot exceed roughly 1032:1) but it is not a defence against a stream that is
-  merely *large*.
+1. **The full rewrite is not yet byte-preserving.** `Writer::write` re-serialises every
+   object from the model. Object numbers, dictionary key order, the int/real
+   distinction and stream bytes all survive, but whitespace, name escaping and
+   hex-versus-literal strings do not. Charter §4.1 law 1 is only partly met.
+2. **Crypt filters are parsed but not consulted.** `mangle-syntax` has an
+   `algorithm_for` that reads `/StmF`, `/StrF` and `/CF`, and nothing calls it, so a `/V 4`
+   file using AESV2 without `/SubFilter` decrypts with RC4 and yields noise.
+3. **Objects inside object streams are not decrypted.** A string inside one stays
+   encrypted after `Document::object` returns it.
+4. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
+   from the object model.
+5. **No renderer.** Nothing rasterizes a page, so the canvas draws paper and nothing else.
+6. **JBIG2 and JPX are not implemented.**
+
+## Known limitations in the finished layers
+
+- The inflate bomb ceiling is a ratio cap. That is provably safe for deflate, which
+  cannot exceed about 1032:1, but it is not a defence against a merely *large* stream.
+- `saslprep` is a reduced implementation: it maps the C.1.2 spaces, drops part of
+  Table B.1 and applies NFKC, but it does not perform the RFC 3454 prohibition checks or
+  the bidirectional check. A password using those characters is handled differently
+  from one that is not.
+- Object-stream writing is not implemented, so `WriteOptions::use_object_streams` has no
+  effect. The defaults deliberately produce the classic layout, which every reader
+  accepts.
+- A full save copies the original header version but not the original binary comment
+  or the exact bytes of anything.

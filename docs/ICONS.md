@@ -26,49 +26,47 @@ part no lint can do.
 
 ## The set
 
-The shell and its panels need this many before M0 is done. Names are fixed now so the
-UI code can refer to them.
+122 icons, drawn to one grid and one stroke weight. `cargo xtask icons gallery` writes a
+contact sheet to `target/xtask/icon-gallery.html`; reviewing them there, as a set, is
+the part no lint can do.
 
-**Navigation and document** — `open`, `save`, `save-as`, `print`, `properties`,
-`attachments`, `signatures`, `bookmarks`, `layers`, `search`, `find-next`,
-`find-previous`
+They fall into these groups:
 
-**Pages** — `page-first`, `page-previous`, `page-next`, `page-last`, `zoom-in`,
-`zoom-out`, `zoom-fit-width`, `zoom-fit-page`, `rotate-left`, `rotate-right`,
-`view-single`, `view-continuous`, `view-two-up`
+**Navigation and document** — open, save, save-as, print, properties, attachments,
+signatures, bookmarks, layers, search, find-next, find-previous
 
-**Selection and editing** — `select`, `select-text`, `add-text`, `add-image`,
-`add-shape`, `add-link`, `crop`, `rotate-object`, `flip-horizontal`, `flip-vertical`,
-`opacity`
+**Pages** — page-first, page-previous, page-next, page-last, zoom-in, zoom-out,
+zoom-fit-width, zoom-fit-page, rotate-left, rotate-right, view-single,
+view-continuous, view-two-up
 
-**Arrange** — `bring-to-front`, `bring-forward`, `send-backward`, `send-to-back`,
-`align-left`, `align-centre`, `align-right`, `align-top`, `align-middle`,
-`align-bottom`, `distribute-horizontal`, `distribute-vertical`, `group`, `ungroup`
+**Selection and editing** — select, select-text, add-text, add-image, add-shape,
+add-link, crop, rotate-object, flip-horizontal, flip-vertical, opacity
 
-**Colour and stroke** — `colour-fill`, `colour-stroke`, `line-width`, `line-style`,
-`opacity`, `blend-mode`
+**Arrange** — bring-to-front, bring-forward, send-backward, send-to-back, align-left,
+align-centre, align-right, align-top, align-middle, align-bottom,
+distribute-horizontal, distribute-vertical, group, ungroup
 
-**Annotations** — `highlight`, `underline`, `strikeout`, `squiggly`, `sticky-note`,
-`callout`, `free-text`, `line-arrow`, `rectangle`, `ellipse`, `polygon`, `ink`,
-`stamp`, `file-attachment`, `comment-reply`, `comment-accepted`,
-`comment-rejected`, `comment-completed`, `flatten`
+**Colour and stroke** — colour-fill, colour-stroke, line-width, line-style, blend-mode
 
-**Forms** — `field-text`, `field-checkbox`, `field-radio`, `field-dropdown`,
-`field-listbox`, `field-button`, `field-signature`, `form-prepare`, `form-reset`
+**Annotations** — highlight, underline, strikeout, squiggly, sticky-note, callout,
+free-text, line-arrow, rectangle, ellipse, polygon, ink, stamp, file-attachment,
+comment-reply, comment-accepted, comment-rejected, comment-completed, flatten
 
-**Protect** — `redact`, `redact-search`, `sanitize`, `encrypt`, `unlock`,
-`permissions`, `sign`, `signature-valid`, `signature-invalid`
+**Forms** — field-text, field-checkbox, field-radio, field-dropdown, field-listbox,
+field-button, field-signature, form-prepare, form-reset
 
-**Organize** — `organize-pages`, `merge`, `split`, `extract-pages`, `insert-blank`,
-`import-file`, `page-labels`, `bookmark-add`
+**Protect** — redact, redact-search, sanitize, encrypt, unlock, permissions, sign,
+signature-valid, signature-invalid
 
-**Text editing** — `text-bold`, `text-italic`, `text-underline`, `text-strikethrough`,
-`align-justify`, `line-spacing`, `character-spacing`, `baseline-shift`, `font-size`
+**Organize** — organize-pages, merge, split, extract-pages, insert-blank, import-file,
+page-labels
 
-**Panels and shell** — `panel-thumbnails`, `panel-bookmarks`, `panel-layers`,
-`panel-attachments`, `panel-signatures`, `panel-text-properties`, `panel-colour`,
-`panel-arrange`, `panel-organize`, `menu`, `close`, `undo`, `redo`, `delete`,
-`duplicate`, `settings`, `help`, `warning`, `info`
+**Text editing** — text-bold, text-italic, text-strikethrough, align-justify,
+line-spacing, character-spacing, baseline-shift, font-size
 
-That is 129 icons. They are drawn to one grid and one stroke weight, and reviewed as a
-set in the gallery rather than one at a time.
+**Panels and shell** — panel-thumbnails, panel-text-properties, panel-colour,
+panel-arrange, panel-organize, menu, close, undo, redo, delete, duplicate, settings,
+help, warning, info
+
+The set is reviewed as a set. Adding one icon means drawing the others again if it does
+not belong, which is the point.

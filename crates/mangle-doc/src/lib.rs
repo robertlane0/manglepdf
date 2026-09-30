@@ -48,11 +48,23 @@ use mangle_syntax::{Dict, Object, Ref};
 pub trait Resolver {
     /// The object with this number, if it exists and is not a dangling reference.
     fn resolve(&self, r: Ref) -> Option<Object>;
+
+    /// A stream's data with its filter chain applied.
+    ///
+    /// A resolver that cannot decode returns the raw bytes, which is the honest
+    /// fallback: a caller gets the data it has rather than nothing.
+    fn decoded(&self, stream: &mangle_syntax::Stream) -> Vec<u8> {
+        mangle_syntax::stream::decode_stream(stream).data
+    }
 }
 
 impl Resolver for mangle_syntax::Document {
     fn resolve(&self, r: Ref) -> Option<Object> {
         self.object(r)
+    }
+
+    fn decoded(&self, stream: &mangle_syntax::Stream) -> Vec<u8> {
+        self.decoded(stream)
     }
 }
 

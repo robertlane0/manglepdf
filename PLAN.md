@@ -48,8 +48,17 @@ The spine is where the architecture is decided, so it is built first and deeply.
 
 ## Immediate queue
 
-1. Workspace + toolchain pin + shared lints; every crate `#![forbid(unsafe_code)]`.
-2. `xtask policy` (edition, unsafe AST scan, banned/PDF-provenance deps, `Command::new` audit).
-3. Design tokens sampled from the mockup; theme + window shell with all six regions.
-4. Hand-authored icon set for the shell + `xtask icons` gallery/lint.
-5. fixturegen skeleton with its own minimal PDF writer (independence rule).
+1. **Byte-preserving full rewrite.** Copy every untouched object out of the original
+   bytes and only re-emit what changed. This is the last big thing between the current
+   state and Charter §4.1 law 1, and everything after it depends on it.
+2. **Consult the crypt filters** when building the decryptor, and decrypt objects that
+   live in object streams. Both are small and both are correctness.
+3. **The page tree into the window**: fill the right-hand region from the object model,
+   which is the Inspector's first half.
+4. **Content-stream parsing with byte provenance** (`mangle-content`), which every edit
+   in M4 depends on.
+5. **The rasterizer** (`mangle-render`), analytic coverage first, checked against
+   `mutool` page by page.
+6. Tier-A fixtures for the remaining catalogue entries: fonts, colour, transparency,
+   shadings, patterns, images, CCITT, JBIG2, JPX, forms and the scale files.
+7. Tier B: a real-world corpus with `SOURCES.md`.

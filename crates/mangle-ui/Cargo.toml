@@ -8,6 +8,10 @@ repository.workspace = true
 authors.workspace = true
 description = "ManglePDF desktop application: theme tokens, icons, widgets, canvas, panels"
 
+[lib]
+name = "mangle_ui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "manglepdf"
 path = "src/main.rs"

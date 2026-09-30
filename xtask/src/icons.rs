@@ -19,6 +19,17 @@ pub(crate) fn cmd(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// Every SVG element an icon is allowed to be made of.
+const DRAWABLE: &[&str] = &[
+    "<path",
+    "<circle",
+    "<ellipse",
+    "<line",
+    "<polyline",
+    "<polygon",
+    "<rect",
+];
+
 /// One-line summary of an icon, for the gallery index.
 fn lint(dir: &std::path::Path) -> Result<(), String> {
     let mut files = Vec::new();
@@ -49,13 +60,8 @@ fn lint(dir: &std::path::Path) -> Result<(), String> {
                 findings.push(format!("{name}: contains `{bad}`"));
             }
         }
-        // An icon that is nothing but one filled rectangle is usually an auto-trace
-        // of a screenshot; a hand-authored icon has real path data.
-        if text.matches("<path").count() + text.matches("<circle").count() < 1
-            && !text.contains("<line")
-            && !text.contains("<polyline")
-            && !text.contains("<rect")
-        {
+        // An icon with no drawable element is a mistake, not a design.
+        if !DRAWABLE.iter().any(|tag| text.contains(tag)) {
             findings.push(format!("{name}: no drawable content"));
         }
         let _ = where_;
