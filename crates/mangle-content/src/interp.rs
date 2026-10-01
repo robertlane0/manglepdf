@@ -91,6 +91,15 @@ pub struct Record {
     /// The stroke width, already scaled by the transformation: this is the width the
     /// user will see, not the number in the stream.
     pub device_line_width: f64,
+    /// The rest of the stroke parameters, as they were when this mark was drawn.
+    ///
+    /// Each mark carries its own rather than the reader carrying the current ones,
+    /// because a mark's appearance is fixed by the state it was drawn with: a dashed line
+    /// that follows a solid one must be dashed, and a renderer reading one style for the
+    /// whole page would draw them the same.
+    pub line_cap: LineCap,
+    pub line_join: LineJoin,
+    pub dash: Dash,
     /// The marked-content tag, if the mark was inside a `/BMC` or `/BDC` group.
     pub tag: Option<String>,
 }
@@ -618,13 +627,21 @@ impl Context<'_> {
         let mut mark = match name {
             b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" | b"S" | b"s" => Mark::Path {
                 segments: self.state.device_path(),
-                fill: match name {
-                    b"S" => None,
-                    b"s" => Some(self.state.fill.clone()),
-                    b"b" | b"b*" => Some(self.state.fill.clone()),
-                    _ => Some(self.state.fill.clone()),
+                // Which of the two colours the operator uses is the operator's business,
+                // not the state's: `S` strokes and does not fill, `f` fills and does not
+                // stroke, and the four that do both are named for it. Carrying both
+                // colours for every mark would have a fill-only operator draw an outline
+                // in whatever colour happened to be set.
+                fill: if name == b"S" {
+                    None
+                } else {
+                    Some(self.state.fill.clone())
                 },
-                stroke: Some(self.state.stroking.clone()),
+                stroke: if matches!(name, b"f" | b"F" | b"f*") {
+                    None
+                } else {
+                    Some(self.state.stroking.clone())
+                },
                 rule: if matches!(name, b"f*" | b"B*" | b"b*") {
                     FillRule::EvenOdd
                 } else {
@@ -696,6 +713,9 @@ impl Context<'_> {
             stroke_alpha: self.state.stroke_alpha,
             blend_mode: self.state.blend_mode.clone(),
             device_line_width: self.state.stroke.width * self.state.ctm.mean_scale(),
+            line_cap: self.state.stroke.cap,
+            line_join: self.state.stroke.join,
+            dash: self.state.stroke.dash.clone(),
             tag: self.out.tags.last().cloned(),
         };
         if self.out.records.len() < MAX_RECORDS {
@@ -786,6 +806,9 @@ impl Context<'_> {
             stroke_alpha: self.state.stroke_alpha,
             blend_mode: self.state.blend_mode.clone(),
             device_line_width: self.state.stroke.width * self.state.ctm.mean_scale(),
+            line_cap: self.state.stroke.cap,
+            line_join: self.state.stroke.join,
+            dash: self.state.stroke.dash.clone(),
             tag: self.out.tags.last().cloned(),
         };
         if self.out.records.len() < MAX_RECORDS {
@@ -1193,6 +1216,28 @@ mod tests {
                 .any(|n| n.contains("GS1") && n.contains("ExtGState")),
             "the note must name the state: {:?}",
             out.notes
+        );
+    }
+
+    #[test]
+    fn each_mark_carries_the_stroke_it_was_drawn_with() {
+        // A thick line with one pattern, then a thin round one with another. Each mark
+        // must remember which it was, because a renderer that read one style for the whole
+        // page would draw them the same.
+        let out = run_bytes(b"3 w [9] 0 d 0 0 m 10 0 l S 1 J 1 w [3 1] 2 d 0 20 m 10 20 l S");
+        assert_eq!(out.records.len(), 2);
+        let solid = out.records.first().expect("the first mark");
+        let dashed = out.records.get(1).expect("the second mark");
+        assert_eq!(solid.dash.array, vec![9.0], "the first had its own pattern");
+        assert_eq!(dashed.dash.array, vec![3.0, 1.0], "the second was dashed");
+        assert_eq!(dashed.line_cap, LineCap::Round, "and round-ended");
+        assert!(
+            near(dashed.device_line_width, 1.0),
+            "the width was changed between them"
+        );
+        assert!(
+            near(solid.device_line_width, 3.0),
+            "and the first kept the width it was drawn with"
         );
     }
 

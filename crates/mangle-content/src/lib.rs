@@ -44,7 +44,7 @@ pub use interp::{FillRule, Mark, PageContent, Record, bbox_of, bounds_of, run, r
 pub use matrix::Matrix;
 pub use state::{
     ClipBounds, Colour, ColourSpace, Dash, ExtGState, ExtGStates, GraphicsState, LineCap, LineJoin,
-    PathSegment, RenderMode, StateStack, StrokeStyle, TextState,
+    PathSegment, RenderMode, Rgba, StateStack, StrokeStyle, TextState,
 };
 pub use tokens::{ContentKind, ContentStream, ContentToken, Operation};
 

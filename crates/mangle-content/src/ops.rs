@@ -53,11 +53,28 @@ pub struct Effect {
     pub applies_extgstate: bool,
 }
 
+/// How many operands an operator takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arity {
+    /// A fixed count, given by the operand list.
+    Fixed,
+    /// As many as the stream provides.
+    ///
+    /// The colour operators need this: `sc` takes one component in a grey space, three in
+    /// RGB and four in CMYK, and only the current colour space says which. A fixed count
+    /// would silently drop the components a three-component colour space needs, and the
+    /// result is a black shape on a page that asked for red.
+    All,
+}
+
 /// One row of the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperatorInfo {
     pub name: &'static [u8],
+    /// The operands, in order, and their types. For a variable-arity operator this is the
+    /// *typical* shape, which is documentation rather than a count.
     pub operands: &'static [Kind],
+    pub arity: Arity,
     pub effect: Effect,
 }
 
@@ -65,6 +82,17 @@ const fn op(name: &'static [u8], operands: &'static [Kind], effect: Effect) -> O
     OperatorInfo {
         name,
         operands,
+        arity: Arity::Fixed,
+        effect,
+    }
+}
+
+/// A row whose operand count depends on the graphics state.
+const fn varop(name: &'static [u8], operands: &'static [Kind], effect: Effect) -> OperatorInfo {
+    OperatorInfo {
+        name,
+        operands,
+        arity: Arity::All,
         effect,
     }
 }
@@ -158,10 +186,11 @@ pub static OPERATORS: &[OperatorInfo] = &[
     // Table 53: special graphics state.
     op(b"CS", NAME_ONE, NONE),
     op(b"cs", NAME_ONE, NONE),
-    op(b"SC", N_NUMS, NONE),
-    op(b"sc", N_NUMS, NONE),
-    op(b"SCN", NAME_OR_ARRAY, NONE),
-    op(b"scn", NAME_OR_ARRAY, NONE),
+    // The colour component operators take as many components as the current space has.
+    varop(b"SC", N_NUMS, NONE),
+    varop(b"sc", N_NUMS, NONE),
+    varop(b"SCN", NAME_OR_ARRAY, NONE),
+    varop(b"scn", NAME_OR_ARRAY, NONE),
     // Table 54: path construction.
     op(b"m", TWO_NUMS, NONE),
     op(b"l", TWO_NUMS, NONE),
@@ -299,7 +328,11 @@ pub fn lookup(name: &[u8]) -> Option<&'static OperatorInfo> {
 /// would mean dropping the operations around it.
 #[must_use]
 pub fn arity(name: &[u8]) -> Option<usize> {
-    Some(lookup(name)?.operands.len())
+    let info = lookup(name)?;
+    Some(match info.arity {
+        Arity::Fixed => info.operands.len(),
+        Arity::All => usize::MAX,
+    })
 }
 
 /// The effect an operator has, or the neutral one for an operator not in the table.
@@ -330,9 +363,13 @@ pub fn is_text(name: &[u8]) -> bool {
 /// The operands an operation of this operator should actually use.
 ///
 /// The stream is allowed to leave more operands than the operator consumes — a damaged
-/// file does — so the last *n* are taken, which is the direction operands are read in.
+/// file does — so the last *n* are taken, which is the direction operands are read in. A
+/// variable-arity operator takes them all, because there is nothing to leave behind.
 #[must_use]
 pub fn take_last<'a>(info: &OperatorInfo, operands: &[&'a Object]) -> Vec<&'a Object> {
+    if info.arity == Arity::All {
+        return operands.to_vec();
+    }
     let n = info.operands.len();
     let skip = operands.len().saturating_sub(n);
     operands.iter().copied().skip(skip).collect()
@@ -466,6 +503,41 @@ mod tests {
             NONE,
             "an unknown operator changes nothing known"
         );
+    }
+
+    #[test]
+    fn the_colour_operators_take_as_many_components_as_they_are_given() {
+        // One component in a grey space, three in RGB, four in CMYK. A fixed count would
+        // take two and lose the rest, which is a red shape drawn black.
+        for name in [&b"sc"[..], b"scn", b"SC", b"SCN"] {
+            assert_eq!(
+                arity(name),
+                Some(usize::MAX),
+                "{} is variable",
+                String::from_utf8_lossy(name)
+            );
+            let info = lookup(name).expect("in the table");
+            let values = [
+                Object::Real(1.0),
+                Object::Real(0.0),
+                Object::Real(0.5),
+                Object::Real(0.25),
+            ];
+            let operands: Vec<&Object> = values.iter().collect();
+            assert_eq!(take_last(info, &operands).len(), 4, "all four survive");
+        }
+    }
+
+    #[test]
+    fn a_variable_arity_operator_still_needs_a_name_to_carry_a_pattern() {
+        // `scn` may be given a pattern name instead of components, and the pattern is the
+        // last operand, so both forms have to come through.
+        let info = lookup(b"scn").expect("in the table");
+        let values = [Object::Real(1.0), Object::name("P0")];
+        let operands: Vec<&Object> = values.iter().collect();
+        let taken = take_last(info, &operands);
+        assert_eq!(taken.len(), 2);
+        assert_eq!(taken.last().and_then(|o| o.as_name()), Some(&b"P0"[..]));
     }
 
     #[test]

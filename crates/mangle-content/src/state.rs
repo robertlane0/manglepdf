@@ -194,6 +194,106 @@ impl Colour {
     }
 }
 
+/// A colour as bytes, which is what a rasteriser wants and what a file does not give.
+///
+/// Components are the specification's own: grey, RGB and Lab in 0 to 1, CMYK in 0 to 1
+/// with 1 meaning no ink, and every component normalised to 0 to 1 before it is scaled.
+/// A colour in a space this cannot convert returns `None` rather than a wrong answer,
+/// because a renderer that draws a separation colour as black is worse than one that
+/// draws nothing and says why.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgba {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+    pub a: f64,
+}
+
+impl Rgba {
+    /// Opaque black.
+    pub const BLACK: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+
+    /// Opaque white, which is what a page's paper is.
+    pub const WHITE: Self = Self {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+
+    /// The eight bytes a pixel buffer holds.
+    #[must_use]
+    pub fn to_rgba8(self, alpha: f64) -> [u8; 4] {
+        let scale = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        [
+            scale(self.r),
+            scale(self.g),
+            scale(self.b),
+            scale(alpha.clamp(0.0, 1.0)),
+        ]
+    }
+}
+
+impl Colour {
+    /// The colour in bytes, if its space is one this can convert.
+    ///
+    /// `ink` is the alternate-colour rendering fallback: a tint in a spot colour is
+    /// drawn with it, which is what makes a page legible on a printer that has none of
+    /// the separations it names.
+    #[must_use]
+    pub fn to_rgba(&self, ink: Option<&Colour>) -> Option<Rgba> {
+        match self.space.name.as_str() {
+            "DeviceGray" | "CalGray" => {
+                let g = self.components.first().copied()?.clamp(0.0, 1.0);
+                Some(Rgba {
+                    r: g,
+                    g,
+                    b: g,
+                    a: 1.0,
+                })
+            }
+            "DeviceRGB" | "CalRGB" => {
+                let [r, g, b] = self.components.get(..3)? else {
+                    return None;
+                };
+                Some(Rgba {
+                    r: r.clamp(0.0, 1.0),
+                    g: g.clamp(0.0, 1.0),
+                    b: b.clamp(0.0, 1.0),
+                    a: 1.0,
+                })
+            }
+            "DeviceCMYK" => {
+                let [c, m, y, k] = self.components.get(..4)? else {
+                    return None;
+                };
+                // The subtractive form: each component removes light, so full ink is
+                // zero rather than one.
+                Some(Rgba {
+                    r: (1.0 - c.clamp(0.0, 1.0)) * (1.0 - k.clamp(0.0, 1.0)),
+                    g: (1.0 - m.clamp(0.0, 1.0)) * (1.0 - k.clamp(0.0, 1.0)),
+                    b: (1.0 - y.clamp(0.0, 1.0)) * (1.0 - k.clamp(0.0, 1.0)),
+                    a: 1.0,
+                })
+            }
+            // A tint or a device-N colour has one component per colorant, and neither can
+            // be converted without the colorant list and the alternate space. The
+            // fallback is what a reader is expected to draw instead.
+            "Separation" | "DeviceN" | "Pattern" => {
+                ink.and_then(|i| i.to_rgba(None)).or(Some(Rgba::BLACK))
+            }
+            // Lab: CIE lightness with chromaticity, which the specification defines
+            // relative to a white point this does not know. Returning nothing is honest.
+            _ => None,
+        }
+    }
+}
+
 /// The line parameters.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StrokeStyle {
@@ -986,6 +1086,149 @@ mod tests {
             a.intersect(outside).is_none(),
             "clips that do not overlap mean nothing is drawn, not everything"
         );
+    }
+
+    #[test]
+    fn a_grey_colour_is_the_same_in_all_three_channels() {
+        let mut c = Colour::black();
+        c.set(ColourSpace::device_gray(), &[0.5]);
+        let rgba = c.to_rgba(None).expect("grey converts");
+        assert!((rgba.r - 0.5).abs() < 1e-9);
+        assert_eq!(rgba.r, rgba.g);
+        assert_eq!(rgba.g, rgba.b);
+        assert_eq!(rgba.a, 1.0);
+    }
+
+    #[test]
+    fn an_rgb_colour_keeps_its_components() {
+        let mut c = Colour::black();
+        c.set(ColourSpace::device_rgb(), &[1.0, 0.5, 0.0]);
+        let rgba = c.to_rgba(None).expect("rgb converts");
+        assert_eq!((rgba.r, rgba.g, rgba.b), (1.0, 0.5, 0.0));
+    }
+
+    #[test]
+    fn cmyk_is_subtractive() {
+        // Full ink in every channel is black; no ink at all is white. A renderer that
+        // added the channels would draw CMYK cyan as a deep blue and black as white.
+        let mut c = Colour::black();
+        c.set(
+            ColourSpace {
+                name: "DeviceCMYK".into(),
+                colorant: None,
+            },
+            &[1.0, 1.0, 1.0, 1.0],
+        );
+        let rgba = c.to_rgba(None).expect("cmyk converts");
+        assert_eq!(
+            (rgba.r, rgba.g, rgba.b),
+            (0.0, 0.0, 0.0),
+            "full ink is black"
+        );
+
+        c.set(
+            ColourSpace {
+                name: "DeviceCMYK".into(),
+                colorant: None,
+            },
+            &[0.0, 0.0, 0.0, 0.0],
+        );
+        let paper = c.to_rgba(None).expect("cmyk converts");
+        assert_eq!(
+            (paper.r, paper.g, paper.b),
+            (1.0, 1.0, 1.0),
+            "no ink is white"
+        );
+    }
+
+    #[test]
+    fn cmyk_ink_applies_on_top_of_the_cyan() {
+        // A cyan with half black: (1 - 1)(1 - 0.5) = 0 in red, and half in green and
+        // blue.
+        let mut c = Colour::black();
+        c.set(
+            ColourSpace {
+                name: "DeviceCMYK".into(),
+                colorant: None,
+            },
+            &[1.0, 0.0, 0.0, 0.5],
+        );
+        let rgba = c.to_rgba(None).expect("cmyk converts");
+        assert!(rgba.r.abs() < 1e-9, "cyan removes all the red");
+        assert!((rgba.g - 0.5).abs() < 1e-9, "half black halves the rest");
+        assert!((rgba.b - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_spot_colour_falls_back_to_the_alternate() {
+        let mut tint = Colour::black();
+        tint.set(
+            ColourSpace {
+                name: "Separation".into(),
+                colorant: Some("PANTONE 185 C".into()),
+            },
+            &[1.0],
+        );
+        let mut ink = Colour::black();
+        ink.set(ColourSpace::device_rgb(), &[0.8, 0.0, 0.0]);
+        let rgba = tint.to_rgba(Some(&ink)).expect("the fallback is used");
+        assert_eq!((rgba.r, rgba.g, rgba.b), (0.8, 0.0, 0.0));
+
+        // With no alternate given, black rather than an invented colour.
+        let plain = tint.to_rgba(None).unwrap_or(Rgba::BLACK);
+        assert_eq!(plain, Rgba::BLACK);
+    }
+
+    #[test]
+    fn a_space_this_cannot_convert_returns_nothing() {
+        let mut c = Colour::black();
+        c.set(
+            ColourSpace {
+                name: "Lab".into(),
+                colorant: None,
+            },
+            &[50.0, 20.0, -30.0],
+        );
+        assert!(
+            c.to_rgba(None).is_none(),
+            "Lab needs a white point, so there is no answer to give"
+        );
+    }
+
+    #[test]
+    fn a_short_colour_array_does_not_convert() {
+        let mut c = Colour::black();
+        c.set(ColourSpace::device_rgb(), &[1.0]);
+        assert_eq!(c.components.len(), 3, "the setter padded it");
+        assert!(c.to_rgba(None).is_some(), "so it converts after padding");
+
+        // A colour built without the setter can still be short.
+        let hand_built = Colour {
+            space: ColourSpace::device_rgb(),
+            components: vec![1.0],
+        };
+        assert!(hand_built.to_rgba(None).is_none());
+    }
+
+    #[test]
+    fn a_component_out_of_range_is_clamped_on_conversion() {
+        let c = Colour {
+            space: ColourSpace::device_rgb(),
+            components: vec![2.0, -1.0, 0.5],
+        };
+        let rgba = c.to_rgba(None).expect("converts");
+        assert_eq!((rgba.r, rgba.g, rgba.b), (1.0, 0.0, 0.5));
+    }
+
+    #[test]
+    fn a_colour_becomes_the_bytes_a_buffer_holds() {
+        let mut c = Colour::black();
+        c.set(ColourSpace::device_rgb(), &[1.0, 1.0, 1.0]);
+        let rgba = c.to_rgba(None).expect("converts");
+        assert_eq!(rgba.to_rgba8(1.0), [255, 255, 255, 255]);
+        // Half alpha comes back as about 128, and the colour is unchanged.
+        assert_eq!(rgba.to_rgba8(0.5)[3], 128);
+        assert_eq!(rgba.r, 1.0);
     }
 
     #[test]

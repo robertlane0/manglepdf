@@ -8,7 +8,7 @@ Where the work actually is. Updated whenever a milestone moves.
 |---|---|---|
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
-| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist; there is no renderer, so nothing is painted |
+| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths into pixels with analytic coverage. Text, images, shadings and patterns still draw nothing |
 | **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | not started |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
@@ -45,6 +45,14 @@ Where the work actually is. Updated whenever a milestone moves.
   edit a single rewrite. The operator table is the specification's, the graphics state is
   a value rather than a place, and a test proves across the whole corpus that every mark
   names bytes that are inside the page it came from.
+- **`mangle-render`** — the rasterizer. Coverage is **analytic**, not sampled: each pixel
+  row is subdivided at the heights where an edge crosses a pixel boundary, and between two
+  cuts the covered width is linear, so a pixel's coverage is a trapezoid and a path's total
+  coverage equals its area. That last property is a test, and it is the one a sampled
+  rasterizer cannot satisfy. Paths fill and stroke, with caps, joins, dashes and the miter
+  limit; a stroke's parameters travel with the mark that used them. The page's placement —
+  the fit, the y-flip and `/Rotate` — is decided in one place, because getting the flip
+  wrong renders every page upside down and looks like somebody else's bug.
 - **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`.
   This is how "what does ManglePDF think of this file?" is asked without a window.
 - **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one
@@ -56,7 +64,7 @@ Where the work actually is. Updated whenever a milestone moves.
 
 ## Tests
 
-310, none ignored, no warnings. Four kinds matter:
+405, none ignored, no warnings. Five kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -71,25 +79,38 @@ Where the work actually is. Updated whenever a milestone moves.
   mark is checked against the bytes it names. Rewriting a mark's string operand changes
   that mark and leaves every other mark's content alone, which is the property the whole
   content layer exists to provide.
+- **Rendering** — a page is rendered and checked against what the page says should be on
+  it: each shape where the file put it, the clip where the file put it, the ink matching
+  the shapes' areas to the luminance. The corpus is rendered at two scales to prove no
+  file hangs or overruns the buffers.
+- **The rasterizer against `mutool`** — the same pages rendered by `mutool` and compared.
+  `mutool` is an independent implementation with years of accumulated knowledge of what a
+  page should look like, so agreeing with it is the only check that says anything about
+  correctness rather than about internal consistency. The comparison is on *ink*, with both
+  renderings flattened onto one background first: `mutool` writes an unpainted page as
+  transparent and this renderer writes white paper, and comparing the raw buffers would be
+  comparing conventions. Skipped cleanly when `mutool` is absent.
 
 ## Gaps, in the order they block
 
-1. **No renderer.** Nothing rasterizes a page, so the canvas draws paper and nothing
-   else. `mangle-content` produces the marks and their byte ranges; `mangle-render` has
-   to turn those into pixels.
-2. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
-   from the marks the content layer now produces.
-3. **A glyph is one byte here.** Deciding which bytes of a string are glyphs, and how
-   wide each one is, needs the font and the encoding, so `mangle-content` uses the
-   conventional 500-unit average and says so. The font layer replaces it with real
-   metrics; until then text positions on a page are approximate and the *text itself* is
-   exact.
-4. **JBIG2 and JPX are not implemented.**
-5. **An object that came out of an object stream cannot keep its original bytes**,
+1. **Text draws nothing.** A glyph run is reported with its font, its bytes and a
+   placement per byte, but no glyph is painted: deciding which bytes of a string are
+   glyphs and how wide each is needs the font and the encoding, and the content layer
+   deliberately refuses to guess. Text is the next substantial piece.
+2. **Images, shadings and patterns draw nothing.** Each is reported as a note against the
+   mark rather than skipped silently, so a page that used one is visibly incomplete
+   instead of quietly wrong.
+3. **A clip is honoured as its bounding box.** A clip path can be any shape; what the
+   interpreter records is the rectangle that bounds it, which draws slightly more than it
+   should rather than slightly less. The renderer needs the real clip region.
+4. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
+   from the marks the content layer produces.
+5. **JBIG2 and JPX are not implemented.**
+6. **An object that came out of an object stream cannot keep its original bytes**,
    because it had none: it was compressed with everything else in its container. A full
    save writes it as a direct object, which every reader accepts but which is a
    re-serialisation rather than a copy.
-6. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
+7. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
 
 ## Known limitations in the finished layers
 

@@ -161,6 +161,28 @@ impl ContentStream {
                         value: Object::Name(Name::from_bytes(name)),
                     });
                 }
+                // Arrays and dictionaries are gathered rather than emitted as brackets,
+                // because the operators that take them need the contents: `TJ`'s kerning
+                // and `d`'s dash pattern are both arrays, and an empty one silently
+                // loses the spacing a page was authored with.
+                Token::ArrayOpen => {
+                    let (value, end) =
+                        collect(&mut lex, spanned.end, b']', Object::Array(Vec::new()));
+                    tokens.push(ContentToken {
+                        kind: ContentKind::Operand,
+                        span: spanned.start..end,
+                        value,
+                    });
+                }
+                Token::DictOpen => {
+                    let (value, end) =
+                        collect(&mut lex, spanned.end, b'>', Object::Dict(Dict::new()));
+                    tokens.push(ContentToken {
+                        kind: ContentKind::Operand,
+                        span: spanned.start..end,
+                        value,
+                    });
+                }
                 token => {
                     let value = object_of(token);
                     tokens.push(ContentToken {
@@ -303,6 +325,84 @@ fn object_of(token: &Token) -> Object {
         Token::BraceOpen | Token::BraceClose => Object::Null,
         Token::Keyword(k) => Object::Name(Name::from_bytes(k)),
         Token::Eof => Object::Null,
+    }
+}
+
+/// How deep a bracketed collection may nest.
+///
+/// A file can open a bracket and never close it; without a bound the reader would gather
+/// until the end of the stream and lose every operator after the bracket.
+pub const MAX_COLLECTION_DEPTH: usize = 32;
+
+/// Gather the items of a bracketed collection, starting just after its opening bracket.
+///
+/// `empty` is the value to fill: an array or a dictionary. `closer` is `]` or `>`, and a
+/// dictionary also needs the `>>` case, where two closers arrive together; that is
+/// handled by taking one byte and letting the loop see the other.
+fn collect(lex: &mut Lexer<'_>, start: usize, closer: u8, empty: Object) -> (Object, usize) {
+    let mut items: Vec<Object> = Vec::new();
+    let mut end = start;
+    loop {
+        lex.skip_space();
+        if lex.at_end() {
+            return (finish(empty, items), end);
+        }
+        let Ok(token) = lex.next_token() else {
+            return (finish(empty, items), end);
+        };
+        end = token.end;
+        match &token.token {
+            Token::Eof => return (finish(empty, items), end),
+            // The closing bracket. For a dictionary the file writes `>>`, so this returns
+            // with one `>` still unread, which the caller's next token will see and skip
+            // as a stray — harmless, and better than tracking half a bracket.
+            Token::ArrayClose => {
+                if closer == b']' {
+                    return (finish(empty, items), end);
+                }
+            }
+            Token::DictClose => {
+                if closer == b'>' {
+                    return (finish(empty, items), end);
+                }
+            }
+            Token::ArrayOpen | Token::DictOpen => {
+                // Nesting is bounded rather than refused: a shallow nest is legal and
+                // refusing it would lose the page's spacing.
+                if items.len() < MAX_COLLECTION_DEPTH {
+                    items.push(object_of(&token.token));
+                }
+            }
+            other => {
+                if items.len() < MAX_COLLECTION_DEPTH {
+                    items.push(object_of(other));
+                }
+            }
+        }
+    }
+}
+
+/// Put the gathered items into the collection they belong to.
+fn finish(empty: Object, items: Vec<Object>) -> Object {
+    match empty {
+        Object::Array(_) => Object::Array(items),
+        Object::Dict(_) => {
+            // A dictionary is alternating keys and values, and a trailing key with no
+            // value is damage the reader steps over rather than propagates.
+            let mut dict = Dict::new();
+            let mut iter = items.into_iter();
+            while let (Some(key), Some(value)) = (iter.next(), iter.next()) {
+                if let Object::Name(k) = key {
+                    dict.insert(k, value);
+                } else {
+                    // A key that is not a name means the pairing is off by one from here
+                    // on, so stop: guessing would produce a dictionary with the wrong keys.
+                    break;
+                }
+            }
+            Object::Dict(dict)
+        }
+        other => other,
     }
 }
 
@@ -495,6 +595,102 @@ mod tests {
             op.operands.first().map(|t| &t.value),
             Some(Object::Dict(_))
         ));
+    }
+
+    /// The array an operator takes is its contents, not a bracket: `TJ`'s kerning and
+    /// `d`'s dash pattern are both arrays, and an empty one silently throws away the
+    /// spacing a page was authored with.
+    #[test]
+    fn an_array_operand_keeps_its_items() {
+        let c = ContentStream::parse(b"[(A) -250 (B) 500 (C)] TJ");
+        let op = c.operations().into_iter().next().expect("an operation");
+        let Some(Object::Array(items)) = op.operands.first().map(|t| &t.value) else {
+            panic!(
+                "expected an array, got {:?}",
+                op.operands.first().map(|t| &t.value)
+            );
+        };
+        assert_eq!(items.len(), 5, "three strings and two kerns");
+        assert!(matches!(items.first(), Some(Object::String(s)) if s == b"A"));
+        assert!(matches!(items.get(1), Some(Object::Int(-250))));
+        assert!(matches!(items.last(), Some(Object::String(s)) if s == b"C"));
+    }
+
+    #[test]
+    fn a_dash_array_keeps_its_lengths() {
+        let c = ContentStream::parse(b"[3 1] 2 d");
+        let op = c.operations().into_iter().next().expect("an operation");
+        let Some(Object::Array(items)) = op.operands.first().map(|t| &t.value) else {
+            panic!("expected an array");
+        };
+        let numbers: Vec<f64> = items.iter().filter_map(Object::as_f64).collect();
+        assert_eq!(numbers, vec![3.0, 1.0]);
+    }
+
+    #[test]
+    fn an_array_spans_from_its_bracket_to_the_matching_close() {
+        let source = b"[1 2 3] TJ";
+        let c = ContentStream::parse(source);
+        let t = c.tokens().first().expect("a token");
+        assert_eq!(
+            source.get(t.span.clone()),
+            Some(&b"[1 2 3]"[..]),
+            "the span covers the brackets, which is what an edit needs"
+        );
+    }
+
+    #[test]
+    fn a_dictionary_operand_keeps_its_entries() {
+        let c = ContentStream::parse(b"<< /Type /OC /Name /Layer >> BDC");
+        let op = c.operations().into_iter().next().expect("an operation");
+        let Some(Object::Dict(d)) = op.operands.first().map(|t| &t.value) else {
+            panic!("expected a dictionary");
+        };
+        assert_eq!(d.len(), 2, "two entries");
+        assert_eq!(d.get("Type").and_then(Object::as_name), Some(&b"OC"[..]));
+        assert_eq!(d.get("Name").and_then(Object::as_name), Some(&b"Layer"[..]));
+    }
+
+    #[test]
+    fn a_double_close_bracket_does_not_leak_a_stray_token() {
+        // `>>` is written as two closers; one is consumed by the dictionary and the other
+        // must not become an operand of whatever comes next.
+        let c = ContentStream::parse(b"<< /A 1 >> /Name BDC");
+        let op = c.operations().into_iter().next().expect("an operation");
+        assert_eq!(
+            op.operands.len(),
+            2,
+            "the dictionary and the tag: {:?}",
+            op.operands.len()
+        );
+        assert!(matches!(
+            op.operands.first().map(|t| &t.value),
+            Some(Object::Dict(_))
+        ));
+        assert!(
+            matches!(op.operands.get(1).map(|t| &t.value), Some(Object::Name(n)) if n.as_bytes() == b"Name")
+        );
+    }
+
+    #[test]
+    fn an_unclosed_collection_ends_at_the_end_of_the_stream() {
+        // A file that opens an array and stops. The array takes what it finds and the
+        // stream does not hang.
+        let c = ContentStream::parse(b"[(A) (B) 1 0 0 1");
+        let op = c.operations().into_iter().next().expect("an operation");
+        let Some(Object::Array(items)) = op.operands.first().map(|t| &t.value) else {
+            panic!("expected an array");
+        };
+        assert!(items.len() >= 3, "it took what was there: {}", items.len());
+    }
+
+    #[test]
+    fn an_empty_array_is_empty_rather_than_missing() {
+        let c = ContentStream::parse(b"[] TJ");
+        let op = c.operations().into_iter().next().expect("an operation");
+        assert!(
+            matches!(op.operands.first().map(|t| &t.value), Some(Object::Array(a)) if a.is_empty())
+        );
     }
 
     #[test]
