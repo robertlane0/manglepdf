@@ -17,11 +17,13 @@
 )]
 #![warn(missing_debug_implementations)]
 
+pub mod cff;
 pub mod metrics;
 pub mod outline;
 
+pub use cff::{Cff, MAX_DEPTH as CFF_MAX_DEPTH, MAX_STACK as CFF_MAX_STACK};
 pub use metrics::{
     ASCII_START, CidWidths, Declared, DeclaredWidths, STANDARD_14, Widths, ascii_glyphs, by_name,
     standard_glyph, widths,
 };
-pub use outline::{Outline, Program, Segment, em_scale, from_true_type};
+pub use outline::{Outline, Program, Segment, em_scale, from_cff, from_true_type};

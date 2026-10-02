@@ -16,8 +16,8 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 |---|---|---|
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
-| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths and its embedded-TrueType glyphs into pixels with analytic coverage. Images and shadings draw; patterns and the non-TrueType outlines still draw nothing |
-| **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint. Mesh shadings, tiling patterns and transparency do not |
+| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw; patterns and the standard fourteen still draw nothing |
+| **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint, and TrueType, composite and CFF outlines all draw. Type 1 charstrings, the standard fourteen, Type 3, mesh shadings, tiling patterns and transparency do not |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
 
@@ -62,6 +62,42 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   character code as a glyph index, which is what a subsetted symbolic font needs. Outlines
   are returned in ems and scaled by the em size, and the composite glyphs TrueType's format
   is full of come out whole.
+
+  **CFF outlines are executed rather than walked.** A `CFF ` table's glyphs are Type 2
+  charstrings — programs, not point lists — so reading one means running it: a stack
+  machine over `f32` with local and global subroutines, the subroutine-number bias, stem
+  hints, and a width that may or may not be the first operand on the stack. What is covered
+  is every drawing operator (the movers, the liners, all seven curve forms and the four
+  flexes), the stem hints and both mask operators with the mask length the stems imply,
+  `callsubr`/`callgsubr`/`return`, `endchar`, and the CFF 2 `vsindex` and `blend`. Bounds
+  are the format's own — 48 values on the stack and 10 nested calls — and passing either is
+  reported with a reason rather than accommodated.
+
+  Three things are **not** covered, and each says so rather than drawing something plausible:
+
+  - **A bare `/Subtype /Type1C` font with a name-keyed charset cannot resolve a character
+    code.** The codes in a content stream name glyphs through the font's `/Encoding`, and the
+    charset that turns those names into glyph numbers is a table this does not read. The
+    *outlines* are read from that same table, so the report says exactly that rather than
+    leaving a page of blank where the text should be. The `/Subtype /OpenType` form of the
+    same font is fully supported, because its `cmap` beside the `CFF ` table answers the
+    question.
+  - **A CID-keyed CFF is read only through the identity charset.** `/FDArray` and
+    `/FDSelect` are both read, so each glyph gets its own Private DICT, its own subroutines
+    and its own widths — which is the part that is easy to get wrong and silent. What is not
+    read is a charset that renumbers, so such a font is refused with a reason: treating its
+    identifiers as glyph numbers would draw the wrong letter for every character and nothing
+    downstream could tell.
+  - **`seac` is refused**, and so is a font whose Top DICT says its charstrings are Type 1
+    (`CharstringType 1`). Both build an accented character out of two others *by name*, and
+    drawing the unaccented one instead would be a wrong shape that looks like a right one.
+
+  What *is* left out on purpose: every hinting value except the stem count (`BlueValues`,
+  `StdHW`, `ExpansionFactor` and the rest describe how to snap stems to a rasterizer's pixel
+  grid, and this renderer computes exact analytic coverage and has no grid to snap to), the
+  variation store's region scalars (so a `blend` is its default value, which is a CFF2
+  font's default instance and is what a PDF asks for), and the escaped transient arithmetic
+  operators, which no real font uses.
 - **`mangle-content`** — content streams. Every token, every operator and every mark
   carries the bytes it came from, which is what makes a selection a byte range and an
   edit a single rewrite. The operator table is the specification's, the graphics state is
@@ -127,7 +163,7 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Tests
 
-609, none ignored, no warnings. Ten kinds matter:
+637, none ignored, no warnings. Ten kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -206,6 +242,26 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   `/W` array that mixes the listed and the ranged form. A symmetric fixture would score well
   against a renderer that drew the *wrong* glyphs, because the error would be a mirror image
   of itself.
+- **CFF outlines, against `mutool`** — a page whose `/FontFile3` is a whole OTF with a `CFF `
+  table is rendered at 150 DPI and compared at **0.98654** SSIM, against the same bar of
+  0.95, having covered 3 333 946 ink pixels where `mutool` covered 3 330 782. The fixture is
+  deliberately asymmetric: three lines of different lengths at different sizes and starting
+  positions, and a filled grey rectangle beside them, nothing mirrored in either axis. Three
+  lines rather than a word is the point — the same letters at three sizes means one wrong
+  advance shows up as drift on the third line only, which a symmetric page cannot show.
+- **Every glyph of every CFF font on the machine, against `ttf-parser`** — `ttf-parser` has
+  its own CFF interpreter, written from the same specification by different hands, so
+  walking a font with both and comparing every coordinate of every segment is a check on
+  correctness rather than on consistency. 28 347 outlines agree and none differ. This is what
+  found the defect that mattered most: a charstring's curve operators give three points as
+  offsets **from the point before each of them** — the first from the pen, the second from
+  the first, the third from the second — and reading all three from the pen produces a
+  closed, plausible, *wrong* glyph rather than an error. Every letter came out too narrow and
+  every curve too flat: 0.99 SSIM for a TrueType face on the same code, 0.82 for this one.
+  The widths are cross-checked the same way, against the same font's `hmtx` — 10 537 agree,
+  none differ — and the subroutine bias is tested at 107, 1131 and 32768 *and at 1239, 1240
+  and 33 900 subroutines*, because the boundaries are where an off-by-one lives and one
+  sample inside a range cannot see one.
 - **Widths against two other renderers** — the standard fonts' metrics are checked by
   measuring where a real renderer puts each glyph, not by reading the table back. One
   transcription error was found this way: `fraction` in Helvetica had the width of the URW
@@ -218,12 +274,15 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
    paths and falls back to box-only culling, so a deeply nested clip loses an antialiased
    edge. The cap exists because each path costs a full coverage rasterisation, and the
    honest fix is to composite the paths in a shared sweep rather than to raise the number.
-2. **Only embedded TrueType outlines draw.** A glyph is filled from a `/FontFile2` program
-   and compared against `mutool` at 0.962 SSIM. Three kinds are still missing: the standard
-   fourteen, which have no program at all; CFF and Type 1, which need a charstring
-   interpreter rather than a table walk; and Type 3, whose glyphs are content streams. A page
-   using one is reported rather than drawn blank. Composite (Type 0) fonts now draw too, and
-   are counted as done below rather than here.
+2. **The standard fourteen and Type 3 do not draw.** A glyph is filled from an embedded
+   program: a `/FontFile2` through a table walk, a `/FontFile3` through a Type 2 charstring
+   interpreter, compared against `mutool` at 0.962 and 0.987 SSIM respectively. What is still
+   missing is the standard fourteen, which have no program at all, and Type 3, whose glyphs
+   are content streams rather than outlines. A page using one is reported rather than drawn
+   blank. Composite (Type 0) fonts draw too, and are counted as done below rather than
+   here. A Type 1 (`FontFile`) program is a CFF table holding Type 1 charstrings, which is a
+   different language from the Type 2 this reads, so a font that says so is refused with a
+   reason.
 3. **Composite fonts read two-byte codes, and the mark says so.** A `/Type0` font's
    character codes are two bytes, so a string is split into codes rather than bytes and the
    pen advances by the width of each code. Two things had to change together for that to be

@@ -465,17 +465,23 @@ impl std::fmt::Debug for FontProgram {
 
 /// Find and read the font program a font resource names.
 ///
-/// A `/FontFile2` stream is the TrueType program, and it is reached through the font's
-/// `/FontDescriptor` rather than directly: the descriptor is where a file says how to
-/// interpret the program, and going around it would mean guessing. The stream is decoded
-/// through the same path `image::decode` uses, because a font program is compressed
-/// exactly as an image is and a second filter chain would be a second set of bugs.
+/// The program is reached through the font's `/FontDescriptor` rather than directly: the
+/// descriptor is where a file says how to interpret it, and going around it would mean
+/// guessing. The stream is decoded through the same path `image::decode` uses, because a
+/// font program is compressed exactly as an image is and a second filter chain would be a
+/// second set of bugs.
 ///
-/// A font with no `/FontFile2` is not a failure. The standard fourteen have none by
-/// definition, and a document that names one without embedding it is a document whose
-/// glyphs come from somewhere else — a substitution, or a font of its own that this
-/// does not draw. Either way the reason belongs in the report, and the page is still
-/// worth showing.
+/// **Two keys, and the difference between them is the whole of the font's geometry.** A
+/// `/FontFile2` is a TrueType program; a `/FontFile3` is a CFF one, whose glyphs are Type 2
+/// charstrings that have to be executed rather than points that can be walked. The
+/// descriptor names the key, and the key is named in the reason when there is none, because
+/// "this font is not embedded" and "this font is embedded in a form this does not read" are
+/// different findings.
+///
+/// A font with neither is not a failure. The standard fourteen have none by definition, and a
+/// document that names one without embedding it is a document whose glyphs come from
+/// somewhere else — a substitution, or a font of its own that this does not draw. Either way
+/// the reason belongs in the report, and the page is still worth showing.
 fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontProgram, String> {
     let Some(object) = resources.fonts.get(name).cloned() else {
         return Err(format!(
@@ -513,22 +519,34 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
              font program from"
         ));
     };
-    let Some(file) = descriptor.get("FontFile2") else {
+    let key = ["FontFile2", "FontFile3"]
+        .into_iter()
+        .find(|key| descriptor.get(key).is_some());
+    let Some(key) = key else {
         return Err(format!(
             "the font `/{name}` is not embedded, so it has no outlines of its own to draw"
         ));
     };
-    let file = doc.resolve_object(file).unwrap_or_else(|| file.clone());
+    let file = doc
+        .resolve_object(descriptor.get(key).unwrap_or(&Object::Null))
+        .unwrap_or_else(|| descriptor.get(key).unwrap_or(&Object::Null).clone());
     let Object::Stream(stream) = file else {
-        return Err(format!("the `/FontFile2` of `/{name}` is not a stream"));
+        return Err(format!("the `/{key}` of `/{name}` is not a stream"));
     };
     // The filters below a font program are the same filters below an image, and they are
     // the reason this is `decode_stream` rather than `stream.raw`.
     let decoded = decode_stream(&stream);
     let mut program = mangle_font::Program::new(decoded.data);
     let units_per_em = program
-        .units_per_em()
-        .ok_or_else(|| format!("the `/FontFile2` of `/{name}` is not a font this can read"))?;
+        .inspect()
+        .map_err(|why| format!("the `/{key}` of `/{name}` {why}"))?;
+    // A program this can read but cannot turn a *character code* into a glyph for is a
+    // different finding again, and one that costs every character on the page rather than
+    // one glyph. Saying so here means the page reports one reason instead of drawing
+    // nothing and saying nothing.
+    if let Some(reason) = program.code_refusal() {
+        return Err(format!("the `/{key}` of `/{name}` {reason}"));
+    }
     Ok(FontProgram {
         program,
         units_per_em,

@@ -2115,3 +2115,341 @@ fn a_clip_under_a_scaled_ctm_is_not_transformed_twice() {
         );
     }
 }
+
+// ── CFF fonts: Type 2 charstrings, executed rather than walked ─────────────────────
+
+/// Where a CFF font might be, most-likely first.
+///
+/// The whole program is embedded rather than subset, up to two megabytes, and that is the
+/// right trade for a fixture: subsetting is a real feature with a real chance of being wrong,
+/// and a fixture that depended on it would be testing the subsetter as much as the renderer.
+const CFF_CANDIDATES: [&str; 6] = [
+    "/usr/share/fonts/gnu-free/FreeSerif.otf",
+    "/usr/share/fonts/gnu-free/FreeSans.otf",
+    "/usr/share/fonts/gnu-free/FreeSerifBold.otf",
+    "/usr/share/fonts/gsfonts/NimbusSans-Regular.otf",
+    "/usr/share/fonts/gsfonts/NimbusRoman-Regular.otf",
+    "/usr/share/fonts/gsfonts/URWBookman-Demi.otf",
+];
+
+/// A CFF font program to embed, or the reason there is none.
+///
+/// A file that parses is the only one that goes in: a fixture built round a font this cannot
+/// read would compare a blank page against a drawn one and report a difference between the
+/// renderers rather than between this reader and the machine.
+fn cff_font() -> Result<Vec<u8>, String> {
+    for path in CFF_CANDIDATES {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        if mangle_font::cff::cff_bytes(&bytes).is_some() {
+            return Ok(bytes);
+        }
+    }
+    Err(format!(
+        "no CFF font found; looked in {}",
+        CFF_CANDIDATES.join(", ")
+    ))
+}
+
+/// The `CFF ` table out of an OpenType-CFF program, or the whole program back.
+///
+/// A `/FontFile3` is written in one of two shapes and the test uses both. The bare table,
+/// `/Subtype /Type1C`, is a font that has no `sfnt` wrapper and so no `cmap` and no `hmtx`
+/// beside it; the wrapped one, `/Subtype /OpenType`, is the whole `sfnt`. They are the same
+/// outlines, and a reader that handled only one of them would draw half the embedded CFF
+/// fonts in the world.
+fn bare_cff(program: &[u8]) -> Option<Vec<u8>> {
+    mangle_font::cff::cff_bytes(program).map(<[u8]>::to_vec)
+}
+
+/// One line of text: its text, its size, and where its baseline starts.
+struct Line {
+    text: &'static str,
+    size: f64,
+    at: (f64, f64),
+}
+
+/// The lines the CFF fixture shows, in the order the content stream writes them.
+///
+/// **Deliberately asymmetric, and the asymmetry is the point.** Three lines of different
+/// lengths, at three different sizes, starting at three different x positions, with a filled
+/// rectangle in one corner. A symmetric fixture — the same word repeated, centred, evenly
+/// spaced, on white — scores well against a renderer that draws the *wrong* glyphs, because
+/// the error is a mirror image of itself and the two cancel. This one cannot be got right by
+/// accident: a glyph drawn at its neighbour's position, a charstring whose width was read off
+/// the wrong end of the stack, or an outline scaled by the em twice, each moves ink to where
+/// there is none and SSIM notices.
+const CFF_LINES: [Line; 3] = [
+    Line {
+        text: "Hamburgefonstiv",
+        size: 36.0,
+        at: (18.0, 96.0),
+    },
+    Line {
+        text: "Wxyz 0189 @",
+        size: 20.0,
+        at: (31.0, 58.0),
+    },
+    Line {
+        text: "Qg",
+        size: 48.0,
+        at: (268.0, 34.0),
+    },
+];
+
+/// A page set in an embedded CFF font, with a shape in one corner.
+///
+/// The shape is there so that part of the page is *not* text. Without it the comparison is
+/// only ever about glyphs, and a fixture that cannot tell "nothing was drawn" from "the page
+/// is blank" is a fixture that scores well when everything fails.
+fn cff_page(program: &[u8], subtype: &str, packed: &[u8]) -> Vec<u8> {
+    let reader = mangle_font::Program::new(program.to_vec());
+    // `/Widths` in thousandths of an em, from the font's own advances, over the ASCII range.
+    // Both renderers read this array, so the pen walks the same distance on both and the
+    // comparison is about glyph shapes rather than about where each put the second letter.
+    let mut widths = Vec::with_capacity(95);
+    for code in 32u8..=126 {
+        let width = reader
+            .glyph_for_code(u32::from(code))
+            .and_then(|glyph| reader.advance(glyph))
+            .unwrap_or(500);
+        widths.push(width.to_string());
+    }
+    let widths = widths.join(" ");
+
+    let mut content = String::from("0.86 0.86 0.86 rg 300 8 92 26 re f\n");
+    for line in &CFF_LINES {
+        // `writeln!` because the line ends in a newline, and a format string that carries its
+        // own trailing newline is the same thing said twice.
+        let _ = writeln!(
+            content,
+            "BT 0 0 0 rg /F1 {} Tf {} {} Td ({}) Tj ET",
+            line.size, line.at.0, line.at.1, line.text
+        );
+    }
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 8];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 400 130] \
+          /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content.as_bytes());
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+
+    at[5] = out.len();
+    // `/Subtype /TrueType` with a `/FontFile3` is the PDF's name for an OpenType-CFF program:
+    // the outlines are CFF but the font is still a simple font, addressed by one-byte codes
+    // through `/Encoding`. A `/Subtype /CIDFontType0C` descendant is CID-keyed and is a
+    // different reader's job; see the note in the test below.
+    out.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /Font /Subtype /TrueType /BaseFont /Embedded /FirstChar 32 \
+             /LastChar 126 /Widths [{widths}] /Encoding /WinAnsiEncoding /FontDescriptor \
+             6 0 R >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    at[6] = out.len();
+    out.extend_from_slice(
+        b"6 0 obj\n<< /Type /FontDescriptor /FontName /Embedded /Flags 4 /FontBBox \
+          [-212 -293 1043 1085] /ItalicAngle 0 /Ascent 900 /Descent -300 /CapHeight 700 \
+          /StemV 80 /MissingWidth 500 /FontFile3 7 0 R >>\nendobj\n",
+    );
+    at[7] = out.len();
+    // `/Length1` is the length of the *uncompressed* program, which is what tells a reader
+    // the stream really is a font program and not, say, an image. It is the same number here
+    // because the stream is written uncompressed.
+    let mut file = format!(
+        "7 0 obj\n<< /Length {} /Length1 {} /Subtype /{} >>\nstream\n",
+        packed.len(),
+        packed.len(),
+        subtype
+    )
+    .into_bytes();
+    file.extend_from_slice(packed);
+    file.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&file);
+
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 7\n");
+    for offset in at.iter().take(8).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// A page in a CFF font, rendered, or the reason there is none.
+fn render_cff_page(pdf_bytes: Vec<u8>, scale: f64) -> Result<mangle_render::PageRender, String> {
+    let doc = open(pdf_bytes);
+    let all = pages(&doc);
+    let page = all.first().ok_or("the page has no page tree")?;
+    let resources = page
+        .inherited
+        .resources
+        .as_ref()
+        .and_then(|o| doc.resolve_object(o))
+        .and_then(|o| o.as_dict().cloned())
+        .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+        .unwrap_or_default();
+    Ok(render_page(
+        &doc,
+        page,
+        &resources,
+        RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        },
+    ))
+}
+
+/// The shared comparison: our render, `mutool`'s, and the score between them.
+///
+/// `mutool` must have drawn something, or the score is a statement about two blank pages
+/// rather than about glyphs, so its ink is asserted before the comparison happens.
+fn score_against_mutool(
+    ours: &mangle_render::PageRender,
+    pdf: &Path,
+    scale: f64,
+    label: &str,
+) -> Option<mangle_render::Comparison> {
+    let dir = std::env::temp_dir().join("mangle-render-oracle");
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let theirs_path = pdf.with_extension("pam");
+    let Some(data) = mutool_render(pdf, scale, &theirs_path) else {
+        eprintln!("skipped: mutool could not render the page");
+        return None;
+    };
+    let Some((w, h, depth, body)) = read_pam(&data) else {
+        eprintln!("skipped: could not read mutool's output");
+        return None;
+    };
+    let theirs = flatten_onto_paper(&pam_to_image(w, h, depth, body));
+    let their_ink: u64 = (0..theirs.height)
+        .flat_map(|y| (0..theirs.width).map(move |x| (x, y)))
+        .map(|(x, y)| u64::from(darkness(&theirs, x, y)))
+        .sum();
+    assert!(
+        their_ink > 0,
+        "mutool drew nothing, so there is nothing to compare against"
+    );
+
+    let comparison = compare(&ours.image, &theirs, &SsimOptions::default());
+    assert!(
+        comparison.is_valid(),
+        "the comparison did not happen: {:?}",
+        comparison.refused
+    );
+    eprintln!(
+        "{label}: {} — our ink {}, theirs {their_ink}",
+        comparison.metrics.summary(),
+        total_ink(ours)
+    );
+    Some(comparison)
+}
+
+/// An embedded CFF page, compared with `mutool`.
+///
+/// This is the check that says something about *correctness*. Every other CFF test here is
+/// self-consistent, and a self-consistent charstring interpreter can be self-consistently
+/// wrong — reading the width off the wrong end of its stack, applying the em twice, skipping
+/// a hint mask at the wrong length. `mutool` is a different codebase with a decade of
+/// accumulated knowledge of what a glyph is meant to look like, and an SSIM against it is a
+/// statement about the outlines, the code lookup, the em scale, the placement matrix and the
+/// fill rule all at once, and about nothing else.
+#[test]
+fn our_cff_glyphs_agree_with_mutools() {
+    if mutool().is_none() {
+        eprintln!("skipped: mutool is not installed");
+        return;
+    }
+    let font = match cff_font() {
+        Ok(font) => font,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let dir = std::env::temp_dir().join("mangle-render-oracle");
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let pdf = dir.join("cff.pdf");
+    let bytes = cff_page(&font, "OpenType", &font);
+    std::fs::write(&pdf, &bytes).expect("a file to render");
+
+    let scale = 150.0 / 72.0;
+    let ours = render_cff_page(bytes, scale).expect("a font");
+    assert!(
+        ours.notes.is_empty(),
+        "an embedded CFF font should draw without complaint: {:?}",
+        ours.notes
+    );
+    let Some(comparison) = score_against_mutool(&ours, &pdf, scale, "CFF page") else {
+        return;
+    };
+    assert!(
+        comparison.metrics.meets_fidelity_bar(0.95),
+        "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",
+        comparison.metrics.ssim,
+        comparison.metrics.summary()
+    );
+}
+
+// There is deliberately no oracle test for the bare `/Subtype /Type1C` form.
+//
+// `mutool` resolves a bare CFF font's character codes — through the charset and the standard
+// encoding — and draws the page, while this renderer **refuses it and says why** (the test
+// below). Comparing the two would measure the refusal rather than the outlines, and a score
+// above the bar would be a lie about what this renderer does. The honest comparison for that
+// shape is the one that already runs: the same outlines, taken out of the same `CFF ` table,
+// and drawn through the `sfnt` wrapper's `cmap`.
+
+/// A bare CFF font whose codes name glyphs through an `/Encoding` says so, rather than
+/// drawing nothing.
+///
+/// A `/Subtype /Type1C` program is the font with no `sfnt` wrapper and so no `cmap`: the codes
+/// in a content stream name glyphs through the font's `/Encoding`, and the `charset` that
+/// resolves those names to glyph numbers is a table this does not read. The *outlines* are
+/// read — the same `CFF ` table, walked by the same reader — so what is missing is only the
+/// code lookup, and saying so once is the whole of the fix.
+///
+/// Drawing nothing for every character on the page, with nothing in the report, is the failure
+/// this guards against: a user sees a page with no text and no idea why. And drawing the
+/// outline for glyph *n* because the code was *n* would be worse — a page of the wrong
+/// letters, which looks like a font problem rather than a reader one.
+#[test]
+fn a_bare_name_keyed_cff_font_reports_why_it_cannot_draw() {
+    let font = match cff_font() {
+        Ok(font) => font,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let Some(bare) = bare_cff(&font) else {
+        eprintln!("skipped: the font has no `CFF ` table to unwrap");
+        return;
+    };
+    let render = render_cff_page(cff_page(&font, "Type1C", &bare), 2.0).expect("a font");
+    let said = render
+        .notes
+        .iter()
+        .any(|note| note.contains("Encoding") && note.contains("does not resolve"));
+    assert!(
+        said,
+        "a bare name-keyed CFF font must say why its codes cannot be resolved: {:?}",
+        render.notes
+    );
+}

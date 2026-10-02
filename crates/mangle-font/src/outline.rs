@@ -24,15 +24,18 @@
 //! room for arcs, quads and everything else a general path library wants — would be a lie
 //! about the data: TrueType outlines are move, line and cubic, and nothing else.
 //!
-//! ## What is not here
+//! ## Two kinds of program, one answer
 //!
-//! CFF outlines. An OpenType font may carry `CFF ` where this expects `glyf`, and
-//! `ttf-parser` will then call `quad_to` on the builder below. A quadratic segment is
-//! *exactly* representable as a cubic (degree elevation), so it is converted rather than
-//! dropped; but the naming and the doc comments are about TrueType, and a CFF font is
-//! honestly a different reader's job.
+//! A `/FontFile2` is TrueType and this module reads it through `ttf-parser`. A `/FontFile3`
+//! is CFF, and its glyphs are not points in a table but Type 2 *programs* that have to be
+//! executed; that reader is [`crate::cff`]. Both answer the same question in the same units,
+//! so [`Program`] is what asks which of them it has and does not care. A program that is
+//! neither is a `None` with a reason attached rather than an empty path, because "this file
+//! has no glyph I can draw" and "this file is not a font" are different findings.
 
 use ttf_parser::{Face, GlyphId, OutlineBuilder, PlatformId};
+
+use crate::cff::{self, Cff};
 
 /// A glyph's outline, in ems, ready to be transformed onto a page.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -104,17 +107,30 @@ pub struct Program {
     /// Outlines by glyph number. `None` is a remembered miss, which is a real answer for a
     /// space and worth not recomputing for every character in the word.
     outlines: std::collections::HashMap<u32, Option<Outline>>,
-    units_per_em: Option<u16>,
+    /// The verdict on what this program is, worked out once. Which kind of program it is
+    /// and how big its em is are the same question, so they are one answer: a font with no
+    /// em has no outlines either, and finding that out twice would only risk the two
+    /// disagreeing.
+    inspected: Option<Result<(u16, Kind), String>>,
+}
+
+/// What a font program turned out to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// `glyf` outlines, read through `ttf-parser`.
+    TrueType,
+    /// CFF outlines, read by executing Type 2 charstrings.
+    Cff,
 }
 
 impl Program {
-    /// A font program, as the bytes of a `/FontFile2` stream.
+    /// A font program, as the bytes of a `/FontFile2` or `/FontFile3` stream.
     #[must_use]
     pub fn new(data: Vec<u8>) -> Self {
         Self {
             data,
             outlines: std::collections::HashMap::new(),
-            units_per_em: None,
+            inspected: None,
         }
     }
 
@@ -127,12 +143,60 @@ impl Program {
     /// How many units the font's own grid has to the em, if the program parses at all.
     #[must_use]
     pub fn units_per_em(&mut self) -> Option<u16> {
-        if let Some(value) = self.units_per_em {
-            return Some(value);
+        self.inspect().ok()
+    }
+
+    /// How many units the font's own grid has to the em, or the reason there is not one.
+    ///
+    /// The reason matters as much as the number. A renderer that cannot read a font is
+    /// going to say so on the page, and "the font program is not a font this can read" is
+    /// a finding a user can act on where "no outlines" is not.
+    pub fn inspect(&mut self) -> Result<u16, String> {
+        if let Some(cached) = &self.inspected {
+            return cached.clone().map(|(units, _)| units);
         }
-        let face = Face::parse(&self.data, 0).ok()?;
-        self.units_per_em = Some(face.units_per_em());
-        self.units_per_em
+        let verdict = self.read();
+        self.inspected = Some(verdict.clone());
+        verdict.map(|(units, _)| units)
+    }
+
+    /// The one answer to "what is this", used by everything above so that the em, the
+    /// outlines and the widths cannot disagree about it.
+    fn read(&self) -> Result<(u16, Kind), String> {
+        if let Some(table) = cff::cff_bytes(&self.data) {
+            let cff = Cff::parse(table, 0).map_err(|why| format!("it is CFF but {why}"))?;
+            return Ok((cff::units_from_matrix(&cff.font_matrix), Kind::Cff));
+        }
+        let face = Face::parse(&self.data, 0).map_err(|why| format!("it is not a font: {why}"))?;
+        Ok((face.units_per_em(), Kind::TrueType))
+    }
+
+    /// Why a character code cannot be turned into a glyph here, if it cannot.
+    ///
+    /// `None` means the program can. The one case that cannot is a *bare* CFF font with a
+    /// name-keyed charset: the codes in a content stream name glyphs through the font's
+    /// `/Encoding`, and the charset that resolves those names to glyph numbers is a table
+    /// this does not read. Saying so once beats drawing nothing for every character on the
+    /// page and saying nothing about why.
+    pub fn code_refusal(&mut self) -> Option<String> {
+        if let Err(reason) = self.inspect() {
+            return Some(reason);
+        }
+        let table = cff::cff_bytes(&self.data)?;
+        // A CID-keyed font resolves an identifier through its charset, and the only
+        // charset this reads is the identity one, which `Cff::parse` has already insisted
+        // on — so the code is the glyph number.
+        match Cff::parse(table, 0) {
+            Ok(cff) if cff.is_cid_keyed() => None,
+            // An `sfnt` carries a `cmap`, so a code reaches a glyph through it whatever the
+            // outlines are made of.
+            _ if Face::parse(&self.data, 0).is_ok() => None,
+            _ => Some(
+                "it is a bare CFF font whose codes name glyphs through an /Encoding this \
+                 does not resolve, so no character on the page in it can be drawn"
+                    .into(),
+            ),
+        }
     }
 
     /// The outline of one glyph, in ems, and the font's units per em.
@@ -144,12 +208,23 @@ impl Program {
         let cached = match self.outlines.get(&glyph) {
             Some(cached) => cached.clone(),
             None => {
-                let computed = outline_of(&self.data, 0, glyph).map(|(o, _)| o);
+                let computed = self.computed_outline(glyph);
                 self.outlines.insert(glyph, computed.clone());
                 computed
             }
         };
         Some((cached?, self.units_per_em()?))
+    }
+
+    /// One glyph's outline, from whichever reader this program needs.
+    fn computed_outline(&self, glyph: u32) -> Option<Outline> {
+        match cff::cff_bytes(&self.data) {
+            // A CFF outline is only known once its charstring has been executed, and a
+            // charstring that refuses is a glyph that is not drawn rather than a glyph
+            // drawn wrongly.
+            Some(table) => Cff::parse(table, 0).ok()?.outline(glyph).ok(),
+            None => outline_of(&self.data, 0, glyph).map(|(o, _)| o),
+        }
     }
 
     /// The outline one character code names, in ems, and the font's units per em.
@@ -166,8 +241,15 @@ impl Program {
     /// The font's own units rather than ems because a PDF `/Widths` array is in thousandths
     /// of an em, and a caller writing one will want the raw figure to do that arithmetic
     /// itself rather than have it rounded twice on the way.
+    ///
+    /// A CFF program answers from its charstring's own width plus the Private DICT's
+    /// `nominalWidthX`, which is in glyph units; a CFF font's grid is a thousand units to
+    /// the em unless its `FontMatrix` says otherwise, so that is the same figure.
     #[must_use]
     pub fn advance(&self, glyph: u32) -> Option<u16> {
+        if let Some(table) = cff::cff_bytes(&self.data) {
+            return Cff::parse(table, 0).ok()?.advance(glyph).ok();
+        }
         let face = Face::parse(&self.data, 0).ok()?;
         face.glyph_hor_advance(GlyphId(checked(glyph, face.number_of_glyphs())))
     }
@@ -197,14 +279,25 @@ impl Program {
     /// a subsetted symbolic font with no usable `cmap` needs, and it is the specification's
     /// own provision for a font with no `cmap` at all. A code that is not a glyph the font
     /// has is `None`.
+    ///
+    /// A bare CID-keyed CFF has no `cmap` to consult, and there is nothing else to consult:
+    /// its identifiers *are* its glyph numbers, which [`Cff::parse`] only allows having
+    /// said so.
     #[must_use]
     pub fn glyph_for_code(&self, code: u32) -> Option<u32> {
-        let face = Face::parse(&self.data, 0).ok()?;
-        if let Some(found) = glyph_from_subtables(&face, code) {
-            return Some(found);
+        match Face::parse(&self.data, 0) {
+            Ok(face) => {
+                if let Some(found) = glyph_from_subtables(&face, code) {
+                    return Some(found);
+                }
+                let in_range = u32::from(face.number_of_glyphs());
+                (code < in_range).then_some(code)
+            }
+            // A bare CFF has no `sfnt` directory, so the subtables above are not there to
+            // be tried. A CID-keyed one says the identifier and the glyph number are the
+            // same number; a name-keyed one has nothing to say.
+            Err(_) => self.identity_cid(code),
         }
-        let in_range = u32::from(face.number_of_glyphs());
-        (code < in_range).then_some(code)
     }
 
     /// The outline a two-byte character code names, in ems, and the font's units per em.
@@ -234,17 +327,35 @@ impl Program {
     /// no `cmap` at all. A code that is not a glyph the font has is `None`.
     #[must_use]
     pub fn glyph_for_cid(&self, cid: u32) -> Option<u32> {
-        let face = Face::parse(&self.data, 0).ok()?;
-        for subtable in face.tables().cmap?.subtables {
-            if subtable.platform_id == PlatformId::Windows
-                && subtable.encoding_id == 0
-                && let Some(glyph) = subtable.glyph_index(cid)
-            {
-                return Some(u32::from(glyph.0));
+        match Face::parse(&self.data, 0) {
+            Ok(face) => {
+                for subtable in face.tables().cmap?.subtables {
+                    if subtable.platform_id == PlatformId::Windows
+                        && subtable.encoding_id == 0
+                        && let Some(glyph) = subtable.glyph_index(cid)
+                    {
+                        return Some(u32::from(glyph.0));
+                    }
+                }
+                let in_range = u32::from(face.number_of_glyphs());
+                (cid < in_range).then_some(cid)
             }
+            Err(_) => self.identity_cid(cid),
         }
-        let in_range = u32::from(face.number_of_glyphs());
-        (cid < in_range).then_some(cid)
+    }
+
+    /// A character identifier as a glyph number, for a bare CID-keyed CFF.
+    ///
+    /// The CFF charset is what says otherwise, and the only charset this reads is the
+    /// identity one — so reaching this at all means the identifier and the glyph number are
+    /// the same number, and the range check is the only question left.
+    fn identity_cid(&self, code: u32) -> Option<u32> {
+        let table = cff::cff_bytes(&self.data)?;
+        let cff = Cff::parse(table, 0).ok()?;
+        if !cff.is_cid_keyed() {
+            return None;
+        }
+        (code < cff.num_glyphs() as u32).then_some(code)
     }
 }
 
@@ -283,6 +394,23 @@ fn glyph_from_subtables(face: &Face<'_>, code: u32) -> Option<u32> {
 #[must_use]
 pub fn from_true_type(data: &[u8], index: u32) -> Option<(Outline, u16)> {
     outline_of(data, index, 0)
+}
+
+/// The outline of glyph zero of a CFF font program, in ems, and the font's units per em.
+///
+/// The counterpart of [`from_true_type`], and the same answer in the same units: `data` may
+/// be the bare `CFF ` table of a `/FontFile3` with `/Subtype /Type1C` or the whole `sfnt`
+/// of one with `/Subtype /OpenType`, and `index` selects which font of a multi-font CFF
+/// file, which is zero for anything a PDF carries.
+///
+/// `None` when the bytes are not a CFF, and `None` — never a wrong glyph — when they are a
+/// CID-keyed font whose charset this cannot read.
+#[must_use]
+pub fn from_cff(data: &[u8], index: u32) -> Option<(Outline, u16)> {
+    let table = cff::cff_bytes(data)?;
+    let cff = Cff::parse(table, index).ok()?;
+    let outline = cff.outline(0).ok()?;
+    Some((outline, cff::units_from_matrix(&cff.font_matrix)))
 }
 
 /// The outline of one glyph of one face, in ems, and the font's units per em.
