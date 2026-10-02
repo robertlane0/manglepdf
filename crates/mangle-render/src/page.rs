@@ -26,8 +26,8 @@ use mangle_syntax::{Document, Object, Rect as PageRect, stream::decode_stream};
 use crate::image::{self, Raster};
 use crate::shading::{self, Shading};
 use crate::{
-    Device, FillRule, Image, LineCap, LineJoin, Polygon, Rect, StrokeStyle, Viewport,
-    transform_path,
+    ClipRegion, ClipShape, Device, FillRule, Image, LineCap, LineJoin, Polygon, Rect, StrokeStyle,
+    Viewport, transform_path,
 };
 
 /// The furthest a page may be scaled from its printed size.
@@ -309,7 +309,26 @@ pub fn render_page(
     // reason: the document and the page's resources are borrowed here, once, and the
     // drawing code only ever sees a name.
     let mut font_lookup = |name: &str| font_for(name, resources, doc);
+    // The clip the device is holding, so a run of marks under one clip costs one install
+    // rather than one per mark. The memo is keyed on the record's own clip and installs the
+    // whole region when it differs, which keeps the cost proportional to how often the page
+    // changed its clip without making the result depend on anything but the record: installing
+    // the same region twice gives the same clip.
+    //
+    // `None` here is also the device's starting state — a fresh device has the whole image as
+    // its clip — so a page whose first mark has no clip needs no first install.
+    let mut installed: Option<mangle_content::Clip> = None;
     for record in &executed.records {
+        // Before the mark, from that mark's own record. This is what makes drawing a mark
+        // independent of what was drawn before it, and it is why `Mark::ClipChanged` has
+        // nothing to do here: the record carrying the *next* mark already holds the new clip.
+        if installed.as_ref() != record.clip.as_ref() {
+            match &record.clip {
+                Some(clip) => device.install_clip(Some(&clip_region(clip, &placement.matrix))),
+                None => device.install_clip(None),
+            }
+            installed.clone_from(&record.clip);
+        }
         let to_device = placement.matrix.concat(record.ctm);
         draw_mark(
             &mut device,
@@ -536,6 +555,31 @@ fn placed_rect(bounds: &mangle_content::ClipBounds, placement: &Matrix) -> Rect 
     }
 }
 
+/// A record's clip, as the device takes it.
+///
+/// The interpreter has already put the region's paths and its box through the CTM that was in
+/// force when the clip was set, so they are in the page's own space and the *only*
+/// transformation left is the page placement. Pushing them through a mark's matrix as well
+/// applies the CTM twice, which is invisible under an identity CTM and turns a scaled clip
+/// into no clip at all.
+///
+/// Every path in force goes over, not only the newest one: two `W n` operations nest, and a
+/// device handed one path and the intersected box would paint the older clip with its own
+/// shape replaced by its own box.
+fn clip_region(clip: &mangle_content::Clip, placement: &Matrix) -> ClipRegion {
+    ClipRegion {
+        bounds: placed_rect(&clip.bounds, placement),
+        paths: clip
+            .paths
+            .iter()
+            .map(|path| ClipShape {
+                polygon: transform_path(&path.segments, placement),
+                rule: fill_rule_of(path.rule),
+            })
+            .collect(),
+    }
+}
+
 /// Draw one mark.
 #[allow(clippy::too_many_arguments)]
 fn draw_mark(
@@ -560,9 +604,10 @@ fn draw_mark(
             if polygon.is_empty() {
                 return;
             }
-            if let Some(bounds) = polygon.bounds() {
-                device.clip_to(bounds);
-            }
+            // The clip is not narrowed to the shape here. `fill_polygon` bounds its own work
+            // to the polygon's box intersected with the clip, which is the same answer, and a
+            // narrowing kept in the device would outlive this call: the next mark brings its own
+            // clip and must not inherit this one's cull.
             let rule = match rule {
                 mangle_content::FillRule::EvenOdd => FillRule::EvenOdd,
                 mangle_content::FillRule::NonZero => FillRule::NonZero,
@@ -601,34 +646,19 @@ fn draw_mark(
                     )),
                 }
             }
-            device.reset_clip();
         }
-        Mark::ClipChanged(Some(clip)) => {
-            // The interpreter has already put this region's bounds and its path through the
-            // CTM that was in force when the clip was set, so they are in the page's own
-            // space and the *only* transformation left is the page placement. Pushing them
-            // through the mark's matrix as well applies the CTM twice, which is invisible
-            // under an identity CTM and turns a scaled clip into no clip at all.
-            //
-            // All four corners of the bounds go through the matrix and the result is
-            // re-bounded, because a transformation that rotates or flips does not map an
-            // axis-aligned rectangle to an axis-aligned rectangle.
-            device.clip_to(placed_rect(&clip.bounds, placement));
-            // The region, not the box around it: a diagonal clip is a diagonal, and the box
-            // is only the bound that rejects pixels cheaply. The path is flattened after the
-            // transformation, so a curve is measured where it will be drawn.
-            let polygon = transform_path(&clip.segments, placement);
-            let rule = match clip.rule {
-                ContentRule::EvenOdd => FillRule::EvenOdd,
-                ContentRule::NonZero => FillRule::NonZero,
-            };
-            // An empty region is a clip to nothing, and a polygon with no path in it
-            // rasterises to no coverage at all, which is the same thing. Either way the
-            // device ends up with a mask that hides everything rather than one that was
-            // never installed and so shows everything.
-            device.clip_to_path(&polygon, rule);
-        }
-        Mark::ClipChanged(None) => device.reset_clip(),
+        // Nothing to do, and deliberately so. A clip is part of the graphics state, so the
+        // clip in force for the marks after this one is the state they were created in — and
+        // every one of those records carries it, so `render_page` has installed it before
+        // this mark and will install the new one before the next. Installing it here as well
+        // would make this mark reach past itself to change what the next one sees, which is
+        // how a clip ends up in force for one mark rather than for the rest of the page.
+        //
+        // The variant stays because the interpreter still emits it: it is where on the page a
+        // clip changed, which is a fact about the page rather than about any one mark, and it
+        // is what the display list and any future feature that has to know a clip changed will
+        // ask for.
+        Mark::ClipChanged(_) => {}
         // A `sh` with no operand at all names nothing, and the interpreter leaves the name
         // empty rather than guessing one.
         Mark::Shading { name, .. } => match name.as_str() {
@@ -639,27 +669,12 @@ fn draw_mark(
                     // and the pattern's own matrix sits inside it, so the two compose in
                     // that order and the gradient is sampled in its own space throughout.
                     let to_shading = to_device.concat(pattern_matrix);
-                    // A shading paints the *current clip*, which for `sh` is whatever path
-                    // the page set with `W n`. Painting outside it would put a gradient
-                    // where the page drew nothing.
-                    //
-                    // The recorded region is that path and its box, and both are already in
-                    // the page's own space — the interpreter applied the CTM when the clip was
-                    // set — so only the placement remains, and the CTM must not be applied
-                    // again. The region goes in whole rather than only the box, for the same
-                    // reason every other mark does: a gradient inside a diagonal clip is
-                    // diagonal, and inside a circular one it is round.
-                    if let Some(clip) = record.clip.as_ref() {
-                        device.clip_to(placed_rect(&clip.bounds, placement));
-                        let polygon = transform_path(&clip.segments, placement);
-                        let rule = match clip.rule {
-                            ContentRule::EvenOdd => FillRule::EvenOdd,
-                            ContentRule::NonZero => FillRule::NonZero,
-                        };
-                        device.clip_to_path(&polygon, rule);
-                    }
+                    // A shading paints the current clip, which for `sh` is whatever path the
+                    // page set with `W n`: painting outside it would put a gradient where the
+                    // page drew nothing. That clip is already installed — the record carries it
+                    // — and it goes in whole rather than only as its box, so a gradient inside
+                    // a diagonal clip is diagonal and inside a circular one it is round.
                     shading::paint(device, &shading, &to_shading, record.fill_alpha);
-                    device.reset_clip();
                 }
                 Err(reason) => notes.push(reason),
             },
@@ -672,7 +687,6 @@ fn draw_mark(
                     // what paints an image mask's zero bits.
                     let fill = mangle_content::Colour::black().to_rgba(None);
                     image::draw(device, &raster, to_device, record.fill_alpha, fill);
-                    device.reset_clip();
                 }
                 Err(reason) => notes.push(reason),
             },
@@ -751,15 +765,15 @@ fn draw_mark(
                 if polygon.is_empty() {
                     continue;
                 }
-                if let Some(bounds) = polygon.bounds() {
-                    device.clip_to(bounds);
-                }
+                // No culling of the clip to the outline's box, for the same reason a path
+                // does not cull it: `fill_polygon` bounds its own work, and a cull left in the
+                // device would reach into the next glyph and the next mark.
+                //
                 // Non-zero, because that is what TrueType outlines are wound for: an
                 // outer contour and a hole wound the other way both come out filled, and
                 // a point inside two same-wound contours is inside the glyph, which is
                 // what the data says it is.
                 device.fill_polygon(&polygon, FillRule::NonZero, ink);
-                device.reset_clip();
             }
         }
     }

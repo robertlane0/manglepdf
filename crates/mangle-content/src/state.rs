@@ -587,29 +587,60 @@ impl ClipBounds {
     }
 }
 
-/// A clipping region: the path, the rule that decides its inside, and its bounding box.
-///
-/// The box is not the region. It is a cheap bound that rejects most pixels before any
-/// coverage is computed, and it is recorded because every path has one for free. What
-/// decides visibility is the path and the rule.
-///
-/// `segments` is the *most recent* clipping path. Two successive `W n` operations nest, and
-/// the intersection of two arbitrary paths is not itself one path under either fill rule, so
-/// the nesting is expressed by the box and enforced by the renderer, which intersects the
-/// coverage of one path with the coverage of the next. A consumer that only wants to reject
-/// pixels can read the box; a consumer that draws can read the path and let its own
-/// accumulator take the intersection.
+/// One clipping path: the region a single `W` operator set, and the rule it was set under.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Clip {
-    /// The bounding box, in the page's coordinate space, with the CTM already applied.
-    pub bounds: ClipBounds,
-    /// The clipping path, in the same space.
+pub struct ClipPath {
+    /// The path, in the page's coordinate space, with the CTM already applied.
     pub segments: Vec<PathSegment>,
     /// Which rule decides inside: non-zero or even-odd, taken from the `W` operator.
     pub rule: crate::interp::FillRule,
 }
 
+/// A clipping region: every path in force, and the box that bounds them all.
+///
+/// The box is not the region. It is a cheap bound that rejects most pixels before any
+/// coverage is computed, and it is recorded because every path has one for free. What
+/// decides visibility is the paths and their rules.
+///
+/// **Every** path in force is kept, not only the most recent one, and that is the whole
+/// reason this is more than one path. Two successive `W n` operations nest — the region after
+/// the second is where both are — and the intersection of two arbitrary paths is not itself a
+/// path under either fill rule, so a region that kept only the newer path and the intersected
+/// box would be the newer path drawn with the older one's *box*: wider than the page asked for
+/// wherever the older path's shape was smaller than its box, which for any non-rectangular
+/// clip is most of it. A renderer can only draw what this hands it, so this has to be enough
+/// to draw on its own.
+///
+/// The paths are shared rather than copied, because a mark records the clip that was in force
+/// when it was created and there is one clip for many marks: recording it on every mark costs
+/// a reference and not a path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Clip {
+    /// The bounding box, in the page's coordinate space, with the CTM already applied.
+    pub bounds: ClipBounds,
+    /// Every clipping path in force, outermost first.
+    pub paths: Arc<Vec<ClipPath>>,
+}
+
+/// The most clipping paths one region will carry.
+///
+/// A page may nest clips without limit, and keeping every path would make a page that clips
+/// in a loop cost the square of the number of operators in path data. Past this many, the
+/// outermost are dropped: the box is still the exact intersection of all of them, so the
+/// region is right to the pixel unless the dropped path's shape was smaller than its own box,
+/// which is a document that clips dozens of times in one place and loses an antialiased edge.
+pub const MAX_CLIP_PATHS: usize = 32;
+
 impl Clip {
+    /// A clip from one path and its box.
+    #[must_use]
+    pub fn new(bounds: ClipBounds, path: ClipPath) -> Self {
+        Self {
+            bounds,
+            paths: Arc::new(vec![path]),
+        }
+    }
+
     /// The clip that hides the whole page, which is what `W n` with no path means.
     ///
     /// A clip is a state and not an error, and the specification says so outright: a `W n`
@@ -626,25 +657,31 @@ impl Clip {
                 x1: 0.0,
                 y1: 0.0,
             },
-            segments: Vec::new(),
-            rule: crate::interp::FillRule::NonZero,
+            paths: Arc::new(Vec::new()),
         }
     }
 
     /// A clip with no path in it, which is a clip to nothing rather than no clip.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.segments.is_empty()
+        self.paths.is_empty()
             || self.bounds.x0 >= self.bounds.x1
             || self.bounds.y0 >= self.bounds.y1
     }
 
+    /// The most recent clipping path, which is the one a reader wants to know about: a clip
+    /// was set here, and this is what it was set to.
+    #[must_use]
+    pub fn newest(&self) -> Option<&ClipPath> {
+        self.paths.last()
+    }
+
     /// Narrow this clip by another one.
     ///
-    /// The box is the intersection of the two boxes, and the path is the newer one, because
-    /// an intersection of two paths is not a path. An empty clip on either side wins: a
-    /// region that shows nothing intersected with anything is nothing, and a box that does
-    /// not overlap is exactly that.
+    /// The box is the intersection of the two boxes, and the paths are kept in order, because
+    /// the region is where all of them overlap. An empty clip on either side wins: a region
+    /// that shows nothing intersected with anything is nothing, and a box that does not
+    /// overlap is exactly that.
     #[must_use]
     pub fn intersect(&self, other: &Self) -> Self {
         if self.is_empty() {
@@ -656,10 +693,18 @@ impl Clip {
         let Some(bounds) = self.bounds.intersect(other.bounds) else {
             return Self::empty();
         };
+        let mut paths: Vec<ClipPath> = self
+            .paths
+            .iter()
+            .chain(other.paths.iter())
+            .cloned()
+            .collect();
+        // The newest paths are the ones a renderer multiplies last and a reader asks for
+        // first, so a region longer than the bound keeps those and drops the outermost.
+        let start = paths.len().saturating_sub(MAX_CLIP_PATHS);
         Self {
             bounds,
-            segments: other.segments.clone(),
-            rule: other.rule,
+            paths: Arc::new(paths.split_off(start)),
         }
     }
 }

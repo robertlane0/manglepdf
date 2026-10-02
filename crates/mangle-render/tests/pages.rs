@@ -167,6 +167,112 @@ fn diagonal_clip_page() -> Vec<u8> {
     out
 }
 
+// ── Four clip fixtures, all asymmetric ─────────────────────────────────────────
+
+/// A one-page square file of `points` points with this content, written here so that what
+/// each pixel *should* be is stated by construction rather than by a previous run.
+///
+/// The clip fixtures below all share this writer. The earlier fixtures each spell out their
+/// own, which is the same shape in five copies; rewriting those is not what this change is
+/// for.
+fn page_with(content: &str, points: i64) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 5];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        format!(
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 {points} \
+             {points}] >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content.as_bytes());
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 4\n");
+    for offset in at.iter().take(5).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size 5 /Root 1 0 R /ID [<0102> <0304>] >>\nstartxref\n{xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// A 200 point square page with two marks under one clip.
+///
+/// The content stream is the most ordinary thing a page can do: clip once, then draw twice.
+/// Nothing here is a trick, and that is the point — a clip is part of the graphics state, so
+/// it is in force for every mark after it until something changes it, and a page that draws
+/// twenty things under one `W n` draws twenty clipped things.
+///
+/// **The asymmetry is the point.** Every fixture above this one is symmetric about the centre
+/// of the page — a shape in each quadrant, a clip down the middle — and a symmetric page
+/// scores above 0.99 whether or not the clip is the right shape or lasts the right length of
+/// time, because a renderer that resets its clip after the first mark paints the second mark
+/// whole and a page drawn symmetrically hides that completely. Here nothing mirrors in either
+/// axis: the clip is a triangle whose hypotenuse runs from the lower right to the upper left,
+/// the red bar straddles that hypotenuse, and each expected colour is named by which side of
+/// a diagonal it is on.
+fn two_marks_page() -> Vec<u8> {
+    page_with(
+        "q 0 0 0 rg 0 0 m 200 0 l 30 200 l h W n \
+         0 0 200 200 re f \
+         1 0 0 rg 120 20 70 30 re f Q",
+        200,
+    )
+}
+
+/// A 200 point square page whose clip is set inside `q` and must not outlive the `Q`.
+///
+/// The fill inside `q` is clipped: the black rectangle reaches past the hypotenuse and the
+/// part beyond it stays paper. The fill after the `Q` is not clipped at all: the red bar's
+/// right end is beyond the hypotenuse too, and it is red there.
+///
+/// Asymmetric for the same reason as every other fixture here: the region that says "clipped"
+/// and the region that says "not clipped" are two ends of the same diagonal, so a page that
+/// gets either one of them wrong has a visible, one-sided error rather than a symmetric one
+/// that averages out of a score.
+fn restored_clip_page() -> Vec<u8> {
+    page_with(
+        "q 0 0 0 rg 0 0 m 200 0 l 30 200 l h W n 0 0 190 80 re f Q \
+         1 0 0 rg 20 10 160 40 re f",
+        200,
+    )
+}
+
+/// A 200 point square page with two clips, one inside the other.
+///
+/// The first clip is the triangle (0,0) (200,0) (30,200) and the second is the triangle
+/// (0,0) (20,200) (200,200). They meet in a wedge down the left of the page, and neither one
+/// contains the other, so the page shows the intersection and nothing else: black in the
+/// wedge, paper in each triangle's own corner, and paper in the fourth corner that belongs to
+/// neither.
+///
+/// Asymmetric, and this is the fixture that needs it most: the intersection is a shape with a
+/// curved-looking boundary on three sides and it is not mirrored in either axis, so a renderer
+/// that keeps only the *newest* clip — which is the obvious wrong answer once clipping stops
+/// being a side effect of the previous mark — paints the second triangle whole and fails on
+/// the wedge's left edge and on the first triangle's corner at the same time.
+fn nested_clip_page() -> Vec<u8> {
+    page_with(
+        "q 0 0 0 rg 0 0 m 200 0 l 30 200 l h W n 0 0 m 20 200 l 200 200 l h W n \
+         0 0 200 200 re f Q",
+        200,
+    )
+}
+
 fn open(bytes: Vec<u8>) -> Document {
     Document::open(bytes, OpenOptions::default()).expect("the file should open")
 }
@@ -408,6 +514,154 @@ fn the_clipped_and_unclipped_halves_are_really_different() {
         pixel_is_fraction(image, 0.75, 0.5, [255, 255, 255]),
         "white outside it"
     );
+}
+
+/// A clip is in force for every mark after it, not only for the first.
+///
+/// A clip is part of the graphics state. It takes effect at the `W n` and stays in force
+/// until something changes it, so a page that clips once and then draws twice draws two
+/// clipped marks. The renderer used to apply a clip when it reached the `W n` and drop it
+/// after the next mark — the mark's own cull and that reset were the same rectangle — which
+/// meant a page that drew twenty things under one clip drew nineteen of them unclipped.
+///
+/// The fixture is the diagonal one, so this cannot pass by accident: the red bar straddles the
+/// hypotenuse, and the assertion that the bar's far end is paper is the assertion that the
+/// *second* mark was clipped. A page whose second mark is unclipped has red ink where the
+/// clip says there is none, and that is a difference a symmetric fixture cannot hide.
+#[test]
+fn a_clip_is_in_force_for_every_mark_after_it() {
+    let render = render(two_marks_page(), 1.0);
+    let image = &render.image;
+    assert_eq!((image.width, image.height), (200, 200));
+    assert!(
+        render.notes.is_empty(),
+        "nothing to report: {:?}",
+        render.notes
+    );
+
+    // The first mark fills the whole page and is clipped to the triangle, so inside the
+    // triangle it is black.
+    assert!(
+        region_is_fraction(image, 0.075, 0.70, 0.50, 0.975, [0, 0, 0]),
+        "the first mark is clipped: black inside the triangle"
+    );
+
+    // The second mark paints the bar, and the part of the bar inside the triangle is red. If
+    // the second mark were not drawn at all this would be black, and if it were clipped away
+    // it would be paper, so this pins that it was drawn rather than merely that it was not
+    // left unclipped.
+    assert!(
+        region_is_fraction(image, 0.625, 0.775, 0.75, 0.875, [255, 0, 0]),
+        "the second mark is clipped and is drawn where the clip keeps it"
+    );
+
+    // And the part of the bar beyond the hypotenuse is paper, which is the whole claim: the
+    // second mark was in force of the clip.
+    assert!(
+        region_is_fraction(image, 0.91, 0.775, 0.95, 0.875, [255, 255, 255]),
+        "the second mark is clipped: the bar stops at the hypotenuse"
+    );
+}
+
+/// `Q` restores the clip, so a mark after it is not clipped at all.
+///
+/// A clip is saved and restored by `q` and `Q` along with everything else in the graphics
+/// state, so the clip set inside the pair does not reach past the `Q`. Both fills reach beyond
+/// the hypotenuse and the two answers are on either side of it: black stops at the diagonal,
+/// red does not.
+#[test]
+fn a_clip_is_restored_by_q() {
+    let render = render(restored_clip_page(), 1.0);
+    let image = &render.image;
+
+    // Inside the pair: the black rectangle is clipped to the triangle. The region is above the
+    // red bar rather than beside it, because the red bar is drawn afterwards and would cover
+    // black anywhere they overlap — which is the point of the fixture, not something to work
+    // around.
+    assert!(
+        region_is_fraction(image, 0.075, 0.61, 0.50, 0.74, [0, 0, 0]),
+        "the fill inside q is clipped: black inside the triangle"
+    );
+    assert!(
+        region_is_fraction(image, 0.825, 0.625, 0.925, 0.725, [255, 255, 255]),
+        "and the part of the rectangle beyond the hypotenuse is paper"
+    );
+
+    // After the `Q`: the red bar is drawn whole. Its right end is beyond the hypotenuse, so a
+    // `Q` that did not restore the clip would leave paper here instead.
+    assert!(
+        region_is_fraction(image, 0.825, 0.76, 0.89, 0.80, [255, 0, 0]),
+        "the fill after q is not clipped: red beyond the hypotenuse"
+    );
+}
+
+/// Two clips nest: what is drawn is their intersection.
+///
+/// `W n` narrows the clipping path rather than replacing it, so the region in force after two
+/// of them is where both are. The fixture's two triangles overlap in a wedge and neither
+/// contains the other, so a renderer that kept only one of them paints a triangle and this
+/// test fails on both edges of the wedge at once.
+#[test]
+fn two_clips_nest_rather_than_replacing_each_other() {
+    let render = render(nested_clip_page(), 1.0);
+    let image = &render.image;
+
+    // Inside both triangles: the wedge, in two places.
+    assert!(
+        region_is_fraction(image, 0.10, 0.525, 0.40, 0.575, [0, 0, 0]),
+        "where both clips are, the page is filled"
+    );
+    assert!(
+        region_is_fraction(image, 0.15, 0.15, 0.22, 0.25, [0, 0, 0]),
+        "and higher up the page as well"
+    );
+
+    // Inside the first triangle only — below its partner's hypotenuse. A renderer that had
+    // forgotten the first clip would paint this.
+    assert!(
+        region_is_fraction(image, 0.30, 0.90, 0.50, 0.975, [255, 255, 255]),
+        "the first clip's own corner is outside the second and is paper"
+    );
+
+    // Inside the second triangle only — left of the first triangle's left edge, and inside
+    // both boxes. This is the region that says the *older* clip is still in force: it is inside
+    // the newer clip's path and inside the intersection of the two boxes, so only the first
+    // path's shape keeps it out.
+    assert!(
+        region_is_fraction(image, 0.025, 0.10, 0.075, 0.30, [255, 255, 255]),
+        "the second clip's corner is outside the first and is paper"
+    );
+}
+
+/// The same page rendered twice is the same image, byte for byte.
+///
+/// This is the property the clip lifetime is really about. A renderer that carries its clip
+/// from one mark to the next as a side effect of drawing it has an output that depends on the
+/// order it happened to draw things in; one that installs the clip each mark's own record
+/// carries has an output that depends only on the page. Rendering twice and asking for exact
+/// equality is the operational form of that: it is the check a viewer would fail the first
+/// time a thread pool, a tile boundary or a future reordering moved the work around.
+///
+/// All three clip fixtures are checked, because a reproducibility check that only ever runs
+/// the simple case is a check on the simple case.
+#[test]
+fn the_same_page_rendered_twice_is_the_same_image() {
+    for (name, page) in [
+        ("two marks under one clip", two_marks_page()),
+        ("a clip inside q and q", restored_clip_page()),
+        ("two nested clips", nested_clip_page()),
+    ] {
+        let first = render(page.clone(), 1.0);
+        let second = render(page, 1.0);
+        assert_eq!(
+            first.image.pixels, second.image.pixels,
+            "{name}: the same page rendered twice is not the same image"
+        );
+        assert_eq!(
+            first.marks, second.marks,
+            "{name}: and not the same number of marks either"
+        );
+    }
 }
 
 #[test]
@@ -811,6 +1065,74 @@ fn our_diagonal_clip_agrees_with_mutools() {
     );
     let metrics = &comparison.metrics;
     eprintln!("diagonal clip page: {}", metrics.summary());
+    assert!(
+        metrics.meets_fidelity_bar(0.95),
+        "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",
+        metrics.ssim,
+        metrics.summary()
+    );
+}
+
+/// The two-mark clip page, against the oracle.
+///
+/// This is the check for a page whose *second* mark is clipped, which is the thing a
+/// single-fill clip fixture cannot see: one fill under one `W n` is right whether or not the
+/// clip outlives the mark, so the earlier clipped page scored 0.98537 while this defect was
+/// live. Here the second mark straddles the clip's hypotenuse, so a renderer that dropped the
+/// clip after the first mark paints ink the oracle leaves as paper, and the score says so.
+///
+/// The disagreement this comparison leaves on the table is a deliberate one and is recorded in
+/// `docs/STATUS.md`: this renderer antialiases a clip edge and `mutool` hard-steps it onto the
+/// pixel grid, which cost about 0.014 SSIM on the earlier clipped page. The bar here is 0.95
+/// for that reason — the point of the comparison is where the ink is, not whether the two
+/// programs round a diagonal edge the same way.
+#[test]
+fn our_two_mark_clip_agrees_with_mutools() {
+    if mutool().is_none() {
+        eprintln!("skipped: mutool is not installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join("mangle-render-oracle");
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let pdf = dir.join("two-marks.pdf");
+    std::fs::write(&pdf, two_marks_page()).expect("a file to render");
+
+    let scale = 150.0 / 72.0;
+    let ours = render(two_marks_page(), scale);
+    let theirs_path = dir.join("two-marks.pam");
+    let Some(data) = mutool_render(&pdf, scale, &theirs_path) else {
+        eprintln!("skipped: mutool could not render the page");
+        return;
+    };
+    let Some((w, h, depth, body)) = read_pam(&data) else {
+        eprintln!("skipped: could not read mutool's output");
+        return;
+    };
+    let theirs = flatten_onto_paper(&pam_to_image(w, h, depth, body));
+
+    // The page's own claims, on both renderings. The red bar's far end is beyond the
+    // hypotenuse and is the assertion that tells a second mark drawn unclipped from a second
+    // mark drawn clipped; it is checked on the oracle's rendering too, so it is a claim about
+    // the page rather than about this renderer.
+    for (image, who) in [(&ours.image, "ours"), (&theirs, "mutool")] {
+        assert!(
+            region_is_fraction(image, 0.625, 0.775, 0.75, 0.875, [255, 0, 0]),
+            "{who} draws the second mark where the clip keeps it"
+        );
+        assert!(
+            region_is_fraction(image, 0.91, 0.775, 0.95, 0.875, [255, 255, 255]),
+            "{who} clips the second mark: the bar stops at the hypotenuse"
+        );
+    }
+
+    let comparison = compare(&ours.image, &theirs, &SsimOptions::default());
+    assert!(
+        comparison.is_valid(),
+        "the comparison did not happen: {:?}",
+        comparison.refused
+    );
+    let metrics = &comparison.metrics;
+    eprintln!("two marks under one clip: {}", metrics.summary());
     assert!(
         metrics.meets_fidelity_bar(0.95),
         "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",

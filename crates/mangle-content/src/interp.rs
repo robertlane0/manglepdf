@@ -17,8 +17,8 @@ use mangle_syntax::object::{Object, Stream};
 use crate::matrix::Matrix;
 use crate::ops;
 use crate::state::{
-    Clip, ClipBounds, Colour, ColourSpace, Dash, GraphicsState, LineCap, LineJoin, PathSegment,
-    StateStack,
+    Clip, ClipBounds, ClipPath, Colour, ColourSpace, Dash, GraphicsState, LineCap, LineJoin,
+    PathSegment, StateStack,
 };
 use crate::tokens::{ContentStream, ContentToken, Operation};
 
@@ -74,13 +74,17 @@ pub enum Mark {
     },
     /// A shading, filled into the current clip.
     Shading { name: String, matrix: Matrix },
-    /// A clip was narrowed. The region is the clipping path with the rule that decides its
-    /// inside, in the page's coordinate space, as of the moment the clip was set, with the
-    /// CTM then in force already applied. The box travels with it as a bound, not as the
-    /// thing that decides visibility.
+    /// A clip was narrowed, or reset. The region is every clipping path in force, each with
+    /// the rule that decides its inside, in the page's coordinate space as of the moment the
+    /// clip was set, with the CTM then in force already applied. The box travels with it as a
+    /// bound, not as the thing that decides visibility.
     ///
-    /// `None` means the clip was reset to none. `Some` with an empty path is a clip to
-    /// nothing, which is a state rather than an error.
+    /// A renderer does not need this mark: every mark carries the clip in force when it was
+    /// created, and that is the clip it must draw under. The mark says *where* a clip changed,
+    /// which is a fact about the page rather than about any one mark.
+    ///
+    /// `None` means the clip was reset to none. `Some` with no paths is a clip to nothing,
+    /// which is a state rather than an error.
     ClipChanged(Option<Clip>),
 }
 
@@ -100,12 +104,15 @@ pub struct Record {
     pub span: Range<usize>,
     /// The transformation the page had when it was drawn.
     pub ctm: Matrix,
-    /// The clip in force: the region — the clipping path, its rule, and its box — in the
-    /// page's coordinate space, as of the moment the clip was set.
+    /// The clip in force: the region — every clipping path, the rule each was set under, and
+    /// their box — in the page's coordinate space, as of the moment the clip was set.
     ///
-    /// The CTM in force when the clip was set is already applied to the path and to the
-    /// bounds, so a renderer only has to apply the page placement on top. Applying the
-    /// mark's CTM again would apply it twice.
+    /// This is on the record rather than in a renderer, and that is what makes a rendering
+    /// reproducible: a mark's appearance is fixed by the state it was created in, so a
+    /// renderer that installed the clip from here draws every mark the same way whatever it
+    /// happened to draw before it. The CTM in force when the clip was set is already applied
+    /// to the paths and to the bounds, so a renderer only has to apply the page placement on
+    /// top. Applying the mark's CTM again would apply it twice.
     pub clip: Option<Clip>,
     /// The fill and stroke alphas, which a compositing renderer needs and a geometry
     /// one does not.
@@ -683,11 +690,13 @@ impl Context<'_> {
                     x1: 0.0,
                     y1: 0.0,
                 });
-                Some(Clip {
+                Some(Clip::new(
                     bounds,
-                    segments,
-                    rule: op_rule,
-                })
+                    ClipPath {
+                        segments,
+                        rule: op_rule,
+                    },
+                ))
             } else {
                 Some(Clip::empty())
             }
@@ -1667,6 +1676,26 @@ mod tests {
         // The first clip is 100 wide; the second is the intersection with a 10-wide
         // rectangle, not a replacement; and the stroke inside both sees the narrower one.
         assert_eq!(widths, vec![100.0, 10.0, 10.0]);
+
+        // And both paths are still on the record, not only the newer one. The box alone
+        // cannot say where the region is: the older clip is a rectangle here, but a page may
+        // clip to a shape whose box is most of the page, and a renderer handed only the newer
+        // path would paint the older one wider than the page asked for.
+        let depths: Vec<usize> = out
+            .records
+            .iter()
+            .filter_map(|r| r.clip.as_ref().map(|c| c.paths.len()))
+            .collect();
+        assert_eq!(
+            depths,
+            vec![1, 2, 2],
+            "the region carries every path in force, and the mark inside both carries both"
+        );
+        // The newest is the one that was set last, which is what a reader is asking about.
+        let inside = out.records[2].clip.as_ref().expect("the stroke's clip");
+        let newest = inside.newest().expect("the newer path");
+        assert_eq!(newest.segments.first(), Some(&PathSegment::Move(0.0, 0.0)));
+        assert_eq!(newest.segments.get(1), Some(&PathSegment::Line(10.0, 0.0)));
     }
 
     /// The region is the path, not only its box: a clip set from a rectangle carries that
@@ -1679,9 +1708,10 @@ mod tests {
             .first()
             .and_then(|r| r.clip.as_ref())
             .expect("a clip");
-        assert_eq!(clip.rule, FillRule::NonZero);
+        let newest = clip.newest().expect("the path the clip was set from");
+        assert_eq!(newest.rule, FillRule::NonZero);
         assert!(!clip.is_empty(), "a rectangle is not an empty region");
-        let corners: Vec<(f64, f64)> = clip
+        let corners: Vec<(f64, f64)> = newest
             .segments
             .iter()
             .filter_map(|s| match *s {
@@ -1711,7 +1741,7 @@ mod tests {
         let first = out.records.first().expect("the clip mark");
         let clip = first.clip.as_ref().expect("a clip, not the absence of one");
         assert!(clip.is_empty(), "an empty path clips everything away");
-        assert!(clip.segments.is_empty(), "and it has no path");
+        assert!(clip.paths.is_empty(), "and it has no path");
         // The fill after it carries the same empty clip, because the clip is in force.
         let fill = out.records.get(1).expect("the fill");
         let Mark::Path { .. } = &fill.mark else {

@@ -926,6 +926,29 @@ impl Rect {
     }
 }
 
+/// A clipping path in device space: the region, and the rule that decides its inside.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipShape {
+    /// The path, already transformed into device pixels.
+    pub polygon: Polygon,
+    /// Non-zero or even-odd, as the `W` operator that set it said.
+    pub rule: FillRule,
+}
+
+/// A clipping region in device space: the box that bounds it, and every path in force.
+///
+/// The two are the same clip said twice, which is what makes it worth carrying both: the box
+/// rejects a pixel before any coverage is computed, and the paths are what decides the pixels
+/// the box lets through.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipRegion {
+    /// Nothing outside this rectangle is drawn.
+    pub bounds: Rect,
+    /// Every clipping path in force, outermost first. The region is where they all overlap;
+    /// an empty list is a clip to nothing rather than no clip.
+    pub paths: Vec<ClipShape>,
+}
+
 /// The whole image's mask, from a coverage buffer rasterised over a rectangle.
 ///
 /// `area` is the rectangle that was rasterised and `width` the image's width. A coverage
@@ -1058,6 +1081,30 @@ impl Device {
         self.clip = self.clip.intersect(rect);
         if let Some(mask) = self.clip_mask.as_mut() {
             narrow_mask(mask, self.image.width, self.image.height, self.clip);
+        }
+    }
+
+    /// Install the clip in force for a mark, replacing whatever was in force before.
+    ///
+    /// This is a whole clip rather than a narrowing of the last one, and that is the point of
+    /// it: a mark's appearance must follow from the mark and the clip it says it was drawn
+    /// under, and not from whatever was drawn before it. Installing the same region twice gives
+    /// the same clip, so a caller may install per mark and a per-region comparison can skip the
+    /// repeat.
+    ///
+    /// `None` is no clip beyond the page, which is what `Q` restores and what a page that
+    /// never clipped has. `Some` with no paths is a clip to *nothing*, which is a different
+    /// state — an empty `W n` sets the region to the empty region — and is why the two are not
+    /// the same argument.
+    pub fn install_clip(&mut self, clip: Option<&ClipRegion>) {
+        let Some(clip) = clip else {
+            self.reset_clip();
+            return;
+        };
+        self.clip = self.image.rect().intersect(clip.bounds);
+        self.clip_mask = None;
+        for shape in &clip.paths {
+            self.clip_to_path(&shape.polygon, shape.rule);
         }
     }
 
