@@ -442,6 +442,34 @@ impl Type1 {
         self.glyphs.get(index).map(|g| g.name.as_str())
     }
 
+    /// The glyph number one character code names, where a name the file supplies wins.
+    ///
+    /// `name` is what the font dictionary's `/Encoding` gives the code, and a Type 1 program's
+    /// glyphs are keyed by name, so when a name is supplied it *is* the lookup: this is how a
+    /// `/Differences` array that remaps a code reaches a different glyph. `None` means the file
+    /// named no encoding, and the font's own answer stands — which is what a Type 1 font's
+    /// built-in `/Encoding` array is for, and it is also why a font that names a built-in
+    /// encoding rather than carrying the array is read through the standard encoding.
+    #[must_use]
+    pub fn glyph_for_named_code(&self, code: u32, name: Option<&str>) -> Option<u32> {
+        if self.cid.is_some() {
+            // A CID-keyed font has no encoding array and no glyph names to match: its
+            // identifiers *are* its glyph numbers. A name here is meaningless and applying it
+            // would be a code that is not a character being treated as one.
+            return (code < self.glyphs.len() as u32).then_some(code);
+        }
+        let named = name.map(str::to_string);
+        let found = match &named {
+            Some(name) => self
+                .glyphs
+                .iter()
+                .position(|g| g.name == *name)
+                .and_then(|found| u32::try_from(found).ok()),
+            None => self.glyph_for_code(code),
+        };
+        found.filter(|_| true)
+    }
+
     /// The glyph number one character code names.
     ///
     /// Three cases, and they are three different questions:

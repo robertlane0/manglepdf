@@ -120,10 +120,48 @@ are not stripped. **Hint replacement is refused and nothing else is**: it asks f
 hints to be recomputed for a rasterizer's pixel grid, this renderer computes exact analytic
 coverage and has no grid, so the hint is dropped and the glyph's geometry is untouched.
 
-A page's own `/Encoding` with `/Differences` is *not* consulted — the font's own `/Encoding`
-is, which is what makes a Type 1 program able to resolve a character code at all where a bare
-CFF cannot. Reading `/Differences` here and nowhere else would make this the only place a
-page's encoding is honoured for any font type.
+A page's own `/Encoding` is *not* consulted inside the Type 1 reader — the font's own is, which
+is what makes a Type 1 program able to resolve a character code at all where a bare CFF cannot.
+The page's encoding is consulted one layer up instead, by `mangle-render`, which turns the
+code into a glyph *name* before asking any font program for a glyph (see "Encodings"). Putting
+it here would have made this the only font type whose page encoding was honoured, and putting it
+in the interpreter would have made it so for no font type at all.
+
+## Encodings (settled)
+
+A character code means nothing on its own. It is the `/Encoding` that turns it into a glyph
+*name*, and the name that a font is looked up by — which is why a page that remaps one code
+through `/Differences` used to render that code with the wrong glyph for every font type. The
+tables are in `mangle-font::encoding`, transcribed from Table D and Annex D.2, and each was
+cross-checked against a source already on the machine rather than trusted: Ghostscript's own
+decoding table for StandardEncoding, its init file's construction for WinAnsi, and the
+machine's `mac_roman` code page together with poppler's `MacRomanEncoding` for MacRoman, the
+last two agreeing on every code from 32 to 225. The AGL resolver holds 912 names from Adobe's
+Glyph List, which is a machine source — so the Greek and Cyrillic blocks are complete rather
+than restricted to Latin.
+
+Three decisions worth recording:
+
+- **The `/Encoding` is read in `mangle-render`, not in the font readers and not in the
+  interpreter.** `mangle-font` is below the content layer and cannot see a page; the
+  interpreter would have to know about fonts to ask this question. One call site, one place
+  the answer can be wrong.
+- **A composite font keeps the CID path untouched.** Its code is a CID, not a character code,
+  and the specification says `/Differences` does not apply to one. Applying an encoding to a
+  number that is not a character would be wrong in the same way a CID looked up through a
+  `cmap` would be.
+- **A name reaches a glyph by two routes, and a Type 1 font by the direct one.** A Type 1
+  program's `CharStrings` are keyed by name, so the name *is* the lookup. A TrueType font is
+  found through the `post` table if it carries names and otherwise through the Unicode
+  subtables by way of the AGL — the (3,0) subtable stays reserved for the code, because that
+  is a symbolic font's author's own choice of code for a glyph and it is already consulted in
+  the right order.
+
+Verified at **0.98780 SSIM** against `mutool` on a page remapping eighteen codes, four of them
+in the Latin-1 range where WinAnsi and MacRoman disagree completely. The fixture's remaps are
+not a permutation of each other and the page is asymmetric, so it catches ignoring the array,
+stopping at the end of the base, and transposing two codes; renaming `/Differences` in the
+file and re-scoring drops it to 0.895, which is how the test is known to see what it is for.
 
 ## Milestone map (detail in GOAL §10)
 
@@ -158,7 +196,9 @@ page's encoding is honoured for any font type.
    interpreter, coordinate for coordinate — 28 347 outlines, none differing — which is how
    the defect that mattered most was found: a curve operator's points are offsets from the
    point *before* each of them, not all from the pen, and reading them from the pen gives a
-   closed, plausible, wrong glyph rather than an error.
+   closed, plausible, wrong glyph rather than an error. Encodings are done on top of all of
+    that: a code now becomes a glyph *name* through the standard tables and `/Differences`
+    before it becomes a glyph number, at 0.98780 SSIM against `mutool` (see "Encodings").
 2. **Patterns**: the tiling loop and the colour-space converter, for the painting and
    shading pattern types.
 3. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are

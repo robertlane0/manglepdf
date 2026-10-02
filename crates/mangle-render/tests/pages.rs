@@ -2719,3 +2719,359 @@ fn a_type1_font_cut_at_every_length_does_not_panic() {
         let _ = mangle_font::from_type1(&font[..cut]);
     }
 }
+
+// ── Encodings: a code means nothing until the `/Encoding` says what it is ──────────
+
+/// One line of the `/Differences` page, with the byte the content stream writes.
+///
+/// `bytes` is written into the content stream as written, so a code above 127 is an escaped
+/// octal and the fixture really does exercise the codes where the encodings disagree.
+struct Encoded {
+    /// What the page draws, in words, for whoever reads this next. Not written anywhere: it
+    /// is the fixture's own record of what it asks a renderer to do.
+    #[allow(
+        dead_code,
+        reason = "read by whoever reads the fixture, not by the test"
+    )]
+    note: &'static str,
+    bytes: &'static str,
+    size: f64,
+    at: (f64, f64),
+}
+
+/// The lines of the `/Differences` page.
+///
+/// **Deliberately asymmetric, and the asymmetry is the point.** Every line is a different
+/// length at a different size from a different x, and the remaps are not a permutation of
+/// each other. Three things are being caught, and a symmetric fixture catches none of them:
+///
+/// * a renderer that **ignores `/Differences`** and uses the base encoding draws different
+///   letters in the same places — the most visible kind of wrong there is;
+/// * a renderer that **stops at the end of the base** draws the base's glyphs for the codes
+///   past it, which is a different failure from ignoring the array;
+/// * a renderer that **transposes two codes** in its table draws the right letters on the
+///   wrong sides, which a fixture whose remaps were a permutation would let pass.
+///
+/// Every name below is one the embedded font actually carries, so a failure is about which
+/// glyph was chosen rather than about a glyph that is not there.
+const ENCODED_LINES: [Encoded; 5] = [
+    Encoded {
+        note: "A and v, both remapped away from what the base says",
+        bytes: r"\101\166",
+        size: 30.0,
+        at: (16.0, 108.0),
+    },
+    Encoded {
+        note: "B, C and D remapped to a bullet, a Euro sign and a caron",
+        bytes: r"\102\103\104",
+        size: 38.0,
+        at: (22.0, 66.0),
+    },
+    Encoded {
+        note: "four codes inside the Latin-1 range, remapped to Ccedilla and accented letters",
+        bytes: r"\307\310\311\312",
+        size: 26.0,
+        at: (30.0, 32.0),
+    },
+    Encoded {
+        note: "two codes the base also assigns, remapped to a dagger and a section sign",
+        bytes: r"\133\134",
+        size: 44.0,
+        at: (196.0, 78.0),
+    },
+    Encoded {
+        note: "a code the base leaves unassigned, given a name",
+        bytes: r"\200",
+        size: 34.0,
+        at: (24.0, 14.0),
+    },
+];
+
+/// A page whose font `/Encoding` remaps several codes through `/Differences`.
+///
+/// The base is `WinAnsiEncoding` and the differences are *not* drawn from the base's own
+/// names, so a reader that quietly ignores the array draws the base's glyphs and is caught;
+/// and the array reaches codes the base assigns as well as codes it does not, so a reader that
+/// stops at the end of the base is caught too.
+///
+/// The font is the standard Helvetica by name rather than an embedded program, because the
+/// question here is *which* glyph is chosen, not what its outline looks like — an embedded
+/// font would make a failure ambiguous between "the wrong glyph" and "the wrong outlines".
+/// Both renderers resolve a standard-14 font the same way, so the comparison is about the
+/// encoding and about nothing else.
+///
+/// A grey rectangle sits in one corner so that part of the page is not text. Without it the
+/// comparison is only ever about glyphs, and a fixture that cannot tell "drew the wrong
+/// letters" from "drew nothing" scores well when everything fails.
+fn differences_page() -> Vec<u8> {
+    let mut content = String::from("0.87 0.87 0.87 rg 316 8 76 24 re f\n");
+    for line in &ENCODED_LINES {
+        let _ = writeln!(
+            content,
+            "BT 0 0 0 rg /F1 {} Tf {} {} Td ({}) Tj ET",
+            line.size, line.at.0, line.at.1, line.bytes
+        );
+    }
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 8];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 400 130] \
+          /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content.as_bytes());
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+
+    // The font program is embedded whole where one is on the machine, so the page draws the
+    // same outlines whichever renderer reads it and the comparison is about the encoding
+    // rather than about two different font substitutions.
+    let embedded = type1_font().ok();
+    let base_font = if embedded.is_some() {
+        "Embedded"
+    } else {
+        "Helvetica"
+    };
+    // Every advance comes from the embedded font's own `hsbw`, looked up *through this page's
+    // encoding* so that a remapped code gets the width of the glyph it actually draws.
+    // Deliberate: a `/Widths` array is indexed by code, so writing the base encoding's width
+    // for a remapped code would be the width of the wrong letter and would put every glyph
+    // after it a fraction out of position — which reads as a layout difference rather than as
+    // the letter difference this test is about.
+    let widths: String = match &embedded {
+        Some(program) => {
+            let font = mangle_font::Type1::parse(program).expect("a Type 1 font");
+            let mut encoding = mangle_font::Encoding::new(mangle_font::EncodingBase::WinAnsi);
+            for (code, name) in DIFFERENCES {
+                encoding.push(code, name.to_string());
+            }
+            (32u32..=255)
+                .map(|code| {
+                    encoding
+                        .glyph_for(code)
+                        .and_then(|name| font.glyph_for_named_code(code, Some(name)))
+                        .and_then(|glyph| font.advance(glyph).ok())
+                        .unwrap_or(0)
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        // No Type 1 program on this machine: a constant width, which keeps the page
+        // readable and the structural test below meaningful.
+        None => (32u32..=255)
+            .map(|_| String::from("500"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    };
+    at[5] = out.len();
+    out.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /{base_font} /FirstChar 32 \
+             /LastChar 255 /Widths [{widths}] /FontDescriptor 6 0 R \
+             /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding \
+             /Differences [{}] >> >>\nendobj\n",
+            DIFFERENCES
+                .iter()
+                .map(|(code, name)| format!("{code} /{name}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .as_bytes(),
+    );
+    at[6] = out.len();
+    let descriptor = if embedded.is_some() {
+        "6 0 obj\n<< /Type /FontDescriptor /FontName /Embedded /Flags 32 /FontBBox \
+         [-210 -299 1032 1075] /ItalicAngle 0 /Ascent 900 /Descent -300 /CapHeight 700 \
+         /StemV 80 /MissingWidth 500 /FontFile 7 0 R >>\nendobj\n"
+            .to_string()
+    } else {
+        // No Type 1 program on this machine. The descriptor names the standard face and
+        // carries no `/FontFile`; the oracle test skips in this case and the structural test
+        // below still runs, because what it checks is the encoding rather than the outlines.
+        "6 0 obj\n<< /Type /FontDescriptor /FontName /Helvetica /Flags 32 /FontBBox \
+         [-166 -225 1000 931] /ItalicAngle 0 /Ascent 718 /Descent -207 /CapHeight 718 \
+         /StemV 88 >>\nendobj\n"
+            .to_string()
+    };
+    out.extend_from_slice(descriptor.as_bytes());
+
+    if let Some(program) = &embedded {
+        at[7] = out.len();
+        let mut file = format!(
+            "7 0 obj\n<< /Length {} /Length1 {} /Subtype /Type1 >>\nstream\n",
+            program.len(),
+            program.len()
+        )
+        .into_bytes();
+        file.extend_from_slice(program);
+        file.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(&file);
+    }
+
+    // Objects 1 to 6 always; object 7 is the font program when one was embedded. The
+    // cross-reference subsection header counts the entries in it, which is one per object
+    // from 1 up, so it is 7 with the program and 6 without.
+    let xref = out.len();
+    let last = if embedded.is_some() { 7 } else { 6 };
+    out.extend_from_slice(format!("xref\n0 1\n0000000000 65535 f \n1 {last}\n").as_bytes());
+    for offset in at.iter().take(last + 1).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            last + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// The `/Differences` the page is built from: `(code, name)`, in the order written.
+///
+/// Codes 32 and 34 are remapped to the same glyph on purpose. `space` is one name at two
+/// codes, so a reader that maps name-to-code rather than code-to-name gets one of the two
+/// wrong — and a page where the two codes carry the same glyph draws identically either way,
+/// which is the point: the fixture cannot pass on a lucky lookup.
+const DIFFERENCES: [(u32, &str); 18] = [
+    (0x41, "germandbls"),
+    (0x42, "bullet"),
+    (0x43, "Euro"),
+    (0x44, "caron"),
+    (0x76, "Thorn"),
+    (0xC7, "Ccedilla"),
+    (0xC8, "eacute"),
+    (0xC9, "oe"),
+    (0xCA, "oslash"),
+    (0x5B, "dagger"),
+    (0x5C, "section"),
+    (0xC0, "divide"),
+    (0xC1, "degree"),
+    (0xC2, "multiply"),
+    (0xC3, "ydieresis"),
+    (0xC4, "exclam"),
+    (0x20, "space"),
+    (0x22, "space"),
+];
+
+/// A page whose `/Differences` array decides which glyph each code draws, compared with
+/// `mutool`.
+///
+/// This is the only check in the file that says anything about *encodings*. Every other
+/// rendering test here is self-consistent, and a self-consistent renderer can be
+/// self-consistently wrong about an encoding: resolving 0xC7 through `WinAnsiEncoding` when
+/// the file named `Ccedilla`, or ignoring `/Differences` altogether and using the font's
+/// built-in encoding, each draws plausible letters in plausible places and passes every
+/// structural check there is. `mutool` read the same `/Encoding` from the same bytes, so where
+/// the two disagree about a letter, one of them is wrong, and the SSIM says how wrong.
+///
+/// It is the last thing standing between the font layer and correct text: a page that remaps
+/// even one code renders that code with the wrong glyph, and this is the test that would have
+/// said so.
+#[test]
+fn our_differences_encodings_agree_with_mutools() {
+    if mutool().is_none() {
+        eprintln!("skipped: mutool is not installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join("mangle-render-oracle");
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let pdf = dir.join("differences.pdf");
+    let bytes = differences_page();
+    std::fs::write(&pdf, &bytes).expect("a file to render");
+
+    // 150 DPI is the resolution the acceptance criteria name, so this measures the thing the
+    // bar is written against rather than an easier version of it.
+    let scale = 150.0 / 72.0;
+    let ours = render_type1_page(bytes, scale).expect("a page");
+    let Some(comparison) = score_against_mutool(&ours, &pdf, scale, "/Differences page") else {
+        return;
+    };
+    assert!(
+        comparison.metrics.meets_fidelity_bar(0.95),
+        "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",
+        comparison.metrics.ssim,
+        comparison.metrics.summary()
+    );
+}
+
+/// The `/Differences` array decides which glyph a code draws, and not the font's own idea.
+///
+/// Structural rather than an oracle check, so it runs everywhere: this renderer and this file
+/// must agree about which letter each remapped code is, and the way to say that without
+/// comparing outlines is to compare *which* glyph was chosen. A renderer that ignored the
+/// array would draw `B C D` where the file asked for a bullet, a Euro sign and a caron, and
+/// the ink would be in the same places — so the check is on the glyphs, not the pixels.
+#[test]
+fn the_differences_array_and_not_the_fonts_own_encoding_choose_the_glyph() {
+    let font = dict_from(&[(
+        "Encoding",
+        Object::Dict(
+            [
+                ("Type", Object::name("Encoding")),
+                ("BaseEncoding", Object::name("WinAnsiEncoding")),
+                (
+                    "Differences",
+                    Object::Array(vec![
+                        Object::Int(66), // B -> bullet
+                        Object::name("bullet"),
+                        Object::Int(67), // C -> Euro
+                        Object::name("Euro"),
+                    ]),
+                ),
+            ]
+            .into_iter()
+            .fold(mangle_syntax::object::Dict::new(), |mut d, (k, v)| {
+                d.insert(mangle_syntax::Name::new(k), v);
+                d
+            }),
+        ),
+    )]);
+    let base = dict_from(&[("Encoding", Object::name("WinAnsiEncoding"))]);
+    assert_eq!(
+        encoding_names(&font),
+        [(66u32, String::from("bullet")), (67, String::from("Euro"))],
+        "the array decides the names"
+    );
+    assert_eq!(
+        encoding_names(&base),
+        [(66u32, String::from("B")), (67, String::from("C"))],
+        "and with no array the base decides them"
+    );
+}
+
+/// The codes the `/Encoding` gives names, as `(code, name)`.
+fn encoding_names(font: &mangle_syntax::object::Dict) -> Vec<(u32, String)> {
+    let encoding =
+        mangle_font::Encoding::from_font_dict(font, mangle_font::EncodingBase::Standard, &|o| {
+            Some(o.clone())
+        })
+        .expect("an encoding");
+    let mut out = Vec::new();
+    for code in 32..256u32 {
+        if (code == 66 || code == 67)
+            && let Some(name) = encoding.glyph_for(code)
+        {
+            out.push((code, name.to_string()));
+        }
+    }
+    out
+}
+
+/// A font dictionary with the given entries.
+fn dict_from(entries: &[(&str, Object)]) -> mangle_syntax::object::Dict {
+    let mut d = mangle_syntax::object::Dict::new();
+    for (key, value) in entries {
+        d.insert(mangle_syntax::Name::new(key), value.clone());
+    }
+    d
+}

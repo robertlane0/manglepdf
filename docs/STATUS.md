@@ -63,6 +63,19 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   are returned in ems and scaled by the em size, and the composite glyphs TrueType's format
   is full of come out whole.
 
+  **Encodings resolve a code to a glyph *name*, which is what decides the glyph.**
+  `StandardEncoding`, `WinAnsiEncoding`, `MacRomanEncoding` and `PDFDocEncoding` are here as
+  tables from code to name, transcribed from Table D and Annex D.2 and cross-checked against
+  three sources already on the machine; the AGL resolver holds 912 names from Adobe's own
+  Glyph List, Greek and Cyrillic included. All four of the shapes a file writes its
+  `/Encoding` in are read — a bare name, a dictionary naming a base, that dictionary with a
+  `/Differences` array, and a dictionary with no base at all — and a `/Differences` run that
+  goes past the end of the base fills the gap. The renderer's `Mark::Glyphs` arm asks the
+  font's encoding for the code's name before it asks the program for an outline, so a page
+  that remaps one code now draws that code's glyph. A composite font is left alone: its code
+  is a CID, not a character code, and the specification says `/Differences` does not apply
+  to one.
+
   **CFF outlines are executed rather than walked.** A `CFF ` table's glyphs are Type 2
   charstrings — programs, not point lists — so reading one means running it: a stack
   machine over `f32` with local and global subroutines, the subroutine-number bias, stem
@@ -163,7 +176,7 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Tests
 
-662, none ignored, no warnings. Ten kinds matter:
+677, none ignored, no warnings. Ten kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -279,6 +292,25 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   transcription error was found this way: `fraction` in Helvetica had the width of the URW
   clone, 278, where Adobe's own metrics say 167, and poppler agrees with Adobe. Every width
   in every table was then re-checked against the metrics files, and all 1043 agree.
+- **Encodings, against the specification's own tables and against `mutool`** — the three base
+  encodings and `PDFDocEncoding` are transcribed from Table D and Annex D.2, and each was then
+  checked against something on the machine rather than trusted: StandardEncoding against
+  Ghostscript's own decoding table entry for entry; WinAnsi against the construction in
+  Ghostscript's init file and against `pdftotext`'s reading of the same encoding; MacRoman
+  against the machine's `mac_roman` code page and poppler's `MacRomanEncoding`, which agree on
+  every code from 32 to 225. The glyph names come from Adobe's Glyph List as shipped with
+  `read-fonts`, which is a machine source and not a transcription — so the Greek and Cyrillic
+  names a `/Differences` array really uses are here in full (246 `afii` names, the 111-name
+  Greek and Coptic block) rather than restricted to Latin. Two tests earn their keep: every
+  name any table can produce is either a width in a standard-14 table or on an explicit
+  known-gap list, both ways, so a transposed entry fails and the list cannot rot; and every
+  name in every table resolves through the AGL, so a typo becomes a failure where the typo is.
+  The rendering oracle is a page whose font `/Encoding` remaps eighteen codes, four of them
+  inside the Latin-1 range where WinAnsi and MacRoman disagree completely, at **0.98780**
+  SSIM. The fixture is deliberately asymmetric and its remaps are not a permutation of each
+  other, which catches three separate mistakes: ignoring the array, stopping at the end of the
+  base, and transposing two codes. Renaming `/Differences` in the file and re-scoring drops it
+  to 0.895, so the test does see the thing it is for.
 
 ## Gaps, in the order they block
 

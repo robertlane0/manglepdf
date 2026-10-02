@@ -18,11 +18,13 @@
 #![warn(missing_debug_implementations)]
 
 pub mod cff;
+pub mod encoding;
 pub mod metrics;
 pub mod outline;
 pub mod type1;
 
 pub use cff::{Cff, MAX_DEPTH as CFF_MAX_DEPTH, MAX_STACK as CFF_MAX_STACK};
+pub use encoding::{AGL_BASE_ENCODINGS, Base as EncodingBase, Encoding, agl, pdf_doc_encoding};
 pub use metrics::{
     ASCII_START, CidWidths, Declared, DeclaredWidths, STANDARD_14, Widths, ascii_glyphs, by_name,
     standard_glyph, widths,

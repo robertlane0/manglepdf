@@ -452,6 +452,14 @@ pub struct FontProgram {
     program: mangle_font::Program,
     /// The size of the font's em, in the font's own units.
     pub units_per_em: u16,
+    /// What the font dictionary says a code is called.
+    ///
+    /// A character code means nothing on its own: it is the `/Encoding` that turns it into a
+    /// glyph *name*, and the name that the font is looked up by. A page that remaps even one
+    /// code through `/Differences` renders that code with the wrong glyph without this, and
+    /// the codes where the three base encodings disagree — 0xA0 to 0xFF — are exactly the ones
+    /// a document is most likely to remap.
+    encoding: mangle_font::Encoding,
 }
 
 impl std::fmt::Debug for FontProgram {
@@ -459,6 +467,8 @@ impl std::fmt::Debug for FontProgram {
         f.debug_struct("FontProgram")
             .field("bytes", &self.program.bytes().len())
             .field("units_per_em", &self.units_per_em)
+            .field("encoding", &self.encoding.base().name())
+            .field("differences", &self.encoding.differences().len())
             .finish()
     }
 }
@@ -501,7 +511,8 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
     // array names the CIDFont, and *that* is the dictionary with the `/FontDescriptor` and
     // the `/FontFile2` in it — so a page in a composite font reads exactly the same
     // descriptor it would for a simple font, one indirection further along.
-    let descendant = if font.get("Subtype").and_then(Object::as_name) == Some(b"Type0") {
+    let composite = font.get("Subtype").and_then(Object::as_name) == Some(b"Type0");
+    let descendant = if composite {
         doc.resolve_object(font.get("DescendantFonts").unwrap_or(&Object::Null))
             .and_then(|o| o.as_array().map(<[Object]>::to_vec))
             .and_then(|a| a.first().cloned())
@@ -552,9 +563,29 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
     if let Some(reason) = program.code_refusal() {
         return Err(format!("the `/{key}` of `/{name}` {reason}"));
     }
+    // The `/Encoding` is on the *font* dictionary, not the descendant's, and a composite
+    // font's is a CMap rather than any of the four shapes an encoding takes — so it is only
+    // read for a simple font, where the code really is a character code. A composite font's
+    // code is a CID and `/Differences` does not apply to it, which is why that font keeps the
+    // path it had rather than having an encoding forced onto a number that is not one.
+    //
+    // The default base is the standard encoding: a simple font that names no `/Encoding` is
+    // addressed through its own built-in encoding where it carries one, and through the
+    // standard encoding where it does not, which is what `Type1::glyph_for_code` already does.
+    // Reading it here as well means a font that *does* declare one gets it, and one that does
+    // not is unaffected.
+    let encoding = if composite {
+        mangle_font::Encoding::new(mangle_font::EncodingBase::Standard)
+    } else {
+        mangle_font::Encoding::from_font_dict(&font, mangle_font::EncodingBase::Standard, &|o| {
+            doc.resolve_object(o).or_else(|| Some(o.clone()))
+        })
+        .unwrap_or_else(|| mangle_font::Encoding::new(mangle_font::EncodingBase::Standard))
+    };
     Ok(FontProgram {
         program,
         units_per_em,
+        encoding,
     })
 }
 
@@ -781,12 +812,19 @@ fn draw_mark(
             for (code, glyph_matrix) in codes.iter().zip(placements.iter()) {
                 // A composite font's code is looked up as a CID — through the (3,0)
                 // subtable, or as a glyph number where the font has no such subtable — and
-                // a simple font's through the subtables a simple font uses. Which one
-                // applies is the mark's claim, not a guess made here.
+                // a simple font's through its `/Encoding` and then the subtables a simple
+                // font uses. Which one applies is the mark's claim, not a guess made here.
+                //
+                // The two paths are different questions and are kept apart. A CID is an
+                // identifier the font was built to be addressed by, and `/Differences` does
+                // not apply to one, so no encoding is consulted for it. A character code
+                // means nothing until the `/Encoding` turns it into a glyph name, and a page
+                // that remapped that code is asking for a different glyph.
                 let found = if *two_byte {
                     program.program.outline_for_cid(*code)
                 } else {
-                    program.program.outline_for_code(*code)
+                    let name = program.encoding.glyph_for(*code);
+                    program.program.outline_for_code_named(*code, name)
                 };
                 // No outline is a space, or a code the font does not have. Both are the
                 // common case and neither is a failure: a page of prose is mostly spaces

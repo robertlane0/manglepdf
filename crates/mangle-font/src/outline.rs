@@ -294,6 +294,72 @@ impl Program {
         face.glyph_hor_advance(GlyphId(checked(glyph, face.number_of_glyphs())))
     }
 
+    /// The glyph number one character code names, where the encoding may say what the code
+    /// is called.
+    ///
+    /// This is the step a renderer actually wants and the only place a code becomes a glyph
+    /// number. `name` is what the font's `/Encoding` gives the code — a page may remap any
+    /// code it likes through a `/Differences` array, and a font that keys its glyphs by name
+    /// (Type 1, and a bare name-keyed CFF) can only answer through the name. `None` means the
+    /// file named no encoding, and the font's own subtables and built-in encoding answer as
+    /// they did before, which is right: a font with no `/Encoding` is addressed by the codes
+    /// its own tables give.
+    ///
+    /// **A composite font is not this function.** Its code is a CID, not a character code,
+    /// and `/Differences` does not apply to one; see [`Self::glyph_for_cid`].
+    #[must_use]
+    pub fn glyph_for_code_named(&self, code: u32, name: Option<&str>) -> Option<u32> {
+        if let Some(font) = self.type1() {
+            return font.glyph_for_named_code(code, name);
+        }
+        match Face::parse(&self.data, 0) {
+            Ok(face) => {
+                // A name, when the file supplied one, is the more specific statement and is
+                // tried first. Two routes, in this order:
+                //
+                // * **The font's own `post` table**, whose entries are `glyphNNN` rather
+                //   than names — matched only when the file named a glyph that is actually
+                //   there, which is the rare case of a symbolic font remapped to a numbered
+                //   glyph.
+                // * **The Unicode subtables**, through the AGL: a name like `/adieresis` is
+                //   a character, and the (3, 1) subtable is the map from characters to
+                //   glyphs. This is how a remapped code reaches a glyph in a TrueType font.
+                //
+                // Then the code itself, exactly as before: a font with no `/Encoding` is
+                // addressed by its own subtables whatever the file says.
+                if let Some(name) = name
+                    && let Some(glyph) = glyph_by_post_name(&face, name)
+                {
+                    return Some(glyph);
+                }
+                if let Some(found) = name.and_then(|n| glyph_by_unicode_name(&face, n)) {
+                    return Some(found);
+                }
+                if let Some(found) = glyph_from_subtables(&face, code) {
+                    return Some(found);
+                }
+                let in_range = u32::from(face.number_of_glyphs());
+                (code < in_range).then_some(code)
+            }
+            // A bare CFF has no `sfnt` directory, so the subtables above are not there to
+            // be tried. A CID-keyed one says the identifier and the glyph number are the
+            // same number; a name-keyed one has nothing to say.
+            Err(_) => self.identity_cid(code),
+        }
+    }
+
+    /// The outline one character code names, in ems, where the encoding may say what the
+    /// code is called.
+    #[must_use]
+    pub fn outline_for_code_named(
+        &mut self,
+        code: u32,
+        name: Option<&str>,
+    ) -> Option<(Outline, u16)> {
+        let glyph = self.glyph_for_code_named(code, name)?;
+        self.outline(glyph)
+    }
+
     /// The glyph number one character code names.
     ///
     /// The order the subtables are tried in is the specification's, and the reason for it
@@ -409,6 +475,43 @@ const SUBTABLES: [(PlatformId, u16); 3] = [
     (PlatformId::Macintosh, 0),
     (PlatformId::Windows, 1),
 ];
+
+/// The glyph a TrueType `post` table gives a name, when it has one.
+///
+/// A `post` version 2.0 table holds real names; the earlier versions hold the standard Mac
+/// glyph numbering (`mac` encoding), which is a number in the name of a glyph rather than a
+/// name. `ttf-parser` exposes one of each: [`ttf_parser::Face::glyph_index`] answers for the
+/// names it has, and `post_names_match` is not consulted here because a font with no
+/// `post` table is the common case for a subset. `None` is the honest answer for everything
+/// else, and the caller falls to the Unicode route.
+fn glyph_by_post_name(face: &Face<'_>, name: &str) -> Option<u32> {
+    // Only a `post` table that carries names has an entry for a name at all, and asking
+    // `ttf-parser` for a name it does not have costs a comparison against every glyph.
+    let post = face.tables().post?;
+    let count = u32::from(face.number_of_glyphs());
+    (0..count).find(|glyph| post.glyph_name(GlyphId(*glyph as u16)) == Some(name))
+}
+
+/// The glyph a Unicode subtable gives a glyph name, through the AGL.
+///
+/// A `/Differences` array writes names, and a name is a character in all but a handful of
+/// cases, so the name is turned into its Unicode code point and looked up in the (3, 1) and
+/// (1, 0) subtables — the two that are maps from characters. The (3, 0) subtable is
+/// deliberately not used here: it is a symbolic font's author's own choice of code for a
+/// glyph, and it is already consulted by code in [`glyph_from_subtables`], which is the right
+/// order for it.
+fn glyph_by_unicode_name(face: &Face<'_>, name: &str) -> Option<u32> {
+    let code = crate::encoding::agl(name)?;
+    for subtable in face.tables().cmap?.subtables {
+        let from_characters = (subtable.platform_id == PlatformId::Windows
+            && subtable.encoding_id == 1)
+            || (subtable.platform_id == PlatformId::Macintosh && subtable.encoding_id == 0);
+        if from_characters && let Some(glyph) = subtable.glyph_index(code) {
+            return Some(u32::from(glyph.0));
+        }
+    }
+    None
+}
 
 /// Ask each subtable in turn, and take the first answer.
 fn glyph_from_subtables(face: &Face<'_>, code: u32) -> Option<u32> {
