@@ -16,3 +16,9 @@
     clippy::indexing_slicing
 )]
 #![warn(missing_debug_implementations)]
+
+pub mod metrics;
+
+pub use metrics::{
+    ASCII_START, Declared, STANDARD_14, Widths, ascii_glyphs, by_name, standard_glyph, widths,
+};

@@ -17,10 +17,11 @@
 //! | [`matrix`] | the 2-D affine transform, in PDF's own layout |
 //!
 //! What this crate deliberately does *not* do is decide what a glyph is. Deciding which
-//! bytes of a string are glyphs, and how wide each one is, needs the font and the
-//! encoding, which belong to `mangle-font`. Here a byte is one glyph and the advance is
-//! the conventional average, both stated as approximations rather than passed off as
-//! facts; the font layer replaces them.
+//! *bytes* of a string are glyphs needs the font's encoding, which belongs to
+//! `mangle-font`, so here a byte is one glyph and that is stated rather than passed off as
+//! a fact. How wide a glyph is is different: the font dictionary's own `/Widths` say, so
+//! `Tf` reads them and every glyph is placed by its own declared width. A font that
+//! declares none falls back to the conventional half-em average, which is also stated.
 
 #![forbid(unsafe_code)]
 #![deny(
@@ -40,6 +41,8 @@ pub mod ops;
 pub mod state;
 pub mod tokens;
 
+use mangle_font::metrics::Declared;
+
 pub use interp::{FillRule, Mark, PageContent, Record, bbox_of, bounds_of, run, run_with};
 pub use matrix::Matrix;
 pub use state::{
@@ -54,14 +57,34 @@ pub use tokens::{ContentKind, ContentStream, ContentToken, Operation};
 /// them is a lookup the interpreter has to do. Collecting the tables once means a stream
 /// with a thousand `Do` operations does a thousand dictionary lookups against four
 /// small maps rather than re-walking the resource dictionary each time.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct Resources {
     pub fonts: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
+    /// What each of those fonts declares about how wide its glyphs are.
+    ///
+    /// A font's `/Widths` and `/FontDescriptor` are usually indirect, and the interpreter
+    /// has no resolver of its own, so they are followed here by the same resolver that
+    /// built the table. A font that declares no widths has no entry here, which is a
+    /// finding about the file rather than a width of zero.
+    pub font_widths: std::collections::BTreeMap<String, Declared>,
     pub xobjects: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
     pub ext_gstates: ExtGStates,
     pub shadings: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
     pub colour_spaces: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
     pub patterns: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
+}
+
+/// Two resource tables are the same when they name the same things.
+impl PartialEq for Resources {
+    fn eq(&self, other: &Self) -> bool {
+        self.fonts == other.fonts
+            && self.font_widths == other.font_widths
+            && self.xobjects == other.xobjects
+            && self.ext_gstates == other.ext_gstates
+            && self.shadings == other.shadings
+            && self.colour_spaces == other.colour_spaces
+            && self.patterns == other.patterns
+    }
 }
 
 impl Resources {
@@ -92,8 +115,20 @@ impl Resources {
         // A `/gs` name resolves against a table whose values are usually references, so
         // the values are dereferenced here and the table is read from the result.
         let gs_values = named(&table("ExtGState"));
+        let fonts = named(&table("Font"));
+        // The widths each font declares, read through the same resolver. A page usually
+        // names two or three fonts, and reading them here is once per page rather than
+        // once per `Tf`.
+        let font_widths = fonts
+            .iter()
+            .filter_map(|(name, value)| {
+                let dict = value.as_dict()?;
+                Some((name.clone(), Declared::from_font_dict(dict, resolve)?))
+            })
+            .collect();
         Self {
-            fonts: named(&table("Font")),
+            font_widths,
+            fonts,
             xobjects: named(&table("XObject")),
             shadings: named(&table("Shading")),
             colour_spaces: named(&table("ColorSpace")),
@@ -123,6 +158,15 @@ impl Resources {
     #[must_use]
     pub fn ext_gstate(&self, name: &[u8]) -> Option<&ExtGState> {
         self.ext_gstates.get(name)
+    }
+
+    /// The widths the named font declares, or `None` when it declares none.
+    ///
+    /// This is what `Tf` reads: a font with no `/Widths` has no answer, and the caller
+    /// falls back rather than inventing one.
+    #[must_use]
+    pub fn font_widths(&self, name: &str) -> Option<&Declared> {
+        self.font_widths.get(name)
     }
 
     /// Every name a content stream could refer to, for the Inspector.

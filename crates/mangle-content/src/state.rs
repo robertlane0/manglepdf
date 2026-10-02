@@ -5,6 +5,9 @@
 //! line width when this was painted?" without having kept a history.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use mangle_font::metrics::Declared;
 
 use mangle_syntax::object::{Dict, Object};
 
@@ -325,6 +328,13 @@ impl StrokeStyle {
 pub struct TextState {
     /// `/F1`, as written. Resolution to a font is the font layer's job.
     pub font: Option<String>,
+    /// What that font declares about how wide its glyphs are, read when `Tf` named it.
+    ///
+    /// Held here rather than looked up per glyph because `Tf` happens once per run of
+    /// text and a page has thousands of glyphs: re-reading the dictionary for each one
+    /// would be quadratic in the length of the page. `None` is a real answer — the font
+    /// declares no widths — and the caller falls back rather than guessing.
+    pub widths: Option<Arc<Declared>>,
     pub size: f64,
     /// `Tc`: added to every glyph's displacement.
     pub char_spacing: f64,
@@ -344,6 +354,7 @@ impl TextState {
     fn defaults() -> Self {
         Self {
             font: None,
+            widths: None,
             size: 0.0,
             char_spacing: 0.0,
             word_spacing: 0.0,

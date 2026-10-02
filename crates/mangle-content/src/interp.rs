@@ -10,6 +10,7 @@
 //! inherited state), and the only way to know it is to run the stream.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use mangle_syntax::object::{Object, Stream};
 
@@ -520,7 +521,13 @@ impl Context<'_> {
             }
             b"Tf" => {
                 if let Some(n) = name_at(0) {
-                    self.state.text.font = Some(String::from_utf8_lossy(&n).into_owned());
+                    let name = String::from_utf8_lossy(&n).into_owned();
+                    // The font's declared widths are read once here, beside the name that
+                    // selected them, rather than per glyph: `Tf` happens once per run of
+                    // text, and a page has thousands of glyphs.
+                    self.state.text.widths =
+                        self.resources.font_widths(&name).cloned().map(Arc::new);
+                    self.state.text.font = Some(name);
                 }
                 // The size is the second operand, not the second number: the first
                 // operand is a name and contributes no number to find.
@@ -783,11 +790,11 @@ impl Context<'_> {
             return;
         }
         let base = self.state.text_rendering_matrix();
-        let width = self.glyph_advance();
-        // Place every glyph, applying the kerns between the strings.
+        // Place every glyph at its own advance, applying the kerns between the strings.
         let mut placements = Vec::with_capacity(text.len());
         let mut cursor = base;
-        for (index, _) in text.iter().enumerate() {
+        let mut total = 0.0;
+        for (index, code) in text.iter().enumerate() {
             if let Some(kern) = kerns.get(index) {
                 // A `TJ` number is in thousandths of an em, and positive moves the next
                 // glyph *closer*, which is the sign the specification means.
@@ -795,9 +802,10 @@ impl Context<'_> {
                 cursor = cursor.concat(Matrix::translate(-kern, 0.0));
             }
             placements.push(cursor);
-            cursor = cursor.concat(Matrix::translate(width, 0.0));
+            let advance = self.glyph_advance(u32::from(*code));
+            total += advance;
+            cursor = cursor.concat(Matrix::translate(advance, 0.0));
         }
-        let shown = text.len();
         let record = Record {
             mark: Mark::Glyphs {
                 font: self.state.text.font.clone(),
@@ -822,29 +830,44 @@ impl Context<'_> {
             self.out.records.push(record);
         }
         // The text matrix moves past what was shown, which is what makes a second `Tj`
-        // continue rather than overlap. The *line* matrix does not move: a `Td` after
+        // continue rather than overlap, and by the sum of the glyphs' own advances rather
+        // than one figure for all of them. The *line* matrix does not move: a `Td` after
         // this starts a new line from where the last one began, not from the end of the
         // text on it.
-        let advance = self.glyph_advance() * f64::from(u32::try_from(shown).unwrap_or(0));
-        self.state.text_matrix = self
-            .state
-            .text_matrix
-            .concat(Matrix::translate(advance, 0.0));
+        self.state.text_matrix = self.state.text_matrix.concat(Matrix::translate(total, 0.0));
     }
 
-    /// How far one glyph moves the pen, without a font to ask.
+    /// How far one glyph moves the pen, in text space.
     ///
-    /// The spacing terms are known exactly; the glyph's own width is not, so this uses
-    /// the conventional 500-unit average, which is what the specification's default
-    /// `/MissingWidth` behaviour amounts to for layout purposes. The font layer
-    /// replaces this with real metrics; until then, an approximation that is stated is
-    /// better than a guess that is not.
-    fn glyph_advance(&self) -> f64 {
-        let scale = self.state.text.horizontal_scale / 100.0;
-        let nominal = self.state.text.size * 0.5;
-        (nominal + self.state.text.char_spacing) * scale
+    /// The specification's own formula: the glyph's width, which `/Widths` gives in
+    /// thousandths of an em, times the size, plus the two spacing terms, all scaled by
+    /// `Tz`. Word spacing applies to the space and to nothing else, which is what a
+    /// simple font's one-byte code 32 is.
+    ///
+    /// A code the font says nothing about falls back to the conventional 500-unit
+    /// average, which is what the specification's default `/MissingWidth` amounts to for
+    /// layout purposes. A font that declares no widths at all therefore advances exactly
+    /// as it always has, which is a stated fallback rather than an accident.
+    fn glyph_advance(&self, code: u32) -> f64 {
+        let text = &self.state.text;
+        let scale = text.horizontal_scale / 100.0;
+        let w0 = text
+            .widths
+            .as_ref()
+            .and_then(|widths| widths.width_of(code))
+            .unwrap_or(DEFAULT_WIDTH);
+        let spacing = if code == u32::from(b' ') {
+            text.word_spacing
+        } else {
+            0.0
+        };
+        (f64::from(w0) / 1000.0 * text.size + text.char_spacing + spacing) * scale
     }
 }
+
+/// The width a glyph is given when nothing else says: half an em, the average of a
+/// lower-case letter.
+const DEFAULT_WIDTH: u16 = 500;
 
 fn intent_name(v: i64) -> String {
     match v {
@@ -888,6 +911,8 @@ mod tests {
     )]
 
     use super::*;
+    use crate::Resources;
+    use mangle_syntax::object::{Dict, Object as Obj};
 
     fn run_bytes(data: &[u8]) -> PageContent {
         run(&ContentStream::parse(data))
@@ -895,6 +920,245 @@ mod tests {
 
     fn near(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    /// Resources with one font named `F1`, declaring `widths` for the codes from
+    /// `/FirstChar` upwards.
+    fn font_resources(first: i64, widths: &[i64]) -> Resources {
+        let mut font = Dict::new();
+        font.set("Type", Obj::name("Font"));
+        font.set("BaseFont", Obj::name("Helvetica"));
+        font.set("FirstChar", Obj::Int(first));
+        font.set(
+            "Widths",
+            Obj::Array(widths.iter().map(|w| Obj::Int(*w)).collect()),
+        );
+        let mut table = Dict::new();
+        table.set("F1", Obj::Dict(font));
+        let mut resources = Dict::new();
+        resources.set("Font", Obj::Dict(table));
+        Resources::from_dict(&resources, &|o| Some(o.clone()))
+    }
+
+    /// One width for every code from 32 up, all different, so that a test cannot pass
+    /// with a single figure for all of them.
+    fn distinct_widths() -> Vec<i64> {
+        (0..95).map(|i| 200 + i * 7).collect()
+    }
+
+    /// The x of every glyph's placement, in order, across every show in the stream.
+    fn glyph_x(data: &[u8], resources: &Resources) -> Vec<f64> {
+        let out = run_with(&ContentStream::parse(data), resources);
+        let mut xs = Vec::new();
+        for record in &out.records {
+            let Mark::Glyphs { placements, .. } = &record.mark else {
+                continue;
+            };
+            xs.extend(placements.iter().map(|m| m.e));
+        }
+        xs
+    }
+
+    /// The advance between two consecutive glyphs.
+    ///
+    /// A placement is the text rendering matrix, which already carries the font size, so
+    /// the distance between two of them is the advance that was applied times that size.
+    /// Dividing it out here rather than in each test says once what the numbers mean.
+    fn advance(from: f64, to: f64, size: f64) -> f64 {
+        (to - from) / size
+    }
+
+    /// The x the text matrix was left at, which is where a following show continues.
+    fn final_x(data: &[u8], resources: &Resources) -> f64 {
+        run_with(&ContentStream::parse(data), resources)
+            .state
+            .text_matrix
+            .e
+    }
+
+    #[test]
+    fn a_run_advances_by_the_sum_of_the_widths_its_font_declares() {
+        // The expectation is summed from the same array the font dictionary is built
+        // from, so the test states the rule rather than one set of numbers.
+        let declared = distinct_widths();
+        let width_of = |c: u8| f64::from(declared[usize::from(c) - 32] as u32);
+        let text = b"Hamburgefonstiv0123456789";
+        let size = 10.0;
+        let expected: Vec<f64> = text.iter().map(|c| width_of(*c) / 1000.0 * size).collect();
+        let sum: f64 = expected.iter().sum();
+        let resources = font_resources(32, &declared);
+        let stream = b"BT /F1 10 Tf 0 0 Td (Hamburgefonstiv0123456789) Tj ET";
+
+        let xs = glyph_x(stream, &resources);
+        assert_eq!(xs.len(), text.len(), "one placement per glyph");
+        assert!(near(xs[0], 0.0), "the first glyph is where `Td` put it");
+        for (i, (code, want)) in text.iter().zip(&expected).enumerate().take(text.len() - 1) {
+            let got = advance(xs[i], xs[i + 1], size);
+            assert!(
+                near(got, *want),
+                "glyph {} advanced by {got}, not its own width {want}",
+                *code as char
+            );
+        }
+        // The text matrix is left past the last glyph by the same sum, so a second show
+        // continues rather than overlapping.
+        assert!(
+            near(final_x(stream, &resources), sum),
+            "the run is as wide as its declared widths say: {sum}"
+        );
+    }
+
+    #[test]
+    fn two_glyphs_in_one_run_get_two_different_advances() {
+        // No flat figure can pass this: the two glyphs are declared far apart.
+        let declared = distinct_widths();
+        let resources = font_resources(32, &declared);
+        // Three glyphs, so that both advances are gaps between placements.
+        let xs = glyph_x(b"BT /F1 1000 Tf 0 0 Td (WiW) Tj ET", &resources);
+        assert_eq!(xs.len(), 3);
+        let w = advance(xs[0], xs[1], 1000.0);
+        let i = advance(xs[1], xs[2], 1000.0);
+        assert!(near(w, f64::from(declared[87 - 32] as u32)), "`W`: {w}");
+        assert!(near(i, f64::from(declared[105 - 32] as u32)), "`i`: {i}");
+        assert!(
+            (w - i).abs() > 1.0,
+            "and they are different: {w} against {i}"
+        );
+    }
+
+    #[test]
+    fn a_tj_number_moves_the_following_glyph_and_the_sign_says_which_way() {
+        // A `TJ` number is in thousandths of an em and is subtracted from the
+        // displacement, so a positive number pulls the following glyph closer and a
+        // negative one undoes part of the run's advance, moving the pen back the other
+        // way. The sign is the whole content of the rule, so both are pinned.
+        let declared = vec![500_i64; 95];
+        let resources = font_resources(32, &declared);
+        let second = |kern: &str| {
+            let stream = [
+                b"BT /F1 1000 Tf 0 0 Td [(A)".as_slice(),
+                kern.as_bytes(),
+                b" (B)] TJ ET",
+            ]
+            .concat();
+            glyph_x(&stream, &resources)[1]
+        };
+        let plain = second("");
+        let closer = second(" 500");
+        let further = second(" -500");
+        assert!(
+            closer < plain,
+            "a positive number pulls the glyph closer: {closer} against {plain}"
+        );
+        assert!(
+            further > plain,
+            "a negative one moves it the other way: {further} against {plain}"
+        );
+        assert!(
+            near(further - plain, -(closer - plain)),
+            "and the two are mirror images: {closer}, {plain}, {further}"
+        );
+    }
+
+    #[test]
+    fn a_font_with_no_widths_advances_by_the_old_half_em() {
+        // The pinned fallback: with nothing declared a glyph is half an em wide, which is
+        // what this layer has always done. The expectation is written as the rule rather
+        // than as a copied constant, so it says which behaviour is being held.
+        let mut font = Dict::new();
+        font.set("BaseFont", Obj::name("Helvetica"));
+        let mut table = Dict::new();
+        table.set("F1", Obj::Dict(font));
+        let mut resources_dict = Dict::new();
+        resources_dict.set("Font", Obj::Dict(table));
+        let resources = Resources::from_dict(&resources_dict, &|o| Some(o.clone()));
+        assert!(
+            resources.font_widths("F1").is_none(),
+            "this font declares nothing, which is the case under test"
+        );
+        let size = 24.0;
+        let half = size * 0.5;
+        let xs = glyph_x(b"BT /F1 24 Tf 0 0 Td (iiii) Tj ET", &resources);
+        assert_eq!(xs.len(), 4);
+        for gap in [advance(xs[0], xs[1], size), advance(xs[2], xs[3], size)] {
+            assert!(near(gap, half), "each gap is half an em: {gap}");
+        }
+        assert!(
+            near(advance(xs[1], xs[2], size), half),
+            "and so is the one between them"
+        );
+    }
+
+    #[test]
+    fn invisible_text_advances_because_it_still_occupies_space() {
+        // Rendering mode 3 draws nothing and moves the pen exactly as mode 0 does: text
+        // that is not painted is not text that is not there.
+        let declared = distinct_widths();
+        let resources = font_resources(32, &declared);
+        let shown = |mode: &str| {
+            let stream = [
+                b"BT /F1 10 Tf ".as_slice(),
+                mode.as_bytes(),
+                b" 0 0 Td (Wi) Tj (Wi) Tj ET",
+            ]
+            .concat();
+            (glyph_x(&stream, &resources), final_x(&stream, &resources))
+        };
+        let (drawn, drawn_end) = shown("0 Tr");
+        let (hidden, hidden_end) = shown("3 Tr");
+        assert_eq!(drawn.len(), 4, "two runs of two glyphs");
+        assert_eq!(hidden, drawn, "the same places, so also the same advances");
+        assert!(near(hidden_end, drawn_end), "and the pen ends where it did");
+    }
+
+    #[test]
+    fn a_code_outside_the_declared_run_falls_back_to_half_an_em() {
+        // The run starts at `B`, so `A` is below it and the font says nothing about it.
+        let resources = font_resources(66, &[400, 400]);
+        let xs = glyph_x(b"BT /F1 1000 Tf 0 0 Td (ABA) Tj ET", &resources);
+        assert_eq!(xs.len(), 3);
+        assert!(
+            near(advance(xs[0], xs[1], 1000.0), 500.0),
+            "half an em for `A`, which is outside the run"
+        );
+        assert!(
+            near(advance(xs[1], xs[2], 1000.0), 400.0),
+            "and the 400 the run declares for `B`"
+        );
+    }
+
+    #[test]
+    fn word_spacing_moves_the_space_and_nothing_else() {
+        let declared = distinct_widths();
+        let resources = font_resources(32, &declared);
+        let at = |tw: &str| {
+            let stream = [
+                b"BT /F1 10 Tf ".as_slice(),
+                tw.as_bytes(),
+                b" 0 0 Td (a a) Tj ET",
+            ]
+            .concat();
+            glyph_x(&stream, &resources)
+        };
+        let plain = at("0 Tw");
+        let spaced = at("20 Tw");
+        assert_eq!(plain.len(), 3);
+        assert!(
+            near(spaced[0], plain[0]),
+            "the first `a` is not a space, so it does not move"
+        );
+        assert!(
+            near(spaced[1], plain[1]),
+            "and the space's own place is where it was put: {} against {}",
+            spaced[1],
+            plain[1]
+        );
+        assert!(
+            near(spaced[2] - plain[2], 20.0 * 10.0),
+            "the glyph after the space moved by the word spacing, scaled by the size: {} against {}",
+            spaced[2],
+            plain[2]
+        );
     }
 
     #[test]
@@ -1292,7 +1556,7 @@ mod tests {
     #[test]
     fn a_bbox_is_read_and_ordered() {
         let mut s = Stream {
-            dict: mangle_syntax::object::Dict::new(),
+            dict: Dict::new(),
             raw: Vec::new(),
             file_offset: None,
             synthetic: true,
@@ -1319,7 +1583,7 @@ mod tests {
     #[test]
     fn a_short_or_missing_bbox_is_none() {
         let mut s = Stream {
-            dict: mangle_syntax::object::Dict::new(),
+            dict: Dict::new(),
             raw: Vec::new(),
             file_offset: None,
             synthetic: true,

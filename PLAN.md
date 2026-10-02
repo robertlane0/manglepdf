@@ -48,11 +48,13 @@ The spine is where the architecture is decided, so it is built first and deeply.
 
 ## Immediate queue
 
-1. **Shading patterns** (tiling), since a single axial or radial gradient now paints: the
-   tiling loop is what a page asks for next, and mesh shadings can wait.
-2. **Glyph outlines** (F19–F21): TrueType first via `ttf-parser`, then CFF and Type 1.
-   Advances for *existing* text come from `/Widths` and need no font program at all, which
-   is what the charter asks for.
+1. **Glyph outlines** (F19–F21): TrueType first via `ttf-parser`, then CFF and Type 1.
+   The advances are already real — a `Tf` reads the font's declared `/Widths` once and the
+   interpreter steps each glyph by its own — so what is left is drawing with them, plus the
+   standard-14 built-in tables for a page that names a font without embedding it.
+2. **The standard-14 substitution in the interpreter**: the built-in tables are verified
+   against an independent renderer, so `Tf` can fall back to them when a page declares no
+   `/Widths`. That replaces the half-em fallback for a named standard font.
 3. **A real clip region** rather than the clip path's bounding box.
 4. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
    not going to be built.
