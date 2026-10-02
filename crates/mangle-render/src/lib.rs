@@ -41,9 +41,11 @@
 // answer "nearly" to a question that does not need it.
 #![allow(clippy::many_single_char_names, clippy::float_cmp)]
 
+pub mod compare;
 pub mod coverage;
 pub mod page;
 
+pub use compare::{Comparison, SsimOptions, compare, ssim};
 pub use coverage::{Coverage, Edge, FillRule, Rect, bounds, footprint, rasterise};
 pub use page::{MAX_SCALE, PageRender, Placement, RenderOptions, effective_scale, render_page};
 
@@ -870,10 +872,13 @@ impl Viewport {
     }
 
     /// The pixel buffer a page of this size needs.
+    ///
+    /// Rounded up, because a device rectangle of 208.33 pixels needs 209 to hold its last
+    /// row, and a buffer that rounds down silently clips the edge of the page.
     #[must_use]
     pub fn buffer(self) -> Image {
-        let w = self.device.width().round().max(1.0) as usize;
-        let h = self.device.height().round().max(1.0) as usize;
+        let w = self.device.width().ceil().max(1.0) as usize;
+        let h = self.device.height().ceil().max(1.0) as usize;
         Image::new(w, h)
     }
 }

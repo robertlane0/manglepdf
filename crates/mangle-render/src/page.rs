@@ -255,9 +255,13 @@ pub fn render_page(
     } else {
         1.0
     };
+    // Rounded *up*, not to nearest. A page of 208.33 pixels needs 209 rows to hold its last
+    // third of a pixel, and rounding down clips it; rounding up also matches what the
+    // comparison oracles do, which is what makes a page-by-page comparison possible at all
+    // rather than merely usually possible.
     let size = (
-        (pixels_w * shrink).round().max(1.0) as usize,
-        (pixels_h * shrink).round().max(1.0) as usize,
+        (pixels_w * shrink).ceil().max(1.0) as usize,
+        (pixels_h * shrink).ceil().max(1.0) as usize,
     );
 
     let placement = Placement::fit(&crop, size, scale, rotate);
@@ -651,5 +655,73 @@ mod tests {
         let mut inked = drawn.clone();
         inked.image.put(0, 0, [0, 0, 0, 255]);
         assert!(!inked.is_blank(), "one black pixel is not blank");
+    }
+
+    #[test]
+    fn a_page_buffer_rounds_up_so_the_edge_is_not_clipped() {
+        // 100 points at 150 DPI is 208.33 pixels, which must become 209 and not 208: a
+        // buffer that rounds down clips the last third of a pixel off the page, and a size
+        // that disagrees with the oracle's makes a page-by-page comparison impossible.
+        let scale = 150.0 / 72.0;
+        let page = page_of_size(100);
+        let doc = Document::open(page_bytes(100), mangle_syntax::OpenOptions::default())
+            .expect("the file opens");
+        let render = render_page(
+            &doc,
+            &page,
+            &Resources::default(),
+            RenderOptions {
+                scale,
+                ..RenderOptions::default()
+            },
+        );
+        assert_eq!(
+            render.image.width, 209,
+            "100 points at 150 DPI is 208.33 pixels, which rounds up"
+        );
+    }
+
+    /// A one-page file of the given size in points, with no content, as bytes.
+    fn page_bytes(points: i64) -> Vec<u8> {
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+        let mut at = [0usize; 4];
+        at[1] = body.len();
+        body.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        at[2] = body.len();
+        body.extend_from_slice(
+            format!(
+                "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 {points} {points}] >>\nendobj\n"
+            )
+            .as_bytes(),
+        );
+        at[3] = body.len();
+        body.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n");
+        let xref = body.len();
+        body.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 3\n");
+        for offset in at.iter().take(4).skip(1) {
+            body.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        body.extend_from_slice(
+            format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        body
+    }
+
+    /// The one page of a file of the given size in points.
+    fn page_of_size(points: i64) -> Page {
+        let doc = Document::open(page_bytes(points), mangle_syntax::OpenOptions::default())
+            .expect("the file opens");
+        let catalog = doc.catalog().expect("a catalogue");
+        let root = catalog
+            .get("Pages")
+            .and_then(mangle_syntax::object::Object::as_ref_id)
+            .expect("the page tree");
+        mangle_doc::PageTree::build(&doc, root)
+            .expect("a page tree")
+            .pages()
+            .first()
+            .cloned()
+            .expect("a page")
     }
 }
