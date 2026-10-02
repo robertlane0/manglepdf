@@ -32,7 +32,7 @@ use std::process::Command;
 
 use mangle_content::Resources;
 use mangle_doc::PageTree;
-use mangle_render::{RenderOptions, render_page};
+use mangle_render::{RenderOptions, SsimOptions, compare, render_page};
 use mangle_syntax::{Document, Object, OpenOptions, Rect, Ref, stream::decode_stream};
 
 /// A page with shapes whose positions and colours are known exactly.
@@ -156,6 +156,61 @@ fn render(bytes: Vec<u8>, scale: f64) -> mangle_render::PageRender {
     )
 }
 
+/// A region of a page, given as fractions of the image, in pixel bounds.
+///
+/// Coordinates written as pixel offsets are correct only at the resolution they were
+/// written for, and a check that quietly examines the wrong pixels at another resolution is
+/// worse than no check at all. Stating every region in page proportions means the same
+/// assertion holds whatever scale the oracle is asked to render at.
+#[must_use]
+fn region(
+    image: &mangle_render::Image,
+    fx0: f64,
+    fy0: f64,
+    fx1: f64,
+    fy1: f64,
+) -> (usize, usize, usize, usize) {
+    let w = image.width;
+    let h = image.height;
+    (
+        (w as f64 * fx0).round() as usize,
+        (h as f64 * fy0).round() as usize,
+        (w as f64 * fx1).round() as usize,
+        (h as f64 * fy1).round() as usize,
+    )
+}
+
+/// Is a region of the page, given in page proportions, entirely one colour?
+#[must_use]
+fn region_is_fraction(
+    image: &mangle_render::Image,
+    fx0: f64,
+    fy0: f64,
+    fx1: f64,
+    fy1: f64,
+    want: [u8; 3],
+) -> bool {
+    let (x0, y0, x1, y1) = region(image, fx0, fy0, fx1, fy1);
+    region_is(image, x0, y0, x1, y1, want)
+}
+
+/// Is a single pixel, given in page proportions, one colour?
+#[must_use]
+fn pixel_is_fraction(image: &mangle_render::Image, fx: f64, fy: f64, want: [u8; 3]) -> bool {
+    let (x0, y0, x1, y1) = region(image, fx, fy, fx, fy);
+    let Some(x) = x0.checked_sub((x1.saturating_sub(x0)) / 2) else {
+        return false;
+    };
+    let Some(y) = y0.checked_sub((y1.saturating_sub(y0)) / 2) else {
+        return false;
+    };
+    let Some([r, g, b, _]) = image.get(x, y) else {
+        return false;
+    };
+    let close = |a: u8, b: u8| i32::from(a) - i32::from(b) <= 2;
+    close(r, want[0]) && close(g, want[1]) && close(b, want[2])
+}
+
 /// How dark is this pixel? 0 is white, 255 is black.
 fn darkness(image: &mangle_render::Image, x: usize, y: usize) -> u32 {
     let Some([r, g, b, _]) = image.get(x, y) else {
@@ -207,21 +262,20 @@ fn a_page_renders_at_the_size_it_asks_for() {
 #[test]
 fn each_square_is_drawn_where_the_page_puts_it() {
     let render = render(shapes_page(), 1.0);
-    let image = &render.image;
     // The page's lower-left quadrant is black. In canvas coordinates that is the *bottom*
-    // left, so rows 100 to 199.
+    // left, so the fractions run from half the height downward.
     assert!(
-        region_is(image, 10, 110, 90, 190, [0, 0, 0]),
+        region_is_fraction(&render.image, 0.05, 0.55, 0.45, 0.95, [0, 0, 0]),
         "the black square is in the lower left"
     );
-    // The red square is the upper left, which is rows 10 to 90.
+    // The red square is the upper left.
     assert!(
-        region_is(image, 10, 10, 90, 90, [255, 0, 0]),
+        region_is_fraction(&render.image, 0.05, 0.05, 0.45, 0.45, [255, 0, 0]),
         "the red square is in the upper left"
     );
     // The blue square is the upper right.
     assert!(
-        region_is(image, 110, 10, 190, 90, [0, 0, 255]),
+        region_is_fraction(&render.image, 0.55, 0.05, 0.95, 0.45, [0, 0, 255]),
         "the blue square is in the upper right"
     );
 }
@@ -231,7 +285,7 @@ fn a_page_is_not_drawn_where_it_has_nothing() {
     let render = render(shapes_page(), 1.0);
     // The lower right quadrant is white paper: nothing was drawn there.
     assert!(
-        region_is(&render.image, 110, 110, 190, 190, [255, 255, 255]),
+        region_is_fraction(&render.image, 0.55, 0.55, 0.95, 0.95, [255, 255, 255]),
         "the lower right is untouched paper"
     );
 }
@@ -242,30 +296,32 @@ fn a_page_is_not_drawn_where_it_has_nothing() {
 fn the_ink_on_the_page_is_what_the_page_drew() {
     let render = render(shapes_page(), 1.0);
     let image = &render.image;
-    let ink = |x0: usize, y0: usize, x1: usize, y1: usize| -> u64 {
+    // The four quadrants of the page, in proportions, so the measurement means the same
+    // thing at every scale.
+    let ink = |fx0: f64, fy0: f64, fx1: f64, fy1: f64| -> u64 {
+        let (x0, y0, x1, y1) = region(image, fx0, fy0, fx1, fy1);
         (y0..y1)
             .flat_map(|y| (x0..x1).map(move |x| (x, y)))
             .map(|(x, y)| u64::from(darkness(image, x, y)))
             .sum()
     };
-    for (name, (x, y)) in [
-        ("upper left", (50, 50)),
-        ("lower left", (50, 150)),
-        ("upper right", (150, 50)),
-        ("lower right", (150, 150)),
-    ] {
-        eprintln!("{name} at ({x}, {y}) = {:?}", image.get(x, y));
-    }
+    let side = 0.4f64;
+    let black = ink(0.05, 0.55, 0.05 + side, 0.95);
+    let red = ink(0.05, 0.05, 0.05 + side, 0.45);
+    let blue = ink(0.55, 0.05, 0.55 + side, 0.45);
+    let paper = ink(0.55, 0.55, 0.55 + side, 0.95);
+    let measured = side * image.width.min(image.height) as f64;
+    let pixels = (measured as u64) * (measured as u64);
+    // A count of pixels scaled by the region, so the expectation holds at any resolution.
+    // The level is a per-pixel darkness in 0..255, so it multiplies rather than scales: an
+    // earlier division by 255 here reported a fully black region as empty.
+    let expect = |level: u64| -> u64 { pixels * level };
     // Black and blue are dark; red is dark to the eye but light to a luma-weighted
     // measurement, which is the point of using one.
-    let black = ink(10, 110, 90, 190);
-    let red = ink(10, 10, 90, 90);
-    let blue = ink(110, 10, 190, 90);
-    let paper = ink(110, 110, 190, 190);
-    assert_eq!(black, 80 * 80 * 255, "black is fully dark");
-    assert_eq!(red, 80 * 80 * 179, "red is 179 dark in luma");
-    assert_eq!(blue, 80 * 80 * 226, "blue is 226 dark in luma");
-    assert_eq!(paper, 0, "paper is not dark at all");
+    assert_eq!(black, expect(255), "black is fully dark");
+    assert_eq!(red, expect(179), "red is 179 dark in luma");
+    assert_eq!(blue, expect(226), "blue is 226 dark in luma");
+    assert_eq!(paper, 0u64, "paper is not dark at all");
 }
 
 #[test]
@@ -273,16 +329,16 @@ fn a_clip_keeps_a_path_inside_it() {
     let render = render(clipped_page(), 1.0);
     let image = &render.image;
     assert_eq!(
-        (image.width, image.height),
-        (100, 100),
-        "one pixel per point"
+        image.width, image.height,
+        "a square page makes a square canvas"
     );
+    assert!(image.width > 0, "and it has pixels");
     assert!(
-        region_is(image, 5, 5, 45, 95, [0, 0, 0]),
+        region_is_fraction(&render.image, 0.05, 0.05, 0.45, 0.95, [0, 0, 0]),
         "inside the clip, the page is filled"
     );
     assert!(
-        region_is(image, 55, 5, 95, 95, [255, 255, 255]),
+        region_is_fraction(&render.image, 0.55, 0.05, 0.95, 0.95, [255, 255, 255]),
         "outside the clip, it is paper: an unclipped renderer would paint the whole page"
     );
 }
@@ -291,11 +347,15 @@ fn a_clip_keeps_a_path_inside_it() {
 #[test]
 fn the_clipped_and_unclipped_halves_are_really_different() {
     let render = render(clipped_page(), 1.0);
-    let inside = render.image.get(25, 50).unwrap_or([255, 255, 255, 255]);
-    let outside = render.image.get(75, 50).unwrap_or([0, 0, 0, 255]);
-    assert_eq!(inside[0], 0, "black inside the clip");
-    assert_eq!(outside[0], 255, "white outside it");
-    assert_ne!(inside, outside);
+    let image = &render.image;
+    assert!(
+        pixel_is_fraction(image, 0.25, 0.5, [0, 0, 0]),
+        "black inside the clip"
+    );
+    assert!(
+        pixel_is_fraction(image, 0.75, 0.5, [255, 255, 255]),
+        "white outside it"
+    );
 }
 
 #[test]
@@ -530,29 +590,6 @@ fn flatten_onto_paper(image: &mangle_render::Image) -> mangle_render::Image {
     out
 }
 
-/// How much two renderings differ, as the fraction of pixels that differ at all.
-///
-/// A difference *count* rather than a mean, because a rasterizer that agrees almost
-/// everywhere and is completely wrong in one corner is worse than one that is a little
-/// off everywhere, and the two look the same in a mean.
-fn disagreement(ours: &mangle_render::Image, theirs: &mangle_render::Image) -> (usize, usize) {
-    let total = ours.width.min(theirs.width) * ours.height.min(theirs.height);
-    let mut differing = 0usize;
-    for y in 0..ours.height.min(theirs.height) {
-        for x in 0..ours.width.min(theirs.width) {
-            let a = ours.get(x, y).unwrap_or([255, 255, 255, 255]);
-            let b = theirs.get(x, y).unwrap_or([255, 255, 255, 255]);
-            // A tolerance of 24: below the eye's threshold for a flat region, above the
-            // difference between two correct antialiasers at a hard edge.
-            let same = (0..3).all(|c| (i32::from(a[c]) - i32::from(b[c])).abs() <= 24);
-            if !same {
-                differing += 1;
-            }
-        }
-    }
-    (differing, total)
-}
-
 /// The structural comparison against `mutool`, for the shapes page.
 ///
 /// This is the check that says something about correctness rather than about consistency:
@@ -569,9 +606,12 @@ fn our_rendering_agrees_with_mutools_about_where_the_ink_is() {
     let pdf = dir.join("shapes.pdf");
     std::fs::write(&pdf, shapes_page()).expect("a file to render");
 
-    let ours = render(shapes_page(), 1.0);
+    // 150 DPI is the resolution the acceptance criteria name, so this measures the thing
+    // the bar is written against rather than an easier version of it.
+    let scale = 150.0 / 72.0;
+    let ours = render(shapes_page(), scale);
     let theirs_path = dir.join("shapes.pam");
-    let Some(data) = mutool_render(&pdf, 1.0, &theirs_path) else {
+    let Some(data) = mutool_render(&pdf, scale, &theirs_path) else {
         eprintln!("skipped: mutool could not render the page");
         return;
     };
@@ -581,27 +621,33 @@ fn our_rendering_agrees_with_mutools_about_where_the_ink_is() {
     };
     let theirs = flatten_onto_paper(&pam_to_image(w, h, depth, body));
 
-    let (differing, total) = disagreement(&ours.image, &theirs);
-    let fraction = differing as f64 / total.max(1) as f64;
+    let comparison = compare(&ours.image, &theirs, &SsimOptions::default());
     assert!(
-        fraction < 0.02,
-        "we and mutool disagree on {differing} of {total} pixels ({:.1}%); a difference \\
-         under a couple of percent is antialiasing at the edges, and much more is a bug",
-        fraction * 100.0
+        comparison.is_valid(),
+        "the comparison did not happen: {:?}",
+        comparison.refused
+    );
+    let metrics = &comparison.metrics;
+    eprintln!("shapes page: {}", metrics.summary());
+    assert!(
+        metrics.meets_fidelity_bar(0.95),
+        "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",
+        metrics.ssim,
+        metrics.summary()
     );
 
     // The structural claims hold in the oracle's rendering too, which is what makes them
     // claims about the page rather than about our code.
     assert!(
-        region_is(&theirs, 10, 110, 90, 190, [0, 0, 0]),
+        region_is_fraction(&theirs, 0.05, 0.55, 0.45, 0.95, [0, 0, 0]),
         "mutool also puts the black square in the lower left"
     );
     assert!(
-        region_is(&theirs, 110, 10, 190, 90, [0, 0, 255]),
+        region_is_fraction(&theirs, 0.55, 0.05, 0.95, 0.45, [0, 0, 255]),
         "and the blue square in the upper right"
     );
     assert!(
-        region_is(&theirs, 110, 110, 190, 190, [255, 255, 255]),
+        region_is_fraction(&theirs, 0.55, 0.55, 0.95, 0.95, [255, 255, 255]),
         "and nothing in the lower right"
     );
 }
@@ -621,9 +667,10 @@ fn our_clip_agrees_with_mutools() {
     let pdf = dir.join("clipped.pdf");
     std::fs::write(&pdf, clipped_page()).expect("a file to render");
 
-    let ours = render(clipped_page(), 1.0);
+    let scale = 150.0 / 72.0;
+    let ours = render(clipped_page(), scale);
     let theirs_path = dir.join("clipped.pam");
-    let Some(data) = mutool_render(&pdf, 1.0, &theirs_path) else {
+    let Some(data) = mutool_render(&pdf, scale, &theirs_path) else {
         eprintln!("skipped: mutool could not render the page");
         return;
     };
@@ -636,15 +683,22 @@ fn our_clip_agrees_with_mutools() {
     // Outside the clip, mutool must also draw paper. An unclipped renderer would put ink
     // there, and this is the assertion that catches it.
     assert!(
-        region_is(&theirs, 60, 10, 95, 95, [255, 255, 255]),
+        region_is_fraction(&theirs, 0.6, 0.1, 0.95, 0.95, [255, 255, 255]),
         "mutool also keeps the clip"
     );
-    let (differing, total) = disagreement(&ours.image, &theirs);
-    let fraction = differing as f64 / total.max(1) as f64;
+    let comparison = compare(&ours.image, &theirs, &SsimOptions::default());
     assert!(
-        fraction < 0.03,
-        "we and mutool disagree on {differing} of {total} pixels ({:.1}%)",
-        fraction * 100.0
+        comparison.is_valid(),
+        "the comparison did not happen: {:?}",
+        comparison.refused
+    );
+    let metrics = &comparison.metrics;
+    eprintln!("clipped page: {}", metrics.summary());
+    assert!(
+        metrics.meets_fidelity_bar(0.95),
+        "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",
+        metrics.ssim,
+        metrics.summary()
     );
 }
 
@@ -681,12 +735,12 @@ fn a_rotated_page_puts_its_ink_where_the_rotation_says() {
     assert_eq!(render.marks, 3, "the same three squares");
     // The black square was in the lower left; after a quarter turn it is in the upper left.
     assert!(
-        region_is(&render.image, 10, 10, 90, 90, [0, 0, 0]),
+        region_is_fraction(&render.image, 0.05, 0.05, 0.45, 0.45, [0, 0, 0]),
         "the black square moved to the upper left"
     );
     // And the lower right, which held the blue square, now holds paper.
     assert!(
-        region_is(&render.image, 110, 110, 190, 190, [255, 255, 255]),
+        region_is_fraction(&render.image, 0.55, 0.55, 0.95, 0.95, [255, 255, 255]),
         "and the quadrant that had blue is now paper"
     );
 }

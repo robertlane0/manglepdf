@@ -48,17 +48,14 @@ The spine is where the architecture is decided, so it is built first and deeply.
 
 ## Immediate queue
 
-1. **Byte-preserving full rewrite.** Copy every untouched object out of the original
-   bytes and only re-emit what changed. This is the last big thing between the current
-   state and Charter §4.1 law 1, and everything after it depends on it.
-2. **Consult the crypt filters** when building the decryptor, and decrypt objects that
-   live in object streams. Both are small and both are correctness.
-3. **The page tree into the window**: fill the right-hand region from the object model,
-   which is the Inspector's first half.
-4. **Content-stream parsing with byte provenance** (`mangle-content`), which every edit
-   in M4 depends on.
-5. **The rasterizer** (`mangle-render`), analytic coverage first, checked against
-   `mutool` page by page.
-6. Tier-A fixtures for the remaining catalogue entries: fonts, colour, transparency,
+1. **Images** (F16), then shadings (F15): decode Flate and DCTDecode into RGBA, place
+   through the CTM on the unit square, honour `/SMask`. `zune-jpeg` is already a
+   dependency, and both are verifiable pixel-for-pixel against `mutool`.
+2. **Glyph outlines** (F19–F21): TrueType first via `ttf-parser`, then CFF and Type 1.
+   Advances come from `/Widths` for existing text, which needs no font program at all.
+3. **A real clip region** rather than the clip path's bounding box.
+4. **The page tree and the marks into the window**: fill the right-hand region, which is
+   the Inspector's first half.
+5. Tier-A fixtures for the remaining catalogue entries: fonts, colour, transparency,
    shadings, patterns, images, CCITT, JBIG2, JPX, forms and the scale files.
-7. Tier B: a real-world corpus with `SOURCES.md`.
+6. Tier B: a real-world corpus with `SOURCES.md`.

@@ -32,6 +32,20 @@ Dependencies flow one way only. A lower crate never names a higher one.
 | `tools/fixturegen` | Deterministic fixture generation. **Depends on no `mangle-*` crate on purpose.** |
 | `xtask` | Gate checks, fixtures, icons, the gauntlet. |
 
+## The page placement
+
+One function, `Placement::fit`, turns a page's box, a canvas size, a scale and a
+`/Rotate` into the matrix every mark is drawn through, in that order: rotate in page
+space, normalise the corners, then fit and flip. It is one function because the failure
+modes are invisible rather than loud — a page drawn upside down is a page drawn
+plausible.
+
+A clip's bounds travel from the interpreter in *user* space and are transformed by the
+mark's own matrix before they mean anything in pixels. That is the same discipline as the
+rest of the placement, and it is worth stating because the two spaces coincide at scale one
+— which is exactly the scale a hand-written fixture is most likely to use, and exactly the
+scale at which a missing transform is invisible.
+
 ## Losslessness
 
 The organising principle of the syntax layer is that an object is kept exactly as it

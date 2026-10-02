@@ -53,6 +53,12 @@ Where the work actually is. Updated whenever a milestone moves.
   limit; a stroke's parameters travel with the mark that used them. The page's placement —
   the fit, the y-flip and `/Rotate` — is decided in one place, because getting the flip
   wrong renders every page upside down and looks like somebody else's bug.
+
+  Comparisons live here too. **SSIM** in the same windowed form every implementation uses
+  (11-tap Gaussian, σ 1.5), plus RMS, max delta and a count of pixels above a tolerance —
+  four numbers because they fail in different ways. SSIM alone would pass a page that is
+  missing a paragraph of text. A comparison also returns a heatmap, so a failure can be
+  looked at rather than only measured.
 - **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`.
   This is how "what does ManglePDF think of this file?" is asked without a window.
 - **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one
@@ -64,7 +70,7 @@ Where the work actually is. Updated whenever a milestone moves.
 
 ## Tests
 
-405, none ignored, no warnings. Five kinds matter:
+429, none ignored, no warnings. Six kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -79,17 +85,17 @@ Where the work actually is. Updated whenever a milestone moves.
   mark is checked against the bytes it names. Rewriting a mark's string operand changes
   that mark and leaves every other mark's content alone, which is the property the whole
   content layer exists to provide.
-- **Rendering** — a page is rendered and checked against what the page says should be on
-  it: each shape where the file put it, the clip where the file put it, the ink matching
-  the shapes' areas to the luminance. The corpus is rendered at two scales to prove no
-  file hangs or overruns the buffers.
-- **The rasterizer against `mutool`** — the same pages rendered by `mutool` and compared.
-  `mutool` is an independent implementation with years of accumulated knowledge of what a
-  page should look like, so agreeing with it is the only check that says anything about
-  correctness rather than about internal consistency. The comparison is on *ink*, with both
-  renderings flattened onto one background first: `mutool` writes an unpainted page as
-  transparent and this renderer writes white paper, and comparing the raw buffers would be
-  comparing conventions. Skipped cleanly when `mutool` is absent.
+- **Rendering** — a page is rendered and checked against what the page says should be on it.
+  Regions are stated as fractions of the page rather than as pixel offsets, so the same
+  assertion holds at whatever resolution the oracle is asked to render at; an earlier
+  version used fixed pixels and passed only at the resolution it was written for. The
+  corpus is rendered at two scales to prove no file hangs or overruns its buffers.
+- **Fidelity against `mutool`, measured** — the shapes page and the clipped page rendered
+  by `mutool` at 150 DPI (the resolution the acceptance criteria name) and compared with
+  SSIM. Shapes **0.99829**, clipped **0.99917**, against a bar of 0.95. Both renderings are
+  flattened onto one background first, because `mutool` writes an unpainted page as
+  transparent and this renderer writes white paper, and comparing raw buffers would compare
+  conventions rather than renderers. Skipped cleanly when `mutool` is absent.
 
 ## Gaps, in the order they block
 
@@ -102,7 +108,10 @@ Where the work actually is. Updated whenever a milestone moves.
    instead of quietly wrong.
 3. **A clip is honoured as its bounding box.** A clip path can be any shape; what the
    interpreter records is the rectangle that bounds it, which draws slightly more than it
-   should rather than slightly less. The renderer needs the real clip region.
+   should rather than slightly less. The renderer needs the real clip region. (The bounds
+   themselves are now transformed correctly — they were being applied as device pixels
+   while the interpreter records them in user space, which was invisible at 72 DPI and
+   wrong at every other scale.)
 4. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the marks the content layer produces.
 5. **JBIG2 and JPX are not implemented.**

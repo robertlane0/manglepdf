@@ -366,15 +366,36 @@ fn draw_mark(
             device.reset_clip();
         }
         Mark::ClipChanged(Some(bounds)) => {
-            // The interpreter records a clip as a device-space rectangle, which is the
-            // part of the clip that decides what is visible for nearly every page. A clip
-            // from a path rather than a rectangle is honoured as its bounding box, which
-            // draws slightly more than it should rather than slightly less.
+            // The interpreter records clip bounds in *user* space — the space its path
+            // operators work in — so they must go through the mark's own transformation
+            // before they mean anything in pixels. Skipping this is invisible at scale one
+            // and wrong at every other scale, which is the worst kind of bug: a clip that
+            // works on the one fixture written at 72 DPI.
+            //
+            // All four corners go through the matrix and the result is re-bounded, because
+            // a transformation that rotates or flips does not map an axis-aligned rectangle
+            // to an axis-aligned rectangle.
+            let corners = [
+                to_device.apply(bounds.x0, bounds.y0),
+                to_device.apply(bounds.x1, bounds.y0),
+                to_device.apply(bounds.x1, bounds.y1),
+                to_device.apply(bounds.x0, bounds.y1),
+            ];
+            let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+            let max_x = corners
+                .iter()
+                .map(|c| c.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+            let max_y = corners
+                .iter()
+                .map(|c| c.1)
+                .fold(f64::NEG_INFINITY, f64::max);
             device.clip_to(Rect {
-                x0: bounds.x0,
-                y0: bounds.y0,
-                x1: bounds.x1,
-                y1: bounds.y1,
+                x0: min_x,
+                y0: min_y,
+                x1: max_x,
+                y1: max_y,
             });
         }
         Mark::ClipChanged(None) => device.reset_clip(),
@@ -708,6 +729,60 @@ mod tests {
         body
     }
 
+    /// The first page of a document.
+    fn page_of(doc: &Document) -> Page {
+        let catalog = doc.catalog().expect("a catalogue");
+        let root = catalog
+            .get("Pages")
+            .and_then(mangle_syntax::object::Object::as_ref_id)
+            .expect("the page tree");
+        mangle_doc::PageTree::build(doc, root)
+            .expect("a page tree")
+            .pages()
+            .first()
+            .cloned()
+            .expect("a page")
+    }
+
+    /// A one-page file of the given size in points, filled black and clipped to its left
+    /// half. A clip that is not transformed clips at the unscaled position, which is the
+    /// whole of the bug this fixture exists for.
+    fn clip_page(points: i64) -> Vec<u8> {
+        let half = points / 2;
+        let content = format!("0 0 0 rg 0 0 {half} {points} re W n 0 0 {points} {points} re f");
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+        let mut at = [0usize; 5];
+        at[1] = body.len();
+        body.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        at[2] = body.len();
+        body.extend_from_slice(
+            format!(
+                "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 {points} {points}] >>\nendobj\n"
+            )
+            .as_bytes(),
+        );
+        at[3] = body.len();
+        body.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n",
+        );
+        at[4] = body.len();
+        body.extend_from_slice(
+            format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+        );
+        body.extend_from_slice(content.as_bytes());
+        body.extend_from_slice(b"\nendstream\nendobj\n");
+        let xref = body.len();
+        body.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 4\n");
+        for offset in at.iter().take(5).skip(1) {
+            body.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        body.extend_from_slice(
+            format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        body
+    }
+
     /// The one page of a file of the given size in points.
     fn page_of_size(points: i64) -> Page {
         let doc = Document::open(page_bytes(points), mangle_syntax::OpenOptions::default())
@@ -723,5 +798,48 @@ mod tests {
             .first()
             .cloned()
             .expect("a page")
+    }
+
+    /// A clip has to be transformed like everything else. This is invisible at scale one,
+    /// where user space and device space are the same, and wrong at every other scale.
+    #[test]
+    fn a_clip_scales_with_the_page() {
+        // A 100 by 100 point page, filled black, clipped to its left half.
+        let pdf = clip_page(100);
+        let doc =
+            Document::open(pdf, mangle_syntax::OpenOptions::default()).expect("the file opens");
+        let page = page_of(&doc);
+        let resources = Resources::default();
+        for scale in [1.0, 150.0 / 72.0] {
+            let render = render_page(
+                &doc,
+                &page,
+                &resources,
+                RenderOptions {
+                    scale,
+                    ..RenderOptions::default()
+                },
+            );
+            let image = &render.image;
+            let w = image.width as f64;
+            let h = image.height as f64;
+            // The left half is inside the clip and black; the right half is paper.
+            let inside = image.get((w * 0.25) as usize, (h * 0.5) as usize);
+            let outside = image.get((w * 0.75) as usize, (h * 0.5) as usize);
+            assert_eq!(
+                inside.map(|p| p[0]),
+                Some(0),
+                "inside the clip is black at scale {scale}, image {}x{}",
+                image.width,
+                image.height
+            );
+            assert_eq!(
+                outside.map(|p| p[0]),
+                Some(255),
+                "outside the clip is paper at scale {scale}, image {}x{}",
+                image.width,
+                image.height
+            );
+        }
     }
 }
