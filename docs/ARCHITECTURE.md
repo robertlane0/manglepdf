@@ -105,4 +105,5 @@ note saying what was lost.
 ## Testing
 
 `cargo xtask policy` enforces the mechanical rules (no `unsafe`, no banned dependency,
-no ignored test, every fixture independent). `docs/TESTING.md` covers the rest.
+no failed test, every ignored test named in the report, every fixture independent).
+`docs/TESTING.md` covers the rest.

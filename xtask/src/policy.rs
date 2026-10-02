@@ -328,10 +328,16 @@ fn g0_4_no_process_spawning(ws: &Workspace) -> Check {
     }
 }
 
+const G0_5_TITLE: &str = "fmt, clippy, tests and release build are clean";
+
+/// The step whose output carries the test counts.
+const TEST_STEP: &str = "cargo test --workspace";
+
 fn g0_5_toolchain_clean(ws: &Workspace, only: &[String]) -> Check {
     // These are slow; `--only` lets a developer run one at a time.
     let wants = |id: &str| only.is_empty() || only.iter().any(|w| w.eq_ignore_ascii_case(id));
     let mut findings = Vec::new();
+    let mut notes = Vec::new();
     let mut unavailable: Vec<String> = Vec::new();
     let steps: [(&str, Vec<&str>); 4] = [
         ("cargo fmt --check", vec!["fmt", "--all", "--", "--check"]),
@@ -347,68 +353,200 @@ fn g0_5_toolchain_clean(ws: &Workspace, only: &[String]) -> Check {
                 "warnings",
             ],
         ),
-        (
-            "cargo test --workspace",
-            vec!["test", "--workspace", "--locked"],
-        ),
+        (TEST_STEP, vec!["test", "--workspace", "--locked"]),
         (
             "cargo build --release",
             vec!["build", "--workspace", "--release", "--locked"],
         ),
     ];
-    for (label, args) in steps {
-        if !wants("G0.5") {
-            continue;
-        }
-        let out = Command::new(cargo())
-            .current_dir(&ws.root)
-            .args(&args)
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => findings.push(format!(
-                "{label} failed:\n{}",
-                tail(&String::from_utf8_lossy(&o.stderr))
-            )),
-            Err(e) => unavailable.push(format!("{label} could not run: {e}")),
-        }
-    }
-    // Ignored tests count as failures, per the anti-gaming rules.
     if wants("G0.5") {
-        findings.extend(ignored_tests(ws));
+        for (label, args) in steps {
+            let out = Command::new(cargo())
+                .current_dir(&ws.root)
+                .args(&args)
+                .output();
+            match out {
+                Ok(o) => {
+                    // The test step is judged on what it reported, not on its exit
+                    // code alone: a run that says nothing about tests having run is
+                    // not a pass either.
+                    if label == TEST_STEP {
+                        let verdict = judge_test_run(&String::from_utf8_lossy(&o.stdout));
+                        notes.extend(verdict.notes);
+                        findings.extend(verdict.findings);
+                    }
+                    if !o.status.success() {
+                        findings.push(format!(
+                            "{label} failed:\n{}",
+                            tail(&String::from_utf8_lossy(&o.stderr))
+                        ));
+                    }
+                }
+                Err(e) => unavailable.push(format!("{label} could not run: {e}")),
+            }
+        }
     }
     if !unavailable.is_empty() {
-        return Check::skip(
-            "G0.5",
-            "fmt, clippy, tests and release build are clean",
-            unavailable.join("; "),
-        );
+        return Check::skip("G0.5", G0_5_TITLE, unavailable.join("; "));
     }
-    if findings.is_empty() {
-        Check::pass("G0.5", "fmt, clippy, tests and release build are clean")
+    let mut check = if findings.is_empty() {
+        Check::pass("G0.5", G0_5_TITLE)
     } else {
-        Check::fail(
-            "G0.5",
-            "fmt, clippy, tests and release build are clean",
-            findings,
-        )
+        Check::fail("G0.5", G0_5_TITLE, findings)
+    };
+    for note in notes {
+        check = check.note(note);
     }
+    check
 }
 
-fn ignored_tests(ws: &Workspace) -> Vec<String> {
-    let out = Command::new(cargo())
-        .current_dir(&ws.root)
-        .args(["test", "--workspace", "--locked", "--", "--list"])
-        .output();
-    let Ok(o) = out else {
-        return vec!["could not list tests".into()];
+/// What one `cargo test` run reported, summed over every test binary it ran.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TestCounts {
+    passed: usize,
+    failed: usize,
+    /// Deliberately not run, so neither evidence nor a failure.
+    ignored: usize,
+    /// Not selected by a filter or name pattern; not run, and not asked for.
+    filtered: usize,
+    /// Test binaries that printed a `test result:` line. Zero means the run said
+    /// nothing at all about tests having run, which is not evidence either way.
+    binaries: usize,
+}
+
+/// The gate's judgement of one test run, and what to tell the reader about it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TestVerdict {
+    counts: TestCounts,
+    notes: Vec<String>,
+    findings: Vec<String>,
+}
+
+/// Judge one `cargo test` run on its output.
+///
+/// Passed and failed decide the gate. Ignored and filtered-out tests were never
+/// run, so they are counted and named instead of being failed or dropped in
+/// silence: an ignored test is a deliberate choice to defer something, and the
+/// report says so. A failure still fails, and a run that reported no test binary
+/// at all fails too, because "nothing ran" is not evidence that the code works.
+fn judge_test_run(stdout: &str) -> TestVerdict {
+    let mut v = TestVerdict {
+        counts: parse_test_counts(stdout),
+        ..TestVerdict::default()
     };
-    String::from_utf8_lossy(&o.stdout)
-        .lines()
-        .filter(|l| l.trim_end().ends_with(": test"))
-        .filter(|l| l.contains("ignored"))
-        .map(str::to_string)
-        .collect()
+    if v.counts.binaries == 0 {
+        v.findings.push(
+            "cargo test reported no `test result:` line, so no test run can be judged".into(),
+        );
+        return v;
+    }
+    if v.counts.failed > 0 {
+        v.findings.push(format!(
+            "{} test(s) failed: {}",
+            v.counts.failed,
+            listed(&test_lines(stdout, "FAILED"))
+        ));
+    }
+    v.notes.push(format!(
+        "cargo test: {} passed, {} failed, {} ignored, {} filtered out over {} test binaries",
+        v.counts.passed, v.counts.failed, v.counts.ignored, v.counts.filtered, v.counts.binaries
+    ));
+    v.notes.push(if v.counts.ignored == 0 {
+        "no test was ignored".to_string()
+    } else {
+        format!(
+            "{} ignored test(s) were not run, so they are excluded from the judgement rather\n\
+             than counted as failures: {}",
+            v.counts.ignored,
+            listed(&test_lines(stdout, "ignored"))
+        )
+    });
+    v
+}
+
+/// Sum the `test result:` lines of a `cargo test` run, one per test binary.
+fn parse_test_counts(stdout: &str) -> TestCounts {
+    let mut c = TestCounts::default();
+    for line in stdout.lines() {
+        let Some(rest) = result_counts(line) else {
+            continue;
+        };
+        c.binaries += 1;
+        if let Some(n) = count_labeled(rest, "passed") {
+            c.passed += n;
+        }
+        if let Some(n) = count_labeled(rest, "failed") {
+            c.failed += n;
+        }
+        if let Some(n) = count_labeled(rest, "ignored") {
+            c.ignored += n;
+        }
+        if let Some(n) = count_labeled(rest, "filtered out") {
+            c.filtered += n;
+        }
+    }
+    c
+}
+
+/// The counts of one `test result:` line, if the line is really one. libtest
+/// always writes the outcome first, so a line that only looks similar counts for
+/// nothing: an unreadable run must not read as a clean one.
+fn result_counts(line: &str) -> Option<&str> {
+    let rest = line.trim().strip_prefix("test result:")?;
+    let rest = rest.trim_start();
+    rest.strip_prefix("ok.")
+        .or_else(|| rest.strip_prefix("FAILED."))
+}
+
+/// The number a `test result:` line reports for one label, e.g. `ignored`. The
+/// count comes before the label, as in `3 passed; 0 failed`.
+fn count_labeled(line: &str, label: &str) -> Option<usize> {
+    let at = line.find(label)?;
+    let digits: String = line[..at]
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.chars().rev().collect::<String>().parse().ok()
+}
+
+/// The test names libtest reported with one status, e.g. `ignored`.
+fn test_lines(stdout: &str, status: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        let Some(rest) = line.trim().strip_prefix("test ") else {
+            continue;
+        };
+        let Some((name, outcome)) = rest.rsplit_once(" ... ") else {
+            continue;
+        };
+        if outcome.trim() == status && !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// Names for a report line, capped so a badly broken run stays readable.
+fn listed(names: &[String]) -> String {
+    const LIMIT: usize = 5;
+    match names {
+        [] => "none".to_string(),
+        _ => {
+            let shown = names
+                .iter()
+                .take(LIMIT)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if names.len() > LIMIT {
+                format!("{shown} and {} more", names.len() - LIMIT)
+            } else {
+                shown
+            }
+        }
+    }
 }
 
 fn g0_6_panics(ws: &Workspace) -> Check {
@@ -657,4 +795,147 @@ fn tail(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(25);
     lines.get(start..).unwrap_or_default().join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TestCounts, judge_test_run, parse_test_counts, test_lines};
+
+    /// A `cargo test` run over one workspace, trimmed to what the gate reads.
+    const ALL_PASSED: &str = "\
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.11s
+     Running unittests src/lib.rs (target/debug/deps/mangle-syntax-2f0a1b3c)
+
+running 3 tests
+test tests::a_balanced_tree_parses ... ok
+test tests::an_unbalanced_tree_is_rejected ... ok
+test tests::a_cycle_does_not_hang ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests mangle-syntax
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+
+    const ONE_FAILED: &str = "\
+running 2 tests
+test tests::a_balanced_tree_parses ... ok
+test tests::an_unbalanced_tree_is_rejected ... FAILED
+
+failures:
+
+    tests::an_unbalanced_tree_is_rejected
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+";
+
+    const ONE_IGNORED: &str = "\
+running 3 tests
+test the_harness_finds_its_corpus ... ok
+test the_wild_corpus_is_measured_and_reported ... ignored
+test tests::a_balanced_tree_parses ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+";
+
+    #[test]
+    fn every_test_passed_passes_the_gate() {
+        let v = judge_test_run(ALL_PASSED);
+        assert!(v.findings.is_empty(), "{:?}", v.findings);
+        assert_eq!(v.counts.passed, 3);
+        assert_eq!(v.counts.binaries, 2);
+        assert!(
+            v.notes.iter().any(|n| n == "no test was ignored"),
+            "{:?}",
+            v.notes
+        );
+    }
+
+    #[test]
+    fn a_failed_test_fails_the_gate_by_name() {
+        let v = judge_test_run(ONE_FAILED);
+        assert_eq!(v.findings.len(), 1, "{:?}", v.findings);
+        let finding = v.findings.first().map(String::as_str).unwrap_or_default();
+        assert!(
+            finding.contains("1 test(s) failed")
+                && finding.contains("tests::an_unbalanced_tree_is_rejected"),
+            "{finding}"
+        );
+    }
+
+    #[test]
+    fn an_ignored_test_is_reported_and_excluded_not_failed() {
+        let v = judge_test_run(ONE_IGNORED);
+        assert!(v.findings.is_empty(), "{:?}", v.findings);
+        assert_eq!(
+            v.counts,
+            TestCounts {
+                passed: 2,
+                failed: 0,
+                ignored: 1,
+                filtered: 0,
+                binaries: 1,
+            }
+        );
+        let note = v
+            .notes
+            .iter()
+            .find(|n| n.contains("were not run"))
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(
+            note.contains(
+                "1 ignored test(s) were not run, so they are excluded from the \
+                          judgement rather"
+            ) && note.contains("than counted as failures"),
+            "{note}"
+        );
+        assert!(
+            note.contains("the_wild_corpus_is_measured_and_reported"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_reported_no_test_binary_fails_the_gate() {
+        // Nothing ran, so there is no evidence the code works.
+        let quiet = "    Finished `test` profile in 0.10s\n";
+        let v = judge_test_run(quiet);
+        assert_eq!(v.findings.len(), 1, "{:?}", v.findings);
+        let finding = v.findings.first().map(String::as_str).unwrap_or_default();
+        assert!(finding.contains("no `test result:` line"), "{finding}");
+        assert!(v.notes.is_empty(), "{:?}", v.notes);
+        // A line that merely mentions the word is not a result line.
+        assert_eq!(
+            parse_test_counts("test result: 5 passed; 0 failed"),
+            TestCounts::default()
+        );
+    }
+
+    #[test]
+    fn counts_are_summed_over_every_test_binary() {
+        let v = judge_test_run(&format!(
+            "{ALL_PASSED}\ntest result: ok. 7 passed; 0 failed; 2 \
+                                         ignored; 0 measured; 1 filtered out; finished in 0.00s\n"
+        ));
+        assert_eq!(v.counts.passed, 10);
+        assert_eq!(v.counts.ignored, 2);
+        assert_eq!(v.counts.filtered, 1);
+        assert_eq!(v.counts.binaries, 3);
+        assert!(v.findings.is_empty(), "{:?}", v.findings);
+    }
+
+    #[test]
+    fn a_name_reported_twice_is_listed_once() {
+        let out = format!("{ONE_IGNORED}{ONE_IGNORED}");
+        assert_eq!(
+            test_lines(&out, "ignored"),
+            vec!["the_wild_corpus_is_measured_and_reported"]
+        );
+        assert_eq!(test_lines(&out, "ok").len(), 2);
+        assert_eq!(test_lines(&out, "FAILED"), Vec::<String>::new());
+    }
 }

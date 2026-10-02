@@ -317,6 +317,30 @@ tests in the same file check the harness itself and run by default. Ten kinds ma
   base, and transposing two codes. Renaming `/Differences` in the file and re-scoring drops it
   to 0.895, so the test does see the thing it is for.
 
+### An ignored test is not a failed test
+
+G0.5 used to fail on any `#[ignore]`d test, and the Tier-B corpus run — ignored on
+purpose, because it takes two hours — failed the gate because of it. That was the wrong
+rule: an ignored test is not run, so it is not evidence that anything works and it is not
+evidence that anything is broken. Failing on it only forces the choice between a gate
+that lies and a suite that lies.
+
+The gate now reads what `cargo test` actually reported, per test binary, and judges on
+passed and failed. Ignored and filtered-out tests are counted and named in the report
+rather than failed or dropped in silence:
+
+```text
+G0.5  pass  fmt, clippy, tests and release build are clean
+        cargo test: 683 passed, 0 failed, 1 ignored, 0 filtered out over 34 test binaries
+        1 ignored test(s) were not run, so they are excluded from the judgement rather
+        than counted as failures: the_wild_corpus_is_measured_and_reported
+```
+
+Nothing else got weaker. A failed test still fails the gate, by name, and a run that
+reports no test binary at all fails it too — "nothing ran" is not a clean result. The
+parsing and the decision are unit-tested in `xtask/src/policy.rs` against recorded
+`cargo test` output, so checking the rule costs no cargo run.
+
 ## Gaps, in the order they block
 
 1. **A clip's paths are capped at 32.** A page nesting more than that drops its outermost
