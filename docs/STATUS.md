@@ -71,15 +71,21 @@ Where the work actually is. Updated whenever a milestone moves.
   Separation are refused rather than guessed, because neither can be converted without data
   this does not have.
 
-  **Shadings** paint. All four PDF function kinds are implemented: sampled, exponential,
-  stitching, and the PostScript calculator with its bounded stack. Axial and radial
-  gradients are sampled per pixel by mapping each pixel *back* through the inverse
-  transformation, so a rotated gradient needs no special case, and coverage is derived by
-  differencing the parameter either side of a pixel rather than from a closed form — one
-  code path for both gradient types. A page names a *pattern* and the pattern names a
-  shading, so both shapes are accepted, and the pattern's own `/Matrix` composes inside
-  the mark's transformation rather than replacing it. Types 1, 4, 5, 6 and 7 are reported
-  as notes rather than painted wrongly.
+  **Shadings** paint. All four PDF function kinds are here, including the PostScript
+  calculator — a small stack machine with the specification's operators, whose
+  truth is its own (`0` is false, everything else is true) and whose shifts past the word's
+  width are zero rather than a wrap. An axial or radial gradient is sampled *backwards*:
+  each pixel is mapped through the inverse of the transformation into the shading's own
+  space and turned into a parameter there, which is what makes a diagonal banner work with
+  no special case. The gradient's edge is antialiased from the numerical gradient of that
+  parameter, so the boundary of a radial gradient — a conic section — needs no formula of
+  its own. The disc inside a radial gradient's first circle is filled with the first colour,
+  because no circle in the family passes through the family's own centre and the parameter
+  there is negative rather than absent.
+
+  A page names a *pattern* and the pattern names a shading, so both shapes are accepted,
+  and the pattern's own `/Matrix` composes inside the mark's transformation rather than
+  replacing it. Types 1, 4, 5, 6 and 7 are reported as notes rather than painted wrongly.
 - **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`.
   This is how "what does ManglePDF think of this file?" is asked without a window.
 - **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one
@@ -91,7 +97,7 @@ Where the work actually is. Updated whenever a milestone moves.
 
 ## Tests
 
-504, none ignored, no warnings. Six kinds matter:
+534, none ignored, no warnings. Eight kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -111,33 +117,45 @@ Where the work actually is. Updated whenever a milestone moves.
   assertion holds at whatever resolution the oracle is asked to render at; an earlier
   version used fixed pixels and passed only at the resolution it was written for. The
   corpus is rendered at two scales to prove no file hangs or overruns its buffers.
-  A red image XObject placed through the resource table is checked too, on the same
-  scale-independent fractions.
+  A red image XObject placed through the resource table is checked, on the same
+  scale-independent fractions, and so is an axial shading reached through a pattern — for
+  that one the expectation is the gradient's own closed form evaluated at each pixel's
+  centre rather than a snapshot, so the assertion states what the gradient should be rather
+  than what this renderer last produced.
 - **Fidelity against `mutool`, measured** — the shapes page and the clipped page rendered
   by `mutool` at 150 DPI (the resolution the acceptance criteria name) and compared with
   SSIM. Shapes **0.99829**, clipped **0.99917**, against a bar of 0.95. Both renderings are
   flattened onto one background first, because `mutool` writes an unpainted page as
   transparent and this renderer writes white paper, and comparing raw buffers would compare
   conventions rather than renderers. Skipped cleanly when `mutool` is absent.
+- **Widths against two other renderers** — the standard fonts' metrics are checked by
+  measuring where a real renderer puts each glyph, not by reading the table back. One
+  transcription error was found this way: `fraction` in Helvetica had the width of the URW
+  clone, 278, where Adobe's own metrics say 167, and poppler agrees with Adobe. Every width
+  in every table was then re-checked against the metrics files, and all 1043 agree.
 
 ## Gaps, in the order they block
 
-1. **Text draws nothing.** A glyph run is reported with its font, its bytes and a
-   placement per byte, but no glyph is painted: deciding which bytes of a string are
-   glyphs and how wide each is needs the font and the encoding, and the content layer
-   deliberately refuses to guess. Text is the next substantial piece.
-2. **Tiling patterns and mesh shadings draw nothing.** A shading names one of types 1, 4, 5,
+1. **A clip is honoured as its bounding box.** A clip path can be any shape; what the
+   interpreter records is the rectangle that bounds it, which draws slightly more than it
+   should rather than slightly less. A diagonal clip and a circular one are both boxes now.
+   The renderer needs the real clip region, and the renderer is where it belongs: the
+   interpreter's job is to say *what* was clipped, not to rasterise it.
+2. **Glyphs do not draw.** Advances are real — every width in the built-in tables was
+   checked against two independent renderers and against Adobe's own metrics — but a
+   `Mark::Glyphs` is still skipped, so a page of text is a page with nothing on it. The
+   remaining work is the outlines: TrueType, then CFF and Type 1. One thing must be settled
+   first, though: the text rendering matrix already scales by the font size, while the
+   advance is added unscaled, so the placements and the advance disagree by a factor of the
+   size. Nothing shows it yet because nothing draws.
+3. **JBIG2 and JPEG 2000 have no decoder.** An image needing one is reported by name rather
+   than drawn as a blank rectangle, because a page with a conspicuous hole is a bug report
+   and a page with a missing photograph is a wrong answer. CCITT does decode, through the
+   filter crate.
+4. **Tiling patterns and mesh shadings draw nothing.** A shading names one of types 1, 4, 5,
    6 or 7, or a pattern needs a tiling loop, and each is reported as a note against the mark
    rather than skipped silently, so a page that used one is visibly incomplete instead of
    quietly wrong. Images and axial/radial shadings now draw.
-3. **JBIG2 and JPEG 2000 have no decoder.** An image needing one is reported by name rather
-   than drawn as a blank rectangle (F17, F18). CCITT does decode, through the filter crate.
-4. **A clip is honoured as its bounding box.** A clip path can be any shape; what the
-   interpreter records is the rectangle that bounds it, which draws slightly more than it
-   should rather than slightly less. The renderer needs the real clip region. (The bounds
-   themselves are now transformed correctly — they were being applied as device pixels
-   while the interpreter records them in user space, which was invisible at 72 DPI and
-   wrong at every other scale.)
 5. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the marks the content layer produces.
 6. **An object that came out of an object stream cannot keep its original bytes**,

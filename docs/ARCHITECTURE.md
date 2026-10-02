@@ -40,11 +40,24 @@ space, normalise the corners, then fit and flip. It is one function because the 
 modes are invisible rather than loud — a page drawn upside down is a page drawn
 plausible.
 
-A clip's bounds travel from the interpreter in *user* space and are transformed by the
-mark's own matrix before they mean anything in pixels. That is the same discipline as the
-rest of the placement, and it is worth stating because the two spaces coincide at scale one
-— which is exactly the scale a hand-written fixture is most likely to use, and exactly the
-scale at which a missing transform is invisible.
+## The gradient and the image
+
+Two things on a page are sampled backwards rather than forwards, and it is the same
+technique both times: each pixel is mapped through the *inverse* of the page's
+transformation into the space the thing is defined in, and its value is read from there.
+
+For an image that means asking the unit square which sample of the picture a pixel wants.
+For a shading it means asking the gradient's two endpoints for the parameter at that point.
+In both cases the forward alternative — walking the thing's own space and filling as it goes
+— works only while the thing is axis-aligned, and a page with a diagonal banner or a
+photograph set at an angle is ordinary rather than exotic. Paying one matrix multiply per
+pixel buys having no special case at all.
+
+The same discipline explains the clip, and its history. Clip bounds are recorded by the
+interpreter with the CTM already applied, so the renderer applies only the page placement.
+This is worth writing down because the two spaces coincide under an identity CTM, which is
+every fixture in the repository, so a missing or duplicated transform is invisible exactly
+where a test is most likely to be written.
 
 ## Losslessness
 

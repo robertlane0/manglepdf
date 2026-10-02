@@ -48,18 +48,21 @@ The spine is where the architecture is decided, so it is built first and deeply.
 
 ## Immediate queue
 
-1. **Glyph outlines** (F19–F21): TrueType first via `ttf-parser`, then CFF and Type 1.
-   The advances are already real — a `Tf` reads the font's declared `/Widths` once and the
-   interpreter steps each glyph by its own — so what is left is drawing with them, plus the
-   standard-14 built-in tables for a page that names a font without embedding it.
-2. **The standard-14 substitution in the interpreter**: the built-in tables are verified
-   against an independent renderer, so `Tf` can fall back to them when a page declares no
-   `/Widths`. That replaces the half-em fallback for a named standard font.
-3. **A real clip region** rather than the clip path's bounding box.
+1. **Settle the text scale and then draw glyph outlines** (F19–F21). The placements and the
+   advance currently disagree by a factor of the font size, and until that is resolved
+   nothing can be drawn correctly. Then TrueType outlines, then CFF and Type 1.
+2. **A real clip region** rather than the clip path's bounding box. The renderer is where it
+   belongs: the interpreter's job is to say what was clipped.
+3. **Patterns**: the tiling loop and the colour-space converter, for the painting and
+   shading pattern types.
 4. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
    not going to be built.
-5. **The page tree and the marks into the window**: fill the right-hand region, which is
-   the Inspector's first half.
-6. **Mesh shadings** (types 4–7) and the shading types 1 and 7 that need a pattern colour,
-   or an explicit scope statement.
-7. Tier-A fixtures for the remaining catalogue entries, then Tier B with `SOURCES.md`.
+5. **Fill the Inspector's right-hand region** from the object model, which is the window work
+   that has not been started.
+6. Tier-A fixtures for the remaining catalogue entries, then Tier B with `SOURCES.md`.
+
+Settled and no longer queued: images decode and draw, axial and radial shadings paint, the
+clip bounds are transformed by exactly one matrix, and the standard-14 width tables are
+verified rather than trusted — every one of the 1043 widths was measured against two
+independent renderers and Adobe's own metrics, so nobody should re-derive them from a local
+URW clone.
