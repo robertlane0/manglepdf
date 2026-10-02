@@ -1027,6 +1027,332 @@ fn a_shading_is_painted_through_its_pattern() {
     );
 }
 
+// ── Text, from a real font program ───────────────────────────────────────────
+
+/// TrueType fonts to embed, in the order they are tried.
+///
+/// The first that exists and parses wins, so a machine with a different set of fonts still
+/// runs the oracle comparison rather than skipping it. Every candidate is a real,
+/// complete, unmodified font program. A test that built a font itself would be measuring
+/// this renderer's agreement with a font this renderer was written against, which is not a
+/// comparison — and a *fabricated* outline would render, so the comparison would then
+/// measure nothing at all.
+///
+/// The first entry is Hack, a monospaced face derived from Bitstream Vera, which is what
+/// this machine has: 309 kB.
+const FONT_CANDIDATES: [&str; 5] = [
+    "/usr/share/fonts/TTF/Hack-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
+    "/Library/Fonts/Arial.ttf",
+];
+
+/// The bytes of a TrueType font to embed, or the reason there are none.
+fn true_type_font() -> Result<Vec<u8>, String> {
+    for path in FONT_CANDIDATES {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        // A file that does not parse is worse than no file: the test would go on to
+        // compare a blank page against a drawn one and report a difference between the
+        // renderers rather than between this machine and the candidate list.
+        if mangle_font::Program::new(bytes.clone())
+            .units_per_em()
+            .is_some()
+        {
+            return Ok(bytes);
+        }
+    }
+    Err(format!(
+        "no TrueType font found; looked in {}",
+        FONT_CANDIDATES.join(", ")
+    ))
+}
+
+/// A page with a known string set in an embedded TrueType font.
+///
+/// Everything a viewer needs is here and nothing else is: a font dictionary, a descriptor,
+/// a `/FontFile2` carrying the whole program, and a content stream that shows one string.
+///
+/// The font is embedded whole rather than subset, 309 kB against a few hundred bytes, and
+/// that is the right trade for a fixture. Subsetting is a real feature with a real chance
+/// of being wrong, and a fixture that depended on it would be testing the subsetter as
+/// much as the renderer; a fixture wants the fewest moving parts between the file and the
+/// pixels.
+///
+/// The program is written into the stream as it is, uncompressed, and that is a choice
+/// worth stating. `/FlateDecode` is the obvious way to shrink it and it is what a real
+/// writer does, but this fixture is not testing filters: a page whose font is unreadable
+/// by the oracle would compare a drawn page against a differently-drawn one and the score
+/// would be about the font loader rather than about the outlines. `/Length` is written
+/// correctly, so a reader that believes it has no trouble with binary bytes.
+fn text_page(font: &[u8], text: &str, size: f64) -> Vec<u8> {
+    let mut program = mangle_font::Program::new(font.to_vec());
+    let units = program.units_per_em().unwrap_or(1000);
+    // `/Widths` in thousandths of an em, from the font's own advances, over the ASCII range.
+    // Both renderers read this array, so the pen walks the same distance on both and the
+    // comparison is about glyph shapes rather than about where each put the second letter.
+    let widths: Vec<String> = (32u8..=126)
+        .map(|code| {
+            program
+                .glyph_for_code(u32::from(code))
+                .and_then(|g| program.advance(g))
+                .map(|a| u32::from(a) * 1000 / u32::from(units))
+                .unwrap_or(500)
+                .to_string()
+        })
+        .collect();
+    let widths = widths.join(" ");
+
+    let packed = font.to_vec();
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 8];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        // A 400 point page, which is not a multiple of 0.48 — the resolution a 150 DPI
+        // render divides by — so both renderers round the pixel count the same way. A page
+        // width that lands exactly on a whole number of pixels at 150 DPI is a case where
+        // `ceil` of a product that is a hair over an integer in binary disagrees with the
+        // oracle by one pixel, and a comparison that refuses on a size mismatch would then
+        // measure that rather than the glyphs.
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 400 100] \
+          /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    at[4] = out.len();
+    let content = format!("BT 0 0 0 rg /F1 {size} Tf 18 60 Td ({text}) Tj ET");
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content.as_bytes());
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+
+    at[5] = out.len();
+    out.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /Font /Subtype /TrueType /BaseFont /Embedded /FirstChar 32 \
+             /LastChar 126 /Widths [{widths}] /Encoding /WinAnsiEncoding /FontDescriptor \
+             6 0 R >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    at[6] = out.len();
+    out.extend_from_slice(
+        b"6 0 obj\n<< /Type /FontDescriptor /FontName /Embedded /Flags 32 /FontBBox \
+          [0 -200 1000 800] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 \
+          /StemV 80 /MissingWidth 500 /FontFile2 7 0 R >>\nendobj\n",
+    );
+    at[7] = out.len();
+    let mut file = format!(
+        "7 0 obj\n<< /Length {} /Length1 {} >>\nstream\n",
+        packed.len(),
+        font.len()
+    )
+    .into_bytes();
+    file.extend_from_slice(&packed);
+    file.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&file);
+
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 7\n");
+    for offset in at.iter().take(8).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// The text page, rendered, or the reason there is none.
+fn render_text_page(
+    text: &str,
+    size: f64,
+    scale: f64,
+) -> Result<mangle_render::PageRender, String> {
+    let font = true_type_font()?;
+    let doc = open(text_page(&font, text, size));
+    let all = pages(&doc);
+    let page = all.first().expect("a page");
+    let resources = page
+        .inherited
+        .resources
+        .as_ref()
+        .and_then(|o| doc.resolve_object(o))
+        .and_then(|o| o.as_dict().cloned())
+        .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+        .unwrap_or_default();
+    Ok(render_page(
+        &doc,
+        page,
+        &resources,
+        RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        },
+    ))
+}
+
+/// How much ink is on the page, summed over every pixel.
+fn total_ink(render: &mangle_render::PageRender) -> u64 {
+    (0..render.image.height)
+        .flat_map(|y| (0..render.image.width).map(move |x| (x, y)))
+        .map(|(x, y)| u64::from(darkness(&render.image, x, y)))
+        .sum()
+}
+
+/// A glyph the font does not draw leaves the page worth showing.
+///
+/// A space, and a code no subtable answers, are the common case in a document and are not
+/// failures. The assertion is that the note list stays empty and the letters that *are*
+/// there are drawn: a renderer that reported a missing space on every word would make the
+/// notes the only thing a user ever saw.
+#[test]
+fn a_glyph_with_no_outline_draws_nothing_and_says_nothing() {
+    let spaced = match render_text_page("A A", 48.0, 2.0) {
+        Ok(render) => render,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    assert!(
+        spaced.notes.is_empty(),
+        "a space and two drawn letters are not findings: {:?}",
+        spaced.notes
+    );
+    let tight = render_text_page("AA", 48.0, 2.0).expect("a font");
+
+    // The same two letters, so the same ink, with the spaces only moving them apart. This
+    // is the space drawn: a space has an advance and no outline, and a renderer that gave
+    // it an outline would make this ratio wrong.
+    let (a, b) = (total_ink(&tight) as f64, total_ink(&spaced) as f64);
+    assert!(a > 0.0, "the letters are drawn at all");
+    assert!(
+        (a / b - 1.0).abs() < 0.02,
+        "two letters have the same ink whether or not a space separates them, \
+         got {a} against {b}"
+    );
+}
+
+/// Four times the scale is sixteen times the ink.
+///
+/// Ink is an area, so it goes with the square of the scale: twice the scale is four times
+/// the ink and four times the scale is sixteen. A check expecting a factor of *four* at
+/// four times the scale would be asserting that area does not scale with length — it would
+/// pass on a renderer that drew the same number of pixels at every zoom, and fail on a
+/// correct one. The factor of four is the two-times case, and it is checked too.
+#[test]
+fn glyph_ink_scales_with_the_square_of_the_scale() {
+    let one = match render_text_page("H", 40.0, 1.0) {
+        Ok(render) => render,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let two = render_text_page("H", 40.0, 2.0).expect("a font");
+    let four = render_text_page("H", 40.0, 4.0).expect("a font");
+
+    let (a, b, c) = (
+        total_ink(&one) as f64,
+        total_ink(&two) as f64,
+        total_ink(&four) as f64,
+    );
+    assert!(a > 0.0, "the letter is drawn at all");
+    for (measured, want, scale) in [(b / a, 4.0, 2.0), (c / a, 16.0, 4.0)] {
+        let error = (measured - want).abs() / want;
+        assert!(
+            error < 0.05,
+            "at {scale} times the scale the ink should be {want} times as much; it is \
+             {measured}, which is {:.1}% out",
+            error * 100.0
+        );
+    }
+}
+
+/// The comparison that says the glyphs are the right shape.
+///
+/// A rendering that has never been compared with another renderer is a guess. `mutool` is a
+/// different codebase with a decade of accumulated knowledge of what a page is meant to look
+/// like, and an SSIM against it is a statement about the outlines, the `cmap` lookup, the em
+/// scale, the placement matrix and the fill rule all at once, and about nothing else.
+#[test]
+fn our_glyphs_agree_with_mutools() {
+    if mutool().is_none() {
+        eprintln!("skipped: mutool is not installed");
+        return;
+    }
+    let font = match true_type_font() {
+        Ok(font) => font,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let text = "Hamburgefonstiv";
+    let dir = std::env::temp_dir().join("mangle-render-oracle");
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let pdf = dir.join("text.pdf");
+    std::fs::write(&pdf, text_page(&font, text, 36.0)).expect("a file to render");
+
+    let scale = 150.0 / 72.0;
+    let ours = render_text_page(text, 36.0, scale).expect("a font");
+    assert!(
+        ours.notes.is_empty(),
+        "an embedded font should draw without complaint: {:?}",
+        ours.notes
+    );
+    let theirs_path = dir.join("text.pam");
+    let Some(data) = mutool_render(&pdf, scale, &theirs_path) else {
+        eprintln!("skipped: mutool could not render the page");
+        return;
+    };
+    let Some((w, h, depth, body)) = read_pam(&data) else {
+        eprintln!("skipped: could not read mutool's output");
+        return;
+    };
+    let theirs = flatten_onto_paper(&pam_to_image(w, h, depth, body));
+
+    // mutool must have drawn the text too, or this compares a blank page against a drawn
+    // one and the score says nothing at all.
+    let mut their_ink = 0u64;
+    for y in 0..theirs.height {
+        for x in 0..theirs.width {
+            their_ink += u64::from(darkness(&theirs, x, y));
+        }
+    }
+    assert!(
+        their_ink > 0,
+        "mutool drew no text, so there is nothing here to compare against"
+    );
+
+    let comparison = compare(&ours.image, &theirs, &SsimOptions::default());
+    assert!(
+        comparison.is_valid(),
+        "the comparison did not happen: {:?}",
+        comparison.refused
+    );
+    let metrics = &comparison.metrics;
+    eprintln!(
+        "text page: {} — our ink {}, theirs {}",
+        metrics.summary(),
+        total_ink(&ours),
+        their_ink
+    );
+    assert!(
+        metrics.meets_fidelity_bar(0.95),
+        "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",
+        metrics.ssim,
+        metrics.summary()
+    );
+}
+
 /// A clip under a scaled coordinate system scales with it.
 ///
 /// The interpreter's bounds already carry the CTM, so the renderer must not apply it again.

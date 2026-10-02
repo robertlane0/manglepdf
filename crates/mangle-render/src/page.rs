@@ -17,9 +17,11 @@
 //! file can ask for a page the size of a city block, so the scale is bounded and a
 //! request beyond the bound is answered at the bound rather than by exhausting memory.
 
-use mangle_content::{ContentStream, FillRule as ContentRule, Mark, Matrix, Resources, run_with};
+use mangle_content::{
+    ContentStream, FillRule as ContentRule, Mark, Matrix, PathSegment, Resources, run_with,
+};
 use mangle_doc::Page;
-use mangle_syntax::{Document, Object, Rect as PageRect};
+use mangle_syntax::{Document, Object, Rect as PageRect, stream::decode_stream};
 
 use crate::image::{self, Raster};
 use crate::shading::{self, Shading};
@@ -266,7 +268,14 @@ pub fn render_page(
         (pixels_h * shrink).ceil().max(1.0) as usize,
     );
 
-    let placement = Placement::fit(&crop, size, scale, rotate);
+    // The canvas is already `points × scale` pixels wide, so the page is fitted into it
+    // with a scale of one. Passing `scale` here as well would apply it twice and draw the
+    // page at the *square* of the zoom, hanging off the sides of its own canvas by a
+    // factor of `scale`. That is invisible on a fixture whose content is symmetric about
+    // the centre of the page — a quadrant in each corner lands in a quadrant either way —
+    // and obvious on anything that is not: a glyph near the left margin ends up off the
+    // edge of the page and is not drawn at all.
+    let placement = Placement::fit(&crop, size, 1.0, rotate);
     let mut render = PageRender {
         image: Image::filled(size.0, size.1, options.paper),
         scale,
@@ -296,6 +305,10 @@ pub fn render_page(
     // closure's `Err` and is appended by `draw_mark` itself.
     let mut lookup = |name: &str| image_for(name, resources, doc);
     let mut shade_lookup = |name: &str| shading_for(name, resources, doc);
+    // The font lookup is beside the other two rather than inside `draw_mark`, for the same
+    // reason: the document and the page's resources are borrowed here, once, and the
+    // drawing code only ever sees a name.
+    let mut font_lookup = |name: &str| font_for(name, resources, doc);
     for record in &executed.records {
         let to_device = placement.matrix.concat(record.ctm);
         draw_mark(
@@ -307,6 +320,7 @@ pub fn render_page(
             &mut render.notes,
             &mut lookup,
             &mut shade_lookup,
+            &mut font_lookup,
         );
         render.marks += 1;
     }
@@ -408,6 +422,90 @@ fn image_for(name: &str, resources: &Resources, doc: &Document) -> Result<Raster
 /// whoever owns the document and the page's resources.
 type ShadingLookup<'a> = &'a mut dyn FnMut(&str) -> Result<(Shading, Matrix), String>;
 
+/// A font resource's glyph outlines, and how big its em is.
+///
+/// `units_per_em` is carried alongside the program rather than left to be asked for
+/// separately, because the conversion from a font's own units to ems is the one number
+/// that decides whether a glyph comes out at the size the page asked for, and a caller
+/// that had to derive it might get it wrong.
+pub struct FontProgram {
+    /// The font, with its outlines cached by glyph number.
+    program: mangle_font::Program,
+    /// The size of the font's em, in the font's own units.
+    pub units_per_em: u16,
+}
+
+impl std::fmt::Debug for FontProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FontProgram")
+            .field("bytes", &self.program.bytes().len())
+            .field("units_per_em", &self.units_per_em)
+            .finish()
+    }
+}
+
+/// Find and read the font program a font resource names.
+///
+/// A `/FontFile2` stream is the TrueType program, and it is reached through the font's
+/// `/FontDescriptor` rather than directly: the descriptor is where a file says how to
+/// interpret the program, and going around it would mean guessing. The stream is decoded
+/// through the same path `image::decode` uses, because a font program is compressed
+/// exactly as an image is and a second filter chain would be a second set of bugs.
+///
+/// A font with no `/FontFile2` is not a failure. The standard fourteen have none by
+/// definition, and a document that names one without embedding it is a document whose
+/// glyphs come from somewhere else — a substitution, or a font of its own that this
+/// does not draw. Either way the reason belongs in the report, and the page is still
+/// worth showing.
+fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontProgram, String> {
+    let Some(object) = resources.fonts.get(name).cloned() else {
+        return Err(format!(
+            "the page names a font `/{name}` that its resources do not define"
+        ));
+    };
+    let resolved = doc.resolve_object(&object).unwrap_or(object);
+    let Object::Dict(font) = resolved else {
+        return Err(format!("the font `/{name}` is not a dictionary"));
+    };
+    let descriptor = font
+        .get("FontDescriptor")
+        .map(|o| doc.resolve_object(o).unwrap_or_else(|| o.clone()))
+        .unwrap_or(Object::Null);
+    let Object::Dict(descriptor) = descriptor else {
+        return Err(format!(
+            "the font `/{name}` has no `/FontDescriptor`, so there is nothing to read a \
+             font program from"
+        ));
+    };
+    let Some(file) = descriptor.get("FontFile2") else {
+        return Err(format!(
+            "the font `/{name}` is not embedded, so it has no outlines of its own to draw"
+        ));
+    };
+    let file = doc.resolve_object(file).unwrap_or_else(|| file.clone());
+    let Object::Stream(stream) = file else {
+        return Err(format!("the `/FontFile2` of `/{name}` is not a stream"));
+    };
+    // The filters below a font program are the same filters below an image, and they are
+    // the reason this is `decode_stream` rather than `stream.raw`.
+    let decoded = decode_stream(&stream);
+    let mut program = mangle_font::Program::new(decoded.data);
+    let units_per_em = program
+        .units_per_em()
+        .ok_or_else(|| format!("the `/FontFile2` of `/{name}` is not a font this can read"))?;
+    Ok(FontProgram {
+        program,
+        units_per_em,
+    })
+}
+
+/// A font lookup: a font resource name to the outlines it names.
+///
+/// Passed into `draw_mark` for the same reason as the image lookup, and with the same
+/// shape, so that the document and the page's resources stay borrowed by whoever owns
+/// them rather than by a function that has to reach into both.
+type FontLookup<'a> = &'a mut dyn FnMut(&str) -> Result<FontProgram, String>;
+
 /// Draw one mark.
 #[allow(clippy::too_many_arguments)]
 fn draw_mark(
@@ -419,6 +517,7 @@ fn draw_mark(
     notes: &mut Vec<String>,
     images: &mut dyn FnMut(&str) -> Result<Raster, String>,
     shadings: ShadingLookup<'_>,
+    fonts: FontLookup<'_>,
 ) {
     match mark {
         Mark::Path {
@@ -576,9 +675,81 @@ fn draw_mark(
                 );
             }
         },
-        Mark::Glyphs { .. } => {
-            // Glyph drawing needs font metrics, which the content layer deliberately does
-            // not guess at. Saying so is better than drawing boxes.
+        Mark::Glyphs {
+            font,
+            text,
+            fill,
+            placements,
+            ..
+        } => {
+            // `Tf` with no font means the state is damaged and the bytes name nothing.
+            let Some(name) = font.as_deref().filter(|n| !n.is_empty()) else {
+                return;
+            };
+            let mut program = match fonts(name) {
+                Ok(program) => program,
+                Err(reason) => {
+                    // Once per run rather than once per page. A page of prose in a
+                    // non-embedded font would otherwise produce a note per line, which
+                    // buries the one finding that mattered.
+                    if !notes.contains(&reason) {
+                        notes.push(reason);
+                    }
+                    return;
+                }
+            };
+            let Some(rgba) = fill.to_rgba(None) else {
+                notes.push(format!(
+                    "the colour text is painted in {} could not be converted, so no text \
+                     on the page in that colour was drawn",
+                    fill.space.name
+                ));
+                return;
+            };
+            let ink = rgba.to_rgba8(record.fill_alpha);
+            // `text` is the character codes and `placements` is one matrix per code, so
+            // the two zip; a run whose code has no placement is not drawn, which is what
+            // a truncated record means rather than a glyph at the origin.
+            for (code, glyph_matrix) in text.iter().zip(placements.iter()) {
+                // No outline is a space, or a code the font does not have. Both are the
+                // common case and neither is a failure: a page of prose is mostly spaces
+                // and a report listing one note per space is a report nobody reads.
+                let Some((outline, _)) = program
+                    .program
+                    .outline_for_code(u32::from(*code))
+                    .filter(|(o, _)| !o.is_empty())
+                else {
+                    continue;
+                };
+                // The outline is in ems and the placement matrix carries the font size as
+                // its innermost factor, so the two compose directly — there is no
+                // `units_per_em` step here, because the font has already divided by it.
+                let to_device = placement.concat(*glyph_matrix);
+                let segments: Vec<PathSegment> = outline
+                    .segments
+                    .iter()
+                    .map(|s| match *s {
+                        mangle_font::Segment::Move(x, y) => PathSegment::Move(x, y),
+                        mangle_font::Segment::Line(x, y) => PathSegment::Line(x, y),
+                        mangle_font::Segment::Curve(a, b, c, d, e, f) => {
+                            PathSegment::Curve(a, b, c, d, e, f)
+                        }
+                    })
+                    .collect();
+                let polygon = transform_path(&segments, &to_device);
+                if polygon.is_empty() {
+                    continue;
+                }
+                if let Some(bounds) = polygon.bounds() {
+                    device.clip_to(bounds);
+                }
+                // Non-zero, because that is what TrueType outlines are wound for: an
+                // outer contour and a hole wound the other way both come out filled, and
+                // a point inside two same-wound contours is inside the glyph, which is
+                // what the data says it is.
+                device.fill_polygon(&polygon, FillRule::NonZero, ink);
+                device.reset_clip();
+            }
         }
     }
 }
@@ -590,7 +761,9 @@ pub fn viewport_for(page: &Page, canvas: (usize, usize), scale: f64) -> Viewport
     let placement = Placement::fit(
         &crop,
         canvas,
-        effective_scale(scale),
+        // As in `render_page`: the canvas is already in pixels, so the fit is into it and
+        // not into a page-sized box that the zoom is then applied to.
+        1.0,
         page.inherited.rotation(),
     );
     Viewport {
@@ -870,6 +1043,54 @@ mod tests {
             render.image.width, 209,
             "100 points at 150 DPI is 208.33 pixels, which rounds up"
         );
+    }
+
+    /// A page's own corner lands on the canvas's corner, at every zoom.
+    ///
+    /// The assertion a page fitted into a canvas cannot fail unless the zoom is applied
+    /// twice: if the page is drawn at the square of the scale it is bigger than the canvas
+    /// it was fitted into, and its corners are outside it. A fixture whose content is
+    /// symmetric about the centre of the page — a shape in each quadrant, a clip down the
+    /// middle — hides this completely, because a centred, over-large page still puts each
+    /// quadrant in a quadrant. So this checks the corners, which do not move.
+    #[test]
+    fn the_pages_corners_land_on_the_canvases_corners() {
+        for scale in [0.5, 1.0, 2.0, 4.0, 150.0 / 72.0] {
+            let doc = Document::open(page_bytes(100), mangle_syntax::OpenOptions::default())
+                .expect("the file opens");
+            let page = page_of_size(100);
+            let render = render_page(
+                &doc,
+                &page,
+                &Resources::default(),
+                RenderOptions {
+                    scale,
+                    ..RenderOptions::default()
+                },
+            );
+            let (w, h) = (render.image.width as f64, render.image.height as f64);
+            // The page is square and the canvas is square, so it fills it exactly.
+            for (fx, fy, which) in [(0.0, 0.0, "top left"), (1.0, 1.0, "bottom right")] {
+                let x = ((w - 1.0) * fx).round() as usize;
+                let y = ((h - 1.0) * fy).round() as usize;
+                let got = render.image.get(x, y);
+                assert_eq!(
+                    got.map(|p| p[0]),
+                    Some(255),
+                    "the {which} corner of a blank page is paper at scale {scale}, \
+                     image {}x{scale}",
+                    render.image.width
+                );
+            }
+            // And the page occupies the canvas rather than overflowing it, which is the
+            // property a centred over-large page also satisfies only by accident. The
+            // margin is what tells them apart: a page fitted with the zoom applied twice is
+            // twice as big as the canvas and has no margin at all.
+            assert!(
+                (w - h).abs() < 1.0,
+                "a square page makes a square canvas at scale {scale}, got {w} by {h}"
+            );
+        }
     }
 
     /// A one-page file of the given size in points, with no content, as bytes.

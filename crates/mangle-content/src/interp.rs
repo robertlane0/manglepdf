@@ -41,6 +41,14 @@ pub enum Mark {
         size: f64,
         /// The raw string, before any encoding is applied.
         text: Vec<u8>,
+        /// The fill colour the text was shown in, which is the non-stroking colour that
+        /// was current rather than a property of the glyphs.
+        ///
+        /// A path carries its own colours because `re`/`f` names them. Text does not: `Tj`
+        /// takes no colour and paints in whatever `g`/`rg`/`k` last set, so without this a
+        /// renderer would have to guess, and black is a guess that is wrong on every page
+        /// with coloured text on it.
+        fill: Colour,
         /// The bytes of each string operand, in order.
         ///
         /// Separate from the mark's own span, which runs from the first operand to the
@@ -49,6 +57,10 @@ pub enum Mark {
         /// a list.
         text_spans: Vec<Range<usize>>,
         /// The matrix each glyph is placed by, one per glyph.
+        ///
+        /// Each is the full text rendering matrix — `ctm × text_matrix × [Tfs·Th 0 0 Tfs 0
+        /// Ts]` — so a glyph's outline, which is in ems, is drawn through this and
+        /// through nothing else but the page placement.
         placements: Vec<Matrix>,
     },
     /// An image placed by `Do` or an inline image.
@@ -849,6 +861,7 @@ impl Context<'_> {
                 font: self.state.text.font.clone(),
                 size: self.state.text.size,
                 text,
+                fill: self.state.fill.clone(),
                 text_spans,
                 placements,
             },

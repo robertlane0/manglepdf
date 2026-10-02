@@ -8,7 +8,7 @@ Where the work actually is. Updated whenever a milestone moves.
 |---|---|---|
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
-| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths into pixels with analytic coverage. Images and shadings draw; text and patterns still draw nothing |
+| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths and its embedded-TrueType glyphs into pixels with analytic coverage. Images and shadings draw; patterns and the non-TrueType outlines still draw nothing |
 | **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint. Mesh shadings, tiling patterns and transparency do not |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
@@ -141,12 +141,14 @@ Where the work actually is. Updated whenever a milestone moves.
    should rather than slightly less. A diagonal clip and a circular one are both boxes now.
    The renderer needs the real clip region, and the renderer is where it belongs: the
    interpreter's job is to say *what* was clipped, not to rasterise it.
-2. **Glyphs do not draw.** Advances are real — every width in the built-in tables was
-   checked against two independent renderers and against Adobe's own metrics — and the
-   placements now agree with `mutool` on every combination of size, `Tz`, `Tc`, `Tw`,
-   rise and `TJ` kerning, so the text model is settled. A `Mark::Glyphs` is still skipped
-   though, so a page of text is a page with nothing on it. What remains is the outlines:
-   TrueType, then CFF and Type 1.
+2. **CFF and Type 1 glyphs do not draw.** Embedded TrueType does: `mangle-font` reads the
+   `/FontFile2`, walks the glyph — composites come out whole, because `ttf-parser` follows
+   the component list — and the renderer fills the outline through the same filler a path
+   uses, with the glyph's own text rendering matrix. A page of text in an embedded
+   TrueType font scores 0.962 against `mutool` at 150 DPI, so this is compared rather than
+   assumed. What remains: the outlines of a `/FontFile3` (CFF, and OpenType with `CFF `),
+   the standard fourteen, and Type 0 with Identity-H, whose two-byte codes the interpreter
+   does not yet split.
 3. **JBIG2 and JPEG 2000 have no decoder.** An image needing one is reported by name rather
    than drawn as a blank rectangle, because a page with a conspicuous hole is a bug report
    and a page with a missing photograph is a wrong answer. CCITT does decode, through the
@@ -180,3 +182,12 @@ Where the work actually is. Updated whenever a milestone moves.
 - A full save copies the original header version, but the cross-reference and trailer are
   necessarily rebuilt: a rewrite moves every object, so their offsets change. Every
   *object* keeps its bytes, which a test proves across the whole corpus.
+- `mangle-filters::deflate` emits a raw deflate stream (RFC 1951), not the zlib wrapper
+  (RFC 1950) that PDF's `/FlateDecode` names. Our own `inflate` tolerates the missing
+  wrapper, so nothing here has noticed, but a `/FlateDecode` stream we *write* is not
+  readable by anything else. Every filter we produce needs checking against a real reader
+  before the writer ships.
+- A page's pixel buffer is `ceil(points × scale)` on each side, and a product that lands a
+  hair over a whole number in binary gives one pixel more than the comparison oracles give.
+  It only shows on a page whose width is a whole number of pixels at the requested
+  resolution, and the oracle comparison refuses rather than comparing different sizes.
