@@ -59,6 +59,17 @@ Where the work actually is. Updated whenever a milestone moves.
   four numbers because they fail in different ways. SSIM alone would pass a page that is
   missing a paragraph of text. A comparison also returns a heatmap, so a failure can be
   looked at rather than only measured.
+
+  **Images** decode and draw. The parts that are easy to get wrong are the parts this does
+  most about: `/Decode` maps the *stored range* onto the colour space and is how a file
+  writes a negative, packed sub-byte samples are padded *per row* so the byte holding
+  sample *n* depends on which row it is in, an `/ImageMask` is a stencil rather than a
+  picture, and an `/SMask` is a separate image whose luminance is the alpha. Placement maps
+  each pixel *back* through the inverse transformation, which is what makes a rotated image
+  come out the right shape instead of a staircase. Colour spaces covered: DeviceGray,
+  DeviceRGB, DeviceCMYK, CalGray, CalRGB, ICCBased (by its `/N`) and Indexed. Lab and
+  Separation are refused rather than guessed, because neither can be converted without data
+  this does not have.
 - **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`.
   This is how "what does ManglePDF think of this file?" is asked without a window.
 - **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one
@@ -70,7 +81,7 @@ Where the work actually is. Updated whenever a milestone moves.
 
 ## Tests
 
-429, none ignored, no warnings. Six kinds matter:
+463, none ignored, no warnings. Six kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -90,6 +101,8 @@ Where the work actually is. Updated whenever a milestone moves.
   assertion holds at whatever resolution the oracle is asked to render at; an earlier
   version used fixed pixels and passed only at the resolution it was written for. The
   corpus is rendered at two scales to prove no file hangs or overruns its buffers.
+  A red image XObject placed through the resource table is checked too, on the same
+  scale-independent fractions.
 - **Fidelity against `mutool`, measured** — the shapes page and the clipped page rendered
   by `mutool` at 150 DPI (the resolution the acceptance criteria name) and compared with
   SSIM. Shapes **0.99829**, clipped **0.99917**, against a bar of 0.95. Both renderings are
@@ -103,18 +116,19 @@ Where the work actually is. Updated whenever a milestone moves.
    placement per byte, but no glyph is painted: deciding which bytes of a string are
    glyphs and how wide each is needs the font and the encoding, and the content layer
    deliberately refuses to guess. Text is the next substantial piece.
-2. **Images, shadings and patterns draw nothing.** Each is reported as a note against the
-   mark rather than skipped silently, so a page that used one is visibly incomplete
-   instead of quietly wrong.
-3. **A clip is honoured as its bounding box.** A clip path can be any shape; what the
+2. **Shadings and patterns draw nothing.** Each is reported as a note against the mark
+   rather than skipped silently, so a page that used one is visibly incomplete instead of
+   quietly wrong. Images now draw; shadings (F15) and patterns do not.
+3. **JBIG2 and JPEG 2000 have no decoder.** An image needing one is reported by name rather
+   than drawn as a blank rectangle (F17, F18). CCITT does decode, through the filter crate.
+4. **A clip is honoured as its bounding box.** A clip path can be any shape; what the
    interpreter records is the rectangle that bounds it, which draws slightly more than it
    should rather than slightly less. The renderer needs the real clip region. (The bounds
    themselves are now transformed correctly — they were being applied as device pixels
    while the interpreter records them in user space, which was invisible at 72 DPI and
    wrong at every other scale.)
-4. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
+5. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the marks the content layer produces.
-5. **JBIG2 and JPX are not implemented.**
 6. **An object that came out of an object stream cannot keep its original bytes**,
    because it had none: it was compressed with everything else in its container. A full
    save writes it as a direct object, which every reader accepts but which is a

@@ -19,8 +19,9 @@
 
 use mangle_content::{ContentStream, FillRule as ContentRule, Mark, Matrix, Resources, run_with};
 use mangle_doc::Page;
-use mangle_syntax::{Document, Rect as PageRect};
+use mangle_syntax::{Document, Object, Rect as PageRect};
 
+use crate::image::{self, Raster};
 use crate::{
     Device, FillRule, Image, LineCap, LineJoin, Polygon, Rect, StrokeStyle, Viewport,
     transform_path,
@@ -288,6 +289,11 @@ pub fn render_page(
             span.start
         ));
     }
+    // The image lookup borrows the page's resources and the document and nothing else. It
+    // must not capture the notes: they are passed into `draw_mark` on the next line, and a
+    // second live borrow of them would not compile. The failure reason comes back as the
+    // closure's `Err` and is appended by `draw_mark` itself.
+    let mut lookup = |name: &str| image_for(name, resources, doc);
     for record in &executed.records {
         let to_device = placement.matrix.concat(record.ctm);
         draw_mark(
@@ -296,6 +302,7 @@ pub fn render_page(
             &to_device,
             record,
             &mut render.notes,
+            &mut lookup,
         );
         render.marks += 1;
     }
@@ -303,13 +310,41 @@ pub fn render_page(
     render
 }
 
+/// Find and decode the image a `Do` names.
+///
+/// A page's resource table holds the XObjects by name, and an XObject that is not an image
+/// is a note rather than a failure: a form XObject is named by `Do` too, and reaching one is
+/// a later step than this.
+fn image_for(name: &str, resources: &Resources, doc: &Document) -> Result<Raster, String> {
+    let Some(object) = resources.xobjects.get(name).cloned() else {
+        return Err(format!(
+            "the page names an image `/{name}` that its resources do not define"
+        ));
+    };
+    let resolved = doc.resolve_object(&object).unwrap_or(object);
+    let Object::Stream(stream) = resolved else {
+        return Err(format!("`/{name}` is named by `Do` but is not a stream"));
+    };
+    let resolver = |o: &Object| doc.resolve_object(o);
+    let mut notes = Vec::new();
+    image::decode(&stream, &resolver, &mut notes).ok_or_else(|| {
+        if notes.is_empty() {
+            format!("the image `/{name}` could not be decoded")
+        } else {
+            notes.join("; ")
+        }
+    })
+}
+
 /// Draw one mark.
+#[allow(clippy::too_many_arguments)]
 fn draw_mark(
     device: &mut Device,
     mark: &Mark,
     to_device: &Matrix,
     record: &mangle_content::Record,
     notes: &mut Vec<String>,
+    images: &mut dyn FnMut(&str) -> Result<Raster, String>,
 ) {
     match mark {
         Mark::Path {
@@ -402,10 +437,28 @@ fn draw_mark(
         Mark::Shading { .. } => {
             notes.push("a shading was found but no shading renderer exists yet".into());
         }
-        Mark::Image { name, .. } => {
-            let what = name.as_deref().unwrap_or("an inline image");
-            notes.push(format!("{what} was found but no image renderer exists yet"));
-        }
+        Mark::Image { name, .. } => match name.as_deref() {
+            Some(name) => match images(name) {
+                Ok(raster) => {
+                    // The image's own space is the unit square, so the mark's
+                    // transformation is all that is needed to place it. The fill colour is
+                    // what paints an image mask's zero bits.
+                    let fill = mangle_content::Colour::black().to_rgba(None);
+                    image::draw(device, &raster, to_device, record.fill_alpha, fill);
+                    device.reset_clip();
+                }
+                Err(reason) => notes.push(reason),
+            },
+            None => {
+                // An inline image's samples are in the content stream rather than in a
+                // resource, so the content layer has to carry them out; it does not yet.
+                notes.push(
+                    "an inline image was found and not drawn: its samples live in the content \
+                     stream and are not carried out of it yet"
+                        .into(),
+                );
+            }
+        },
         Mark::Glyphs { .. } => {
             // Glyph drawing needs font metrics, which the content layer deliberately does
             // not guess at. Saying so is better than drawing boxes.
@@ -734,7 +787,7 @@ mod tests {
         let catalog = doc.catalog().expect("a catalogue");
         let root = catalog
             .get("Pages")
-            .and_then(mangle_syntax::object::Object::as_ref_id)
+            .and_then(Object::as_ref_id)
             .expect("the page tree");
         mangle_doc::PageTree::build(doc, root)
             .expect("a page tree")
@@ -790,7 +843,7 @@ mod tests {
         let catalog = doc.catalog().expect("a catalogue");
         let root = catalog
             .get("Pages")
-            .and_then(mangle_syntax::object::Object::as_ref_id)
+            .and_then(Object::as_ref_id)
             .expect("the page tree");
         mangle_doc::PageTree::build(&doc, root)
             .expect("a page tree")

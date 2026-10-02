@@ -793,3 +793,93 @@ fn a_reference_resolves_to_its_object() {
         "and the one-step resolver finds it too"
     );
 }
+
+/// A 100 by 100 point page with a two-by-two red image XObject filling its left half.
+///
+/// Four samples rather than a photograph: the point is that the samples are read, the
+/// colour space is honoured and the placement matrix is applied, not that anything is
+/// pretty.
+fn image_page() -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 6];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] \
+          /Resources << /XObject << /Im0 5 0 R >> >> >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    // The unit square scaled to the left half of the page.
+    let content = b"q 50 0 0 100 0 0 cm /Im0 Do Q";
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content);
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    // A two by two image, every sample pure red.
+    at[5] = out.len();
+    let samples = [255u8, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0];
+    let mut image = format!(
+        "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2 \
+         /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n",
+        samples.len()
+    )
+    .into_bytes();
+    image.extend_from_slice(&samples);
+    image.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&image);
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 5\n");
+    for offset in at.iter().take(6).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// An image XObject, drawn through the page's resource table.
+#[test]
+fn an_image_is_drawn_through_the_resources() {
+    let bytes = image_page();
+    let doc = open(bytes);
+    let all = pages(&doc);
+    let page = all.first().expect("a page");
+    let resources = page
+        .inherited
+        .resources
+        .as_ref()
+        .and_then(|o| doc.resolve_object(o))
+        .and_then(|o| o.as_dict().cloned())
+        .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+        .unwrap_or_default();
+    assert_eq!(resources.xobjects.len(), 1, "the page defines one image");
+
+    let render = render_page(
+        &doc,
+        page,
+        &resources,
+        RenderOptions {
+            scale: 1.0,
+            ..RenderOptions::default()
+        },
+    );
+    assert!(
+        render.notes.is_empty(),
+        "the image should draw without complaint: {:?}",
+        render.notes
+    );
+    // A 100 by 100 point page with a red image filling its left half.
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.45, 0.95, [255, 0, 0]),
+        "the image fills the left half in red"
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.55, 0.05, 0.95, 0.95, [255, 255, 255]),
+        "and the right half is untouched paper"
+    );
+}

@@ -43,6 +43,7 @@
 
 pub mod compare;
 pub mod coverage;
+pub mod image;
 pub mod page;
 
 pub use compare::{Comparison, SsimOptions, compare, ssim};
@@ -934,6 +935,18 @@ impl Device {
 
     pub fn into_image(self) -> Image {
         self.image
+    }
+
+    /// Write one pixel, ignoring a position outside the image.
+    ///
+    /// An image placed at an angle writes into the bounding box of its transformed unit
+    /// square, which reaches past the page's edge, and the bounds check belongs here rather
+    /// than in every caller.
+    pub fn put(&mut self, x: usize, y: usize, rgba: [u8; 4]) {
+        if x >= self.image.width || y >= self.image.height {
+            return;
+        }
+        self.image.put(x, y, rgba);
     }
 
     /// Narrow the clip. A clip to nothing means nothing further is drawn, which is a

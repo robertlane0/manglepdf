@@ -48,14 +48,15 @@ The spine is where the architecture is decided, so it is built first and deeply.
 
 ## Immediate queue
 
-1. **Images** (F16), then shadings (F15): decode Flate and DCTDecode into RGBA, place
-   through the CTM on the unit square, honour `/SMask`. `zune-jpeg` is already a
-   dependency, and both are verifiable pixel-for-pixel against `mutool`.
+1. **Shadings** (F15): axial and radial are pure maths and `G3.2` wants analytic
+   expectations for their sample points, so they are checkable by formula. Then patterns,
+   which need a tiling loop.
 2. **Glyph outlines** (F19–F21): TrueType first via `ttf-parser`, then CFF and Type 1.
-   Advances come from `/Widths` for existing text, which needs no font program at all.
+   Advances for *existing* text come from `/Widths` and need no font program at all, which
+   is what the charter asks for.
 3. **A real clip region** rather than the clip path's bounding box.
-4. **The page tree and the marks into the window**: fill the right-hand region, which is
+4. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
+   not going to be built.
+5. **The page tree and the marks into the window**: fill the right-hand region, which is
    the Inspector's first half.
-5. Tier-A fixtures for the remaining catalogue entries: fonts, colour, transparency,
-   shadings, patterns, images, CCITT, JBIG2, JPX, forms and the scale files.
-6. Tier B: a real-world corpus with `SOURCES.md`.
+6. Tier-A fixtures for the remaining catalogue entries, then Tier B with `SOURCES.md`.
