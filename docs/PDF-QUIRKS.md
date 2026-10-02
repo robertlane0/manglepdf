@@ -44,6 +44,23 @@ the object with `/Type /Catalog`.
 
 ## Filters
 
+**`/FlateDecode` means zlib, not deflate.** The data is a two-byte header, the RFC 1951
+stream, and a four-byte Adler-32 of the *uncompressed* input. Writing the bare deflate
+stream under that filter name produces a file that reads back in the writer's own decoder
+and in no other program, which is why no round trip catches it: every round trip inflates
+our output with our own reader. `mutool` calls it `zlib error: unknown compression method`.
+
+**A zlib header is `CMF` and `FLG`, and `CMF * 256 + FLG` must be a multiple of 31.** The
+method is the low nibble of `CMF` — 8 for deflate — and its high nibble is the window size
+as `log2(bytes) - 8`, so 7 is the 32 KiB window PDF requires. `FLG` carries the level, a
+dictionary flag, and a check value that makes the pair divisible by 31; because 256 is
+`8*31 + 8`, that check fails on a byte-swapped or misaligned header and costs one modulo.
+
+**A zlib stream with no wrapper is common enough to decode anyway.** Some producers write
+bare deflate under `/FlateDecode`, and so did this project until it did not. Decoding both
+forms is the right answer; a reader that insists on the wrapper loses a page, and one that
+strips two bytes on sight loses it the other way.
+
 **Flate has a hard expansion ceiling of about 1032:1.** A match returns at most 258
 bytes for a few bits of code. A ratio cap above that cannot bite a real file, which is
 why `MAX_EXPANSION_RATIO` is 1200 rather than 10.

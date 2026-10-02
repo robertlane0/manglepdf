@@ -29,7 +29,9 @@ Where the work actually is. Updated whenever a milestone moves.
   rebuild its structure — two different questions, both answered.
 - **`mangle-filters`** — in-house inflate and deflate, LZW, RunLength, ASCII85, ASCIIHex,
   PNG and TIFF predictors, CCITT G3-1D/2D and G4. Every decoder returns partial output
-  with a note rather than failing.
+  with a note rather than failing. What we write is a zlib stream, because `/FlateDecode`
+  names one, and a file no other program can open is the one thing a PDF writer must not
+  produce.
 - **`mangle-crypto`** — RC4, AES-CBC, MD5, SHA-1, SHA-2. The standard security handler
   for revisions 2 to 6, checked against dictionaries an independent implementation
   produced.
@@ -182,11 +184,14 @@ Where the work actually is. Updated whenever a milestone moves.
 - A full save copies the original header version, but the cross-reference and trailer are
   necessarily rebuilt: a rewrite moves every object, so their offsets change. Every
   *object* keeps its bytes, which a test proves across the whole corpus.
-- `mangle-filters::deflate` emits a raw deflate stream (RFC 1951), not the zlib wrapper
-  (RFC 1950) that PDF's `/FlateDecode` names. Our own `inflate` tolerates the missing
-  wrapper, so nothing here has noticed, but a `/FlateDecode` stream we *write* is not
-  readable by anything else. Every filter we produce needs checking against a real reader
-  before the writer ships.
+- `mangle-filters::deflate` writes a **zlib** stream (RFC 1950) — the two-byte header, the
+  deflate data, the Adler-32 of the original — which is what `/FlateDecode` names, so a
+  file this project writes is readable by another program. `deflate_raw` is the bare RFC 1951
+  form for a caller that wants it, and `inflate` accepts both, because files in the wild
+  carry a wrapper and, occasionally, do not. `qpdf --check`, `mutool draw` and `pdfinfo` all
+  read a `/FlateDecode` stream we write; the same file written as a bare deflate stream is
+  rejected by all three. Every other filter we produce still needs the same checking before
+  the writer ships.
 - A page's pixel buffer is `ceil(points × scale)` on each side, and a product that lands a
   hair over a whole number in binary gives one pixel more than the comparison oracles give.
   It only shows on a page whose width is a whole number of pixels at the requested

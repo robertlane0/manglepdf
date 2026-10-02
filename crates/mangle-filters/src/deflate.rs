@@ -6,12 +6,18 @@
 //!
 //! One block is emitted per ~16k tokens, choosing whichever of stored / fixed / dynamic
 //! Huffman is smallest. The result is deterministic: no timing, no randomness.
+//!
+//! Two entry points, because PDF's `/FlateDecode` names zlib and not deflate:
+//! [`deflate`] writes the zlib stream a PDF wants and [`deflate_raw`] writes the bare
+//! RFC 1951 data underneath it.
 
 // Direct indexing is used throughout this file: every index is either masked to a
 // table width or produced by a loop bounded by the length of the same buffer, so a
 // checked access would add noise without adding safety. The surrounding code is
 // still panic-free: see docs/PDF-QUIRKS.md for the callers' tolerance rules.
 #![allow(clippy::indexing_slicing)]
+
+use crate::zlib;
 
 const MAX_BITS: u8 = 15;
 
@@ -423,9 +429,31 @@ fn hash3(data: &[u8], i: usize) -> usize {
     ((a << 10) ^ (b << 5) ^ c) & (HASH_SIZE - 1)
 }
 
-/// Compress `data` into a raw DEFLATE stream (no zlib or gzip wrapper).
+/// Compress `data` into a **zlib** stream (RFC 1950): a two-byte header, the RFC 1951
+/// deflate data, and a four-byte Adler-32 of `data`.
+///
+/// This is what PDF's `/FlateDecode` names, so it is what every stream we write must be. A
+/// bare deflate stream reads back in our own decoder and in nothing else, which is a file
+/// nobody else can open. [`deflate_raw`] is the form to reach for when raw really is what
+/// is wanted.
+///
+/// The header arithmetic and the checksum cannot fail, so this returns a `Vec` rather than
+/// a `Result`; there is no error here to report.
 #[must_use]
 pub fn deflate(data: &[u8], level: DeflateLevel) -> Vec<u8> {
+    let body = deflate_raw(data, level);
+    let mut out = Vec::with_capacity(2 + body.len() + 4);
+    out.extend_from_slice(&zlib::header());
+    out.extend_from_slice(&body);
+    out.extend_from_slice(&zlib::adler32(data).to_be_bytes());
+    out
+}
+
+/// Compress `data` into a raw DEFLATE stream (RFC 1951): Huffman-coded blocks and nothing
+/// else, with no zlib header and no trailing checksum. This is the form `/FlateDecode` does
+/// *not* name; [`deflate`] is.
+#[must_use]
+pub fn deflate_raw(data: &[u8], level: DeflateLevel) -> Vec<u8> {
     let (max_chain, nice_len, lazy) = level.params();
     let mut bw = BitWriter::with_capacity(data.len() / 2 + 64);
 
@@ -716,8 +744,10 @@ mod tests {
 
     use super::*;
 
+    /// `deflate` writes a zlib stream, so the raw round trip uses `deflate_raw`; the wrapper
+    /// is what the other tests in this module are about.
     fn round_trip(data: &[u8]) {
-        let packed = deflate(data, DeflateLevel::Default);
+        let packed = deflate_raw(data, DeflateLevel::Default);
         let back = crate::inflate_raw(&packed, data.len());
         assert!(back.complete, "incomplete stream for {} bytes", data.len());
         assert_eq!(back.data, data);
@@ -783,9 +813,149 @@ mod tests {
             DeflateLevel::Best,
         ] {
             let packed = deflate(&data, level);
-            let back = crate::inflate_raw(&packed, data.len());
+            let back = crate::inflate(&packed, data.len());
             assert!(back.complete, "{level:?}");
             assert_eq!(back.data, data, "{level:?}");
         }
+    }
+
+    // ---- the zlib wrapper, which is what /FlateDecode actually means ---------------
+
+    /// Adler-32 computed from the definition rather than by calling the implementation:
+    /// two sums modulo 65521, the second accumulating the first, as `b << 16 | a`. Stating
+    /// the rule here rather than comparing a stored constant means the test says *why* the
+    /// last four bytes are what they are.
+    fn reference_adler32(data: &[u8]) -> u32 {
+        let (mut a, mut b) = (1u32, 0u32);
+        for &byte in data {
+            a = (a + u32::from(byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
+    }
+
+    /// The header derived from RFC 1950 rather than hard-coded: DEFLATE in the low nibble
+    /// of CMF, CINFO 7 for the 32 KiB window PDF requires, and FCHECK chosen so the pair
+    /// read big-endian is a multiple of 31.
+    ///
+    /// FLEVEL is 2, "the compressor chose", which occupies the top two bits of FLG, so it
+    /// is part of what FCHECK has to cancel: `31 - (CMF*256 + FLEVEL<<6) mod 31`.
+    fn expected_header() -> [u8; 2] {
+        let cmf = (7u8 << 4) | 8;
+        let flevel = 2u16;
+        let flg = (31 - (u16::from(cmf) * 256 + (flevel << 6)) % 31) % 31;
+        [cmf, (flevel << 6) as u8 | flg as u8]
+    }
+
+    /// The output is what zlib says it is. Our own inflate gets the input back, the first
+    /// two bytes are the CMF/FLG pair for a 32 KiB window, and the last four are the
+    /// Adler-32 of the original. This is the assertion that would have failed before the
+    /// wrapper existed, and the bug it catches is the one no round trip in this crate
+    /// could see, because every other test inflated our own output with our own reader.
+    #[test]
+    fn the_output_is_a_zlib_stream_and_not_a_bare_deflate_one() {
+        let data = b"the quick brown fox jumps over the lazy dog. ".repeat(40);
+        let packed = deflate(&data, DeflateLevel::Default);
+
+        let back = crate::inflate(&packed, data.len());
+        assert!(back.complete, "{back:?}");
+        assert_eq!(back.data, data);
+
+        assert_eq!(packed.get(..2), Some(expected_header().as_slice()));
+        assert_eq!(packed.get(..2), Some(&[0x78, 0x9c][..]));
+        assert_eq!(
+            packed.get(packed.len() - 4..),
+            Some(reference_adler32(&data).to_be_bytes().as_slice())
+        );
+        // Between the two sits exactly the raw stream: the wrapper changes nothing else.
+        assert_eq!(
+            packed.get(2..packed.len() - 4),
+            Some(deflate_raw(&data, DeflateLevel::Default).as_slice())
+        );
+    }
+
+    /// A zlib stream from another producer must inflate here. The bytes are what Python's
+    /// `zlib` writes for the same input, so the reader is proved against a writer that is
+    /// not us. Ours happens to be byte-identical for this input, which is a stronger
+    /// statement about the writer than it is about the reader, and the reader is the part
+    /// that has to keep working when the other producer differs.
+    #[test]
+    fn a_zlib_stream_from_another_producer_inflates() {
+        let want = b"Flate zlib interoperability.\n";
+        let packed: [u8; 37] = [
+            0x78, 0x9c, 0x73, 0xcb, 0x49, 0x2c, 0x49, 0x55, 0xa8, 0xca, 0xc9, 0x4c, 0x52, 0xc8,
+            0xcc, 0x2b, 0x49, 0x2d, 0xca, 0x2f, 0x48, 0x2d, 0x4a, 0x4c, 0xca, 0xcc, 0xc9, 0x2c,
+            0xa9, 0xd4, 0xe3, 0x02, 0x00, 0xa4, 0xf1, 0x0a, 0xdc,
+        ];
+        let r = crate::inflate(&packed, want.len());
+        assert!(r.complete, "{r:?}");
+        assert_eq!(r.data, want);
+    }
+
+    /// A bare deflate stream still decodes. Files in the wild carry one where the
+    /// specification says there should be a wrapper, and refusing them loses a page.
+    #[test]
+    fn a_bare_deflate_stream_still_inflates() {
+        let data = b"no wrapper here, which is what a damaged file looks like.\n".repeat(50);
+        let packed = deflate_raw(&data, DeflateLevel::Default);
+        let r = crate::inflate(&packed, data.len());
+        assert!(r.complete, "{r:?}");
+        assert_eq!(r.data, data);
+    }
+
+    /// Empty input is a real case a compressor meets — a content stream can be empty — and
+    /// it is the one where the wrapper is most of the output. The Adler-32 of nothing is
+    /// the initial value of `a`, which is 1, and the deflate data is one empty stored
+    /// block: a header byte, then LEN and NLEN as zero and its complement.
+    #[test]
+    fn empty_input_still_produces_a_valid_zlib_stream() {
+        let packed = deflate(b"", DeflateLevel::Default);
+        let r = crate::inflate(&packed, 0);
+        assert!(r.complete, "{r:?}");
+        assert!(r.data.is_empty());
+        assert_eq!(packed.get(..2), Some(expected_header().as_slice()));
+        assert_eq!(
+            packed.get(2..),
+            Some(&[0x01, 0x00, 0x00, 0xff, 0xff, 0, 0, 0, 1][..])
+        );
+    }
+
+    /// Many blocks. `BLOCK_TOKENS` is 1 << 14, so this crosses dozens of block boundaries,
+    /// each of which is an opportunity for the last block's BFINAL to go missing, and the
+    /// checksum then covers a stream that never ends.
+    #[test]
+    fn a_large_input_spanning_many_blocks_round_trips() {
+        let data: Vec<u8> = (0..400_000u32).map(|i| (i % 7) as u8).collect();
+        let packed = deflate(&data, DeflateLevel::Default);
+        let r = crate::inflate(&packed, data.len());
+        assert!(r.complete, "{r:?}");
+        assert_eq!(r.data, data);
+        // The wrapper is six bytes whatever the size, and the header does not vary.
+        assert_eq!(packed.get(..2), Some(expected_header().as_slice()));
+        assert_eq!(
+            packed.get(packed.len() - 4..),
+            Some(reference_adler32(&data).to_be_bytes().as_slice())
+        );
+    }
+
+    /// A corrupted payload is reported, not returned as if it were good. A reader that
+    /// ignores the checksum would quietly hand back a wrong page, which is worse than
+    /// handing back a right page with a note against it.
+    #[test]
+    fn a_damaged_payload_is_reported_rather_than_returned_as_good() {
+        let data = b"checksums exist so this cannot pass unnoticed.\n".repeat(30);
+        let mut packed = deflate(&data, DeflateLevel::Default);
+        let last = packed.len() - 1;
+        if let Some(b) = packed.get_mut(last) {
+            *b ^= 0xff;
+        }
+        let r = crate::inflate(&packed, data.len());
+        assert!(!r.complete, "a bad checksum must not read as complete");
+        // The data is still there: a damaged stream shows what it does contain.
+        assert_eq!(r.data, data);
+        assert!(
+            r.note.as_ref().is_some_and(|n| n.contains("checksum")),
+            "{r:?}"
+        );
     }
 }

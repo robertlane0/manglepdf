@@ -7,6 +7,9 @@
 //! * every decoder is *total* on hostile input — it returns partial output plus a
 //!   diagnostic instead of failing, because a truncated stream must still show the
 //!   content it does contain;
+//! * every *encoder* produces the bytes the specification names, checked against an
+//!   implementation that is not us. [`deflate`] writes the zlib stream `/FlateDecode`
+//!   means, not the bare deflate data under it;
 //! * every decoder is bounded (explicit output caps, ratio and absolute bomb guards);
 //! * no `unsafe`.
 
@@ -30,8 +33,9 @@ mod inflate;
 mod lzw;
 mod predict;
 mod runlength;
+mod zlib;
 
-pub use deflate::{DeflateLevel, deflate};
+pub use deflate::{DeflateLevel, deflate, deflate_raw};
 pub use error::{FilterError, FilterResult};
 pub use inflate::{InflateOutcome, inflate, inflate_raw};
 

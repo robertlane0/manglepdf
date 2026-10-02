@@ -12,6 +12,7 @@
 #![allow(clippy::indexing_slicing)]
 
 use crate::error::FilterError;
+use crate::zlib;
 use crate::{MAX_DECODED_BYTES, MAX_EXPANSION_RATIO, Partial};
 
 const MAX_BITS: usize = 15;
@@ -35,7 +36,8 @@ pub struct InflateOutcome {
     pub complete: bool,
     /// Why we stopped, when we did not finish.
     pub note: Option<String>,
-    /// Bytes of input actually read.
+    /// Where the deflate data ends in the input: the offset of the first byte after the
+    /// final block. Any bytes from here on are a wrapper's, not deflate's.
     pub consumed: usize,
 }
 
@@ -261,6 +263,18 @@ impl<'a> BitReader<'a> {
             .len()
             .saturating_sub(self.pos.min(self.data.len()))
     }
+
+    /// Where the deflate data ends, in bytes from the start of the input.
+    ///
+    /// The reader loads whole bytes ahead of the bits that use them, so `pos` alone would
+    /// point past the final block — by up to the eight bytes sitting in the accumulator.
+    /// The unread tail of the buffer is `bitcnt / 8` bytes, and the low bits of the byte
+    /// above them are the padding that closes the final block, so the data ends at
+    /// `pos - bitcnt / 8` whether or not the last block ended on a byte boundary.
+    fn deflate_end(&self) -> usize {
+        let buffered = usize::try_from(self.bitcnt / 8).unwrap_or(0);
+        self.pos.saturating_sub(buffered).min(self.data.len())
+    }
 }
 
 const LENGTH_BASE: [u16; 29] = [
@@ -414,7 +428,7 @@ pub fn inflate_raw(input: &[u8], hint: usize) -> InflateOutcome {
         data: out,
         complete,
         note,
-        consumed: br.pos.min(input.len()),
+        consumed: br.deflate_end(),
     }
 }
 
@@ -553,9 +567,67 @@ fn output_cap(compressed: usize, _hint: usize) -> usize {
     ratio_cap.min(MAX_DECODED_BYTES)
 }
 
-/// Inflate, guessing the output size from `hint` (a `/Length` or an image's row stride).
+/// Inflate a zlib (RFC 1950) stream — the form PDF's `/FlateDecode` names — guessing the
+/// output size from `hint` (a `/Length` or an image's row stride).
+///
+/// A bare deflate stream is accepted too, because plenty of real files carry one where the
+/// specification says there should be a wrapper, and because a reader that insists on the
+/// wrapper loses the page.
+///
+/// Recognising a header is a heuristic, so it is only followed when it works. If the two
+/// bytes are not really a header the stream will not decode behind them, and the input is
+/// decoded again as it stands — the guess costs a page only if it were going to fail
+/// anyway, and never costs a page that used to decode.
+///
+/// The trailing Adler-32 is checked when the stream is wrapped: a mismatch means the bytes
+/// are damaged, which the caller should hear about, though the decoded output is still
+/// returned either way, as everything here is.
+#[must_use]
 pub fn inflate(input: &[u8], hint: usize) -> Partial {
-    let r = inflate_raw(input, hint);
+    let skip = zlib::header_len(input);
+    if skip == 0 {
+        return partial(inflate_raw(input, hint));
+    }
+    let Some(body) = input.get(skip..) else {
+        return partial(inflate_raw(input, hint));
+    };
+    let wrapped = inflate_raw(body, hint);
+    if !wrapped.complete {
+        // The header may have been data after all. One more pass, and the one that
+        // decoded further wins.
+        let bare = inflate_raw(input, hint);
+        if bare.complete || bare.data.len() > wrapped.data.len() {
+            return partial(bare);
+        }
+    }
+    let mut note = wrapped.note;
+    let mut complete = wrapped.complete;
+    // The four bytes after the final block are the checksum. Anything else means the file
+    // is damaged; either way the output is worth keeping and the caller should be told the
+    // bytes cannot be trusted.
+    if complete {
+        let tail = body.get(wrapped.consumed..).unwrap_or(&[]);
+        match <[u8; 4]>::try_from(tail) {
+            Ok(bytes) => {
+                if zlib::adler32(&wrapped.data) != u32::from_be_bytes(bytes) {
+                    complete = false;
+                    note = Some("zlib checksum mismatch".into());
+                }
+            }
+            Err(_) => {
+                complete = false;
+                note = Some("missing zlib checksum".into());
+            }
+        }
+    }
+    Partial {
+        data: wrapped.data,
+        complete,
+        note,
+    }
+}
+
+fn partial(r: InflateOutcome) -> Partial {
     Partial {
         data: r.data,
         complete: r.complete,
@@ -583,7 +655,7 @@ mod tests {
     #[test]
     fn dynamic_block_with_distance() {
         // "aaaaaaaaaa" compressed by zlib, raw deflate portion extracted.
-        let packed = crate::deflate::deflate(
+        let packed = crate::deflate::deflate_raw(
             &b"aaaaaaaaaa".repeat(30),
             crate::deflate::DeflateLevel::Default,
         );
@@ -595,7 +667,7 @@ mod tests {
     #[test]
     fn overlapping_match_expands() {
         let src = b"ab".repeat(200);
-        let packed = crate::deflate::deflate(&src, crate::deflate::DeflateLevel::Default);
+        let packed = crate::deflate::deflate_raw(&src, crate::deflate::DeflateLevel::Default);
         let r = inflate_raw(&packed, src.len());
         assert_eq!(r.data, src);
     }
@@ -628,10 +700,96 @@ mod tests {
         // returns at most 258 bytes for a couple of bytes of code, so roughly 1032:1),
         // so real content is never truncated by the bomb guard.
         let src = b"the quick brown fox jumps over the lazy dog. ".repeat(20_000);
-        let packed = crate::deflate::deflate(&src, crate::deflate::DeflateLevel::Default);
+        let packed = crate::deflate::deflate_raw(&src, crate::deflate::DeflateLevel::Default);
         let hinted = inflate_raw(&packed, usize::MAX);
         assert!(hinted.complete, "{hinted:?}");
         assert_eq!(hinted.data, src);
         assert_eq!(inflate_raw(&packed, 0).data, hinted.data);
+    }
+
+    // ---- the zlib wrapper, from the reader's side --------------------------------
+
+    /// A zlib stream written elsewhere decodes. `/FlateDecode` names zlib, so this is the
+    /// common case by a wide margin. The bytes are what Python's `zlib` produces for this
+    /// input, and the fact that they are not ours is the point.
+    #[test]
+    fn a_zlib_stream_produced_elsewhere_is_accepted() {
+        let want = b"Flate zlib interoperability.\n";
+        let packed: [u8; 37] = [
+            0x78, 0x9c, 0x73, 0xcb, 0x49, 0x2c, 0x49, 0x55, 0xa8, 0xca, 0xc9, 0x4c, 0x52, 0xc8,
+            0xcc, 0x2b, 0x49, 0x2d, 0xca, 0x2f, 0x48, 0x2d, 0x4a, 0x4c, 0xca, 0xcc, 0xc9, 0x2c,
+            0xa9, 0xd4, 0xe3, 0x02, 0x00, 0xa4, 0xf1, 0x0a, 0xdc,
+        ];
+        let r = inflate(&packed, want.len());
+        assert!(r.complete, "{r:?}");
+        assert_eq!(r.data, want);
+    }
+
+    /// Both forms decode. A `/FlateDecode` stream is allowed to arrive without its
+    /// wrapper, and a reader that insists on the wrapper loses the page; a reader that
+    /// strips two bytes on sight loses it the other way.
+    #[test]
+    fn both_the_wrapped_and_the_bare_form_decode() {
+        let src = b"one wrapper, and one without.\n".repeat(40);
+        let wrapped = crate::deflate::deflate(&src, crate::deflate::DeflateLevel::Default);
+        let bare = crate::deflate::deflate_raw(&src, crate::deflate::DeflateLevel::Default);
+        let a = inflate(&wrapped, src.len());
+        assert!(a.complete, "{a:?}");
+        assert_eq!(a.data, src);
+        let b = inflate(&bare, src.len());
+        assert!(b.complete, "{b:?}");
+        assert_eq!(b.data, src);
+    }
+
+    /// Recognising a header must not cost a page that used to decode. A bare deflate stream
+    /// whose first two bytes happen to satisfy the zlib check — a stored block's LEN nibble
+    /// can be made to do it — is decoded correctly rather than being read two bytes short.
+    /// The fallback is the only thing standing between a heuristic and a blank page, so it is
+    /// tested directly rather than assumed.
+    #[test]
+    fn a_bare_stream_that_looks_wrapped_still_decodes() {
+        // Two stored blocks, hand-built so the stream's first two bytes are 0x38 0x11: a
+        // stored block's first byte carries BFINAL, BTYPE and three padding bits, and the
+        // second is the low byte of LEN, so the pair can be made to satisfy the zlib test
+        // by choosing the padding and the first block's length. Confirmed with Python's
+        // `zlib.decompressobj(-15)`, which reads these bytes as deflate and no other
+        // implementation should refuse them.
+        let first: Vec<u8> = (0..17u32).map(|i| ((i * 7 + 3) & 0xff) as u8).collect();
+        let second = b"the second block, which is the last.\n";
+        // 0x38: BFINAL 0, BTYPE 00, three padding bits. Then LEN 17 and its complement.
+        // The second block sets BFINAL 1 and carries 37 bytes.
+        let bare: Vec<u8> = [0x38, 0x11, 0x00, 0xee, 0xff]
+            .into_iter()
+            .chain(first.iter().copied())
+            .chain([0x01, 0x25, 0x00, 0xda, 0xff])
+            .chain(second.iter().copied())
+            .collect();
+        assert_eq!(
+            zlib::header_len(&bare),
+            2,
+            "the recognition really is tripped"
+        );
+
+        let want: Vec<u8> = first
+            .iter()
+            .copied()
+            .chain(second.iter().copied())
+            .collect();
+        let r = inflate(&bare, want.len());
+        assert!(r.complete, "{r:?}");
+        assert_eq!(r.data, want);
+    }
+
+    /// A stream whose checksum is missing is not called complete. The deflate data decoded
+    /// and is returned, because that is what a partial-tolerant reader does, but the caller
+    /// is told the bytes cannot be trusted.
+    #[test]
+    fn a_stream_without_its_checksum_is_not_called_complete() {
+        let src = b"truncate me.\n".repeat(20);
+        let mut packed = crate::deflate::deflate(&src, crate::deflate::DeflateLevel::Default);
+        packed.truncate(packed.len() - 2);
+        let r = inflate(&packed, src.len());
+        assert!(!r.complete, "{r:?}");
+        assert_eq!(r.data, src, "the data still decodes");
     }
 }

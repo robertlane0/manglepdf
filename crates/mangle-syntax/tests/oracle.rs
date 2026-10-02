@@ -280,6 +280,137 @@ fn qpdf_sees_the_edit_we_made() {
 }
 
 #[test]
+fn a_flated_content_stream_we_write_is_read_by_other_implementations() {
+    // `/FlateDecode` names zlib, not the bare deflate underneath it, and the difference is
+    // invisible to a round trip that inflates our output with our own reader. Three
+    // programs that are not us have to agree that the file is sound: `qpdf` must not report
+    // a stream decoding error, `mutool` must decode the content stream, and `pdfinfo` must
+    // read the page tree. Any one of them failing is a file nobody else can open.
+    if !have("qpdf") {
+        eprintln!("skipped: qpdf is not installed");
+        return;
+    }
+    if !have("mutool") {
+        eprintln!("skipped: mutool is not installed");
+        return;
+    }
+    let Some(scratch) = Scratch::new("flate") else {
+        return;
+    };
+    let content = b"BT /F1 36 Tf 40 110 Td (Zlib) Tj ET\n1 0 0 RG 4 w 20 20 m 280 180 l S\n";
+    let path = scratch.write("flated.pdf", &flated_document(content));
+
+    let (ok, text) = qpdf_check(&path).expect("qpdf runs");
+    assert!(ok, "qpdf rejected a /FlateDecode stream we wrote:\n{text}");
+
+    // `mutool draw` decoding the stream rather than skipping it is the whole point: before
+    // the zlib wrapper this reported "unknown compression method" and drew an empty page.
+    let out = Command::new("mutool")
+        .arg("draw")
+        .arg("-F")
+        .arg("trace")
+        .arg(&path)
+        .output()
+        .expect("mutool runs");
+    let trace = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "mutool could not read the file");
+    assert!(
+        trace.contains("unicode=\"Z\""),
+        "mutool did not decode our content stream:\n{trace}"
+    );
+    assert!(
+        trace.contains("stroke_path"),
+        "mutool did not decode our content stream:\n{trace}"
+    );
+
+    if have("pdfinfo") {
+        let out = Command::new("pdfinfo")
+            .arg(&path)
+            .output()
+            .expect("pdfinfo runs");
+        assert!(out.status.success(), "pdfinfo could not read the file");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("Pages:"),
+            "pdfinfo read no page count:\n{text}"
+        );
+    } else {
+        eprintln!("skipped: pdfinfo is not installed");
+    }
+}
+
+/// A one-page document whose content stream is compressed with our own `deflate` and
+/// declared `/Filter /FlateDecode`, with a `/Length` that is actually right.
+fn flated_document(content: &[u8]) -> Vec<u8> {
+    let packed = mangle_filters::deflate(content, mangle_filters::DeflateLevel::Default);
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 6];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 200] \
+          /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    at[4] = out.len();
+    out.extend_from_slice(
+        format!(
+            "4 0 obj\n<< /Length {} /Filter /FlateDecode >>\nstream\n",
+            packed.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(&packed);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    at[5] = out.len();
+    out.extend_from_slice(
+        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    );
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 5\n");
+    for offset in at.iter().take(6).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// A `/FlateDecode` stream survives a full save, and what comes out the other end is the
+/// zlib stream that went in. A rewrite that silently dropped the wrapper would leave a file
+/// only we could read, which is the failure this whole arrangement exists to prevent.
+#[test]
+fn a_flated_stream_survives_a_full_save_intact() {
+    let Some(scratch) = Scratch::new("flate-save") else {
+        return;
+    };
+    let content = b"BT /F1 12 Tf 20 20 Td (keep me) Tj ET\n";
+    let doc = Document::open(flated_document(content), OpenOptions::default()).expect("open");
+    let saved = doc.save(&SaveOptions::default()).expect("save");
+
+    let stream = match doc.object(Ref::new(4, 0)).expect("content") {
+        Object::Stream(s) => s,
+        other => panic!("expected a stream, got {other:?}"),
+    };
+    let decoded = mangle_syntax::stream::decode_stream(&stream);
+    assert!(decoded.complete, "{:?}", decoded.notes);
+    assert_eq!(decoded.data, content);
+
+    // And qpdf can read what we wrote.
+    if !have("qpdf") {
+        eprintln!("skipped: qpdf is not installed");
+        return;
+    }
+    let path = scratch.write("saved.pdf", &saved.bytes);
+    let (ok, text) = qpdf_check(&path).expect("qpdf runs");
+    assert!(ok, "qpdf rejected a saved /FlateDecode stream:\n{text}");
+}
+
+#[test]
 fn a_saved_file_still_has_the_structure_the_reader_relies_on() {
     if !tool_available() {
         eprintln!("skipped: qpdf is not installed");
