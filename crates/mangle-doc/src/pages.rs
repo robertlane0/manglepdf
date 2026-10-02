@@ -4,7 +4,7 @@
 //! and rely on an ancestor, and the tree may be a `Pages` node, a `Page` leaf, a
 //! mixture of both with missing `/Type` keys, or a cycle.
 
-use mangle_syntax::{Dict, Object, Rect, Ref, Stream};
+use mangle_syntax::{Dict, Object, Rect, Ref, Stream, stream::Decoded};
 
 use crate::error::{Error, Result};
 use crate::{MAX_TREE_DEPTH, MAX_TREE_ENTRIES, Resolver, follow, is_page};
@@ -141,6 +141,59 @@ impl Page {
         }
     }
 
+    /// The page's content streams with their filters applied, and any note from a
+    /// filter that was partial or unsupported.
+    ///
+    /// The notes matter as much as the data. A page whose content would not decode is
+    /// not a page with no content, and only one of those is the caller's own doing, so
+    /// the reason is carried out rather than dropped with the bytes. Each note names the
+    /// stream it came from, because `/Contents` is as often an array of streams as one
+    /// stream and the second of five failing is a different finding from the first.
+    ///
+    /// Nothing here guesses. A filter that ran and stopped early leaves its partial bytes
+    /// in place, because a truncated stream is often still a page worth drawing and
+    /// `complete` says so. A filter that could not be applied at all leaves nothing: those
+    /// bytes are still encoded, and reporting is the honest response to them.
+    #[must_use]
+    pub fn decoded_contents_full(&self, resolver: &dyn Resolver) -> Decoded {
+        let parts = self.content_streams(resolver);
+        let mut out = Decoded {
+            data: Vec::new(),
+            complete: true,
+            encoded: false,
+            notes: Vec::new(),
+        };
+        for (i, part) in parts.iter().enumerate() {
+            let d = resolver.decoded_full(part);
+            if i > 0 {
+                out.data.push(b'\n');
+            }
+            // Encoded bytes are not content. Handing them on would ask the content
+            // interpreter to read a compressed stream as a list of operators, which is how
+            // D1 drew a blank page from a page full of text; the note is the report that
+            // replaces it.
+            if d.encoded {
+                out.encoded = true;
+            } else {
+                out.data.extend_from_slice(&d.data);
+            }
+            if !d.complete {
+                out.complete = false;
+                let where_ = if parts.len() == 1 {
+                    "the content stream".to_owned()
+                } else {
+                    format!("content stream {} of {}", i + 1, parts.len())
+                };
+                if d.notes.is_empty() {
+                    out.notes.push(format!("{where_} did not decode cleanly"));
+                }
+                out.notes
+                    .extend(d.notes.iter().map(|n| format!("{where_}: {n}")));
+            }
+        }
+        out
+    }
+
     /// The page's content streams with their filters applied.
     ///
     /// `/Contents` may be a stream, an array of streams, or references to either, and a
@@ -148,14 +201,7 @@ impl Page {
     /// page should not have to know that.
     #[must_use]
     pub fn decoded_contents(&self, resolver: &dyn Resolver) -> Vec<u8> {
-        let mut out = Vec::new();
-        for (i, part) in self.content_streams(resolver).into_iter().enumerate() {
-            if i > 0 {
-                out.push(b'\n');
-            }
-            out.extend_from_slice(&resolver.decoded(&part));
-        }
-        out
+        self.decoded_contents_full(resolver).data
     }
 
     /// The page's content streams, decoded one by one.

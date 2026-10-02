@@ -19,6 +19,17 @@ pub struct Decoded {
     pub data: Vec<u8>,
     /// `true` when every filter completed cleanly.
     pub complete: bool,
+    /// `true` when `data` is still in the stream's *encoded* form, because a filter in the
+    /// chain could not be applied at all.
+    ///
+    /// This is not the same as `complete`, and the difference is the whole point. A
+    /// truncated `FlateDecode` gives a partial result that is a prefix of what the stream
+    /// says, and a consumer may use it. An unsupported filter gives back bytes that are
+    /// still encoded — passing them to something that expects plain bytes asks it to
+    /// interpret noise, and for a content stream that means drawing a page from a
+    /// compressed file's raw deflate. `complete` says the decode went wrong; this says
+    /// whether what came back is even decoded.
+    pub encoded: bool,
     /// Human-readable notes about filters that were partial or unsupported.
     pub notes: Vec<String>,
 }
@@ -29,6 +40,7 @@ pub fn decode_stream(stream: &Stream) -> Decoded {
     let mut out = Decoded {
         data: stream.raw.clone(),
         complete: true,
+        encoded: false,
         notes: Vec::new(),
     };
     // Image and colour-space filters do not go through the generic chain.
@@ -111,6 +123,11 @@ pub fn decode_stream(stream: &Stream) -> Decoded {
                 let name = String::from_utf8_lossy(other).into_owned();
                 out.notes.push(format!("unsupported filter `{name}`"));
                 out.complete = false;
+                // Whatever `out.data` holds at this point is still encoded: the filters
+                // below this one in the chain ran, and everything above it is exactly what
+                // this one would have been asked to consume. `encoded` says so, so a
+                // consumer can refuse it rather than mistake it for plain bytes.
+                out.encoded = true;
                 None
             }
         };

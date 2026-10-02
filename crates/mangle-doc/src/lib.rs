@@ -39,7 +39,7 @@ pub use names::NameTree;
 pub use outlines::{Destination, Outline, OutlineItem, decode_pdf_text, resolve_destination};
 pub use pages::{Inheritable, Page, PageTree};
 
-use mangle_syntax::{Dict, Object, Ref};
+use mangle_syntax::{Dict, Object, Ref, stream::Decoded};
 
 /// Anything that can hand back a PDF object by number.
 ///
@@ -49,22 +49,30 @@ pub trait Resolver {
     /// The object with this number, if it exists and is not a dangling reference.
     fn resolve(&self, r: Ref) -> Option<Object>;
 
-    /// A stream's data with its filter chain applied.
+    /// A stream's data with its filter chain applied, and whatever the filters had to
+    /// say about it.
     ///
     /// A resolver that cannot decode returns the raw bytes, which is the honest
-    /// fallback: a caller gets the data it has rather than nothing.
+    /// fallback: a caller gets the data it has rather than nothing. The notes are what
+    /// keeps a stream that did not decode from reaching a caller as an empty one — the
+    /// bytes alone cannot tell a blank stream from a broken filter.
+    ///
+    /// This is the primitive; [`Resolver::decoded`] is the part of it most callers want.
+    /// Overriding only one of the two would let them disagree, so an implementor should
+    /// override this one.
+    fn decoded_full(&self, stream: &mangle_syntax::Stream) -> Decoded {
+        mangle_syntax::stream::decode_stream(stream)
+    }
+
+    /// A stream's data with its filter chain applied.
     fn decoded(&self, stream: &mangle_syntax::Stream) -> Vec<u8> {
-        mangle_syntax::stream::decode_stream(stream).data
+        self.decoded_full(stream).data
     }
 }
 
 impl Resolver for mangle_syntax::Document {
     fn resolve(&self, r: Ref) -> Option<Object> {
         self.object(r)
-    }
-
-    fn decoded(&self, stream: &mangle_syntax::Stream) -> Vec<u8> {
-        self.decoded(stream)
     }
 }
 

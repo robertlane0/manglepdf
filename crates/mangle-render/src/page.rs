@@ -319,7 +319,14 @@ pub fn render_page(
         notes: Vec::new(),
     };
 
-    let content = page.contents(doc);
+    // The page's content, decoded. The raw bytes are never handed to the interpreter: a
+    // compressed stream read as if it were operators is a page of nonsense, and a page of
+    // nonsense is a blank page with a plausible-looking reason attached to it. Whatever
+    // the filters had to say goes into the notes before anything is parsed, so a page
+    // that lost its content says so instead of reporting itself as empty.
+    let decoded = page.decoded_contents_full(doc);
+    render.notes.extend(decoded.notes.iter().cloned());
+    let content = decoded.data;
     if content.is_empty() {
         return render;
     }

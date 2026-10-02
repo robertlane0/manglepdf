@@ -330,6 +330,15 @@ tests in the same file check the harness itself and run by default. Ten kinds ma
    here. A Type 1 (`FontFile`) program is a CFF table holding Type 1 charstrings, which is a
    different language from the Type 2 this reads, so a font that says so is refused with a
    reason.
+
+   This is the top item on the list by corpus weight, not by difficulty. **355 of the wild
+   corpus's 542 pages are blank because of it.** A `Type1` simple font whose descriptor
+   carries a bare CFF (`/FontFile3` with no `sfnt` wrapper, so no `cmap`) needs its charset
+   to get from a character code to a glyph — `code → /Encoding /Differences name → charset
+   name → GID` — and the charset is not read, so the font is refused rather than guessed at
+   and every character in it goes undrawn. Another 67 pages name a standard fourteen font
+   that is not embedded. The charset is ISO 10581 §5.2: three formats and the 391-entry
+   Standard Strings list. See D7 in `docs/known-diffs.md` for the measurements.
 3. **Composite fonts read two-byte codes, and the mark says so.** A `/Type0` font's
    character codes are two bytes, so a string is split into codes rather than bytes and the
    pen advances by the width of each code. Two things had to change together for that to be
@@ -427,9 +436,41 @@ The fix matters more than its size suggests, because the two clusters interact. 
 is one pixel too tall is not scored slightly worse; it is *refused*, so 80 pages produced no
 SSIM at all and the file looks like a renderer that works. Now that the sizes agree those
 pages are measured: `gov__arxiv-1206.5537.pdf` page 1 goes from *not measured* to **0.7915
-SSIM** against `mutool`, which is a real number about a real defect (D1: a Flate-compressed
-content stream is not decoded, so we draw blank paper) rather than the absence of one. A
-full re-run of the corpus is wanted to re-baseline the median; it takes two hours.
+SSIM** against `mutool`. A full re-run of the corpus is wanted to re-baseline the median; it
+takes two hours.
+
+### The blank-page cluster is fixed, and it was the smaller of the two defects
+
+Every one of the 542 pages was rendering with `marks: 0` and no ink, because `render_page`
+handed the content interpreter the *encoded* content stream (D1). Fixed — one line, and a
+fixture that inflates its content so the suite can never again be silent about it.
+
+Re-measured with the fix in place, the corpus says:
+
+| | pages |
+|---|---|
+| draw something | **103** |
+| still blank | **439** — 422 of them because of a font, 17 for other reasons |
+
+So D1 was the cause of the blankness on 19% of pages and on the other 81% it was *hiding* a
+second and much larger defect behind silence. That defect is fonts, and it is now named,
+measured and written down as D7: 355 pages carry a `Type1` font whose `/FontFile3` is a bare
+CFF table, where a character code reaches a glyph through the CFF charset, and nothing reads
+the charset. Another 67 name a base-14 font that is not embedded at all.
+
+**The arXiv page's SSIM did not move, and that is the right result.** It is 0.791534 before
+and after, because the page is blank both ways for two different reasons — before because
+the content was never decoded, after because all seven of its fonts refuse. A blank page
+against a page with 5.4% ink scores 0.7915 whatever the reason for the blankness is.
+
+The reporting is the durable part of the fix. Every filter that goes wrong now says so in
+`render.notes`, naming the filter and which of the page's `/Contents` streams it came from,
+and bytes that are still encoded are refused rather than handed to the operator table. That
+is what turned "439 pages are blank" from a two-week question into a table.
+
+**No SSIM figure in `docs/known-diffs.md` should be read as a fidelity claim until D7 is
+fixed**, because a renderer that cannot draw a single glyph cannot say anything about
+fidelity — and a blank page compared against a nearly-blank oracle scores 0.9995.
 
 The corpus test asserts nothing and the report is the output — the reasoning is at the top
 of `crates/mangle-render/tests/wild_corpus.rs`. A threshold on a document nobody has read

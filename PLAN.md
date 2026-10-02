@@ -226,11 +226,11 @@ The measurements and their evidence are in `docs/known-diffs.md`. In short: 460 
 compared, median SSIM 0.6929, 94.8% of pages below 0.95, 35 of 77 files unopenable. Three
 findings dominate, in this order:
 
-1. **`render_page` renders a blank page for any Flate-compressed content stream.** 440 of 460
+1. **`render_page` renders a blank page for any Flate-compressed content stream.** All 542
    measured pages drew nothing. The interpreter's own note contains the compressed bytes as
    "operator names", and `Page::decoded_contents` decodes the same stream correctly, so the
    decoder works and the renderer does not call it. Every fixture in the project writes its
-   content stream unfiltered, which is why the suite was blind to it.
+   content stream unfiltered, which is why the suite was blind to it. **Done** — see above.
 2. **A cross-reference stream carrying a PNG predictor is not decoded**, so the reader falls
    back to scanning, cannot reach objects inside object streams, and reports zero pages. 31 of
    the 34 files that would not open have this shape: both IRS forms, NIST FIPS 197, both USGS
@@ -239,10 +239,16 @@ findings dominate, in this order:
 3. **`render_page` gains a spurious row on any page whose size in points times the scale should
    be a whole number** — `792.0 * (150.0/72.0)` is `1650.0000000000002` in f64 and the `.ceil()`
    turns it into 1651, where `mutool` gives 1650. 80 pages across 17 files became uncomparable,
-   including every page of both arXiv papers.
+   including every page of both arXiv papers. **Done** — see above.
 
-Fix (1) first. It is masking everything downstream: until a Flate-compressed page draws
-something, the render numbers for a real document describe an empty page.
+(1) is fixed, and it turned out to be the smaller of the two render defects. Re-measured with
+it fixed, 103 of 542 pages draw and 439 are still blank — 422 of those because of a font, 17
+for other reasons. The dominant one is a `Type1` font whose `/FontFile3` is a bare CFF: a
+character code reaches a glyph through the charset, and the charset is not read, so the font
+is refused rather than guessed at. **Next: read the CFF charset (ISO 10581 §5.2 — three
+formats and the Standard Strings list), then build in the standard fourteen.** Until then no
+render number in this project says anything about fidelity, and the arXiv page's SSIM sits at
+0.7915 whether or not its content decodes.
 6. Tier B with `SOURCES.md`: a real-world corpus, which is the only way to find the encoding
    problems a hand-written fixture cannot express. **Done** — see above.
 

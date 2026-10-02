@@ -253,7 +253,76 @@ fn restored_clip_page() -> Vec<u8> {
     )
 }
 
-/// A 200 point square page with two clips, one inside the other.
+/// The shape of [`page_with`], with the content stream's filter chain left to the caller.
+///
+/// `filter` goes into the stream dictionary verbatim and `body` is written as the stream's
+/// bytes, so `/Length` counts the bytes that are actually there — which is the whole
+/// difficulty with a filtered stream and the reason the two arguments cannot be one: a
+/// `/Length` of the decoded length, over encoded bytes, describes a stream whose end is
+/// somewhere else entirely, and the fixture suite's habit of writing the length of the
+/// text it can see is exactly the habit that hid D1.
+fn page_with_filtered(filter: &str, body: &[u8], points: i64) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 5];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        format!(
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 {points} \
+             {points}] >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    at[4] = out.len();
+    let mut stream =
+        format!("4 0 obj\n<< /Length {} {filter} >>\nstream\n", body.len()).into_bytes();
+    stream.extend_from_slice(body);
+    stream.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&stream);
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 4\n");
+    for offset in at.iter().take(5).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size 5 /Root 1 0 R /ID [<0102> <0304>] >>\nstartxref\n{xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// A one-page square file whose content stream is `/FlateDecode` compressed.
+///
+/// **This fixture is here because its absence was D1.** Every page of every real file has
+/// its content behind a filter, and a suite in which every fixture writes its content in
+/// the clear cannot tell a renderer that decodes content from one that does not — the two
+/// are never compared, because no fixture asks. So the failure was total and silent: all
+/// 542 pages of the wild corpus rendered with `marks: 0` and no ink, and the fixture suite
+/// was green throughout.
+///
+/// The bytes are compressed with our own deflate encoder rather than pasted in as a byte
+/// string, because that is what a writer does and it keeps the fixture honest about what a
+/// filtered stream really is. `text_page`'s note above explains why that fixture goes the
+/// other way; the two are complementary, and between them there is now no filter a content
+/// stream can carry that this suite has not tried.
+fn page_with_flate(content: &str, points: i64) -> Vec<u8> {
+    let packed = mangle_filters::deflate(content.as_bytes(), mangle_filters::DeflateLevel::Default);
+    assert!(
+        packed.len() < content.len(),
+        "the fixture should actually be compressed, not stored: {} vs {}",
+        packed.len(),
+        content.len()
+    );
+    page_with_filtered("/Filter /FlateDecode", &packed, points)
+}
+
+/// A one-page square page with two clips, one inside the other.
 ///
 /// The first clip is the triangle (0,0) (200,0) (30,200) and the second is the triangle
 /// (0,0) (20,200) (200,200). They meet in a wedge down the left of the page, and neither one
@@ -729,6 +798,215 @@ fn a_blank_page_renders_as_blank_rather_than_failing() {
     let render = render(out, 1.0);
     assert!(render.is_blank(), "a page with no content is paper");
     assert_eq!(render.marks, 0);
+}
+
+/// A compressed content stream is decoded before it is interpreted.
+///
+/// **This is the regression test for D1.** The content is the same three squares
+/// [`shapes_page`] draws, byte for byte, and the only difference is that it arrives behind
+/// `/FlateDecode`. Before the fix `render_page` handed the *encoded* bytes to the content
+/// interpreter, which reported the compressed bytes as operator names and drew nothing:
+/// `marks: 0`, and a blank page whose notes were a row of mojibake rather than a reason.
+///
+/// Asserting on the marks as well as the pixels is deliberate. A renderer that drew blank
+/// paper because it failed to decode would pass an "is it white?" check, which is why the
+/// mark count is here: it distinguishes "drew nothing" from "drew the wrong thing", and
+/// those are different bugs.
+#[test]
+fn a_compressed_content_stream_is_decoded_and_not_read_as_operators() {
+    let content = "0 0 0 rg 0 0 100 100 re f \
+                   1 0 0 rg 0 100 100 100 re f \
+                   0 0 1 rg 100 100 100 100 re f";
+    let plain = render(page_with(content, 200), 1.0);
+    let packed = render(page_with_flate(content, 200), 1.0);
+
+    assert_eq!(
+        packed.marks, plain.marks,
+        "a filtered stream is the same page as an unfiltered one, so it draws the same marks: \
+         plain {} vs filtered {}",
+        plain.marks, packed.marks
+    );
+    assert_eq!(
+        packed.marks, 3,
+        "three squares, so three marks — anything else means the content was not read"
+    );
+    assert!(
+        packed
+            .notes
+            .iter()
+            .all(|n| !n.contains("is not in the table")),
+        "no compressed bytes should reach the operator table: {:?}",
+        packed.notes
+    );
+
+    // The pixels, not just the count: the content says `re f` with the origin at the
+    // bottom left of the page, and the image's row zero is the top, so the black square
+    // is the *lower* left and reads at a large `y`.
+    let at = |x: usize, y: usize| packed.image.get(x, y).expect("a pixel");
+    assert_eq!(
+        at(50, 150),
+        [0, 0, 0, 255],
+        "the lower-left square is black"
+    );
+    assert_eq!(at(50, 50), [255, 0, 0, 255], "the upper-left square is red");
+    assert_eq!(
+        at(150, 50),
+        [0, 0, 255, 255],
+        "the upper-right square is blue"
+    );
+    assert_eq!(
+        at(150, 150),
+        [255, 255, 255, 255],
+        "and the fourth quadrant is paper"
+    );
+    assert!(
+        !packed.is_blank(),
+        "and the page is not blank paper, which is what the bug produced"
+    );
+}
+
+/// A content stream that will not decode is reported rather than drawn as blank paper.
+///
+/// The constraint is the interesting half of D1. Decoding the stream is the fix; *saying
+/// so* is what keeps the next file from being another two-hour mystery. A page that lost
+/// its content to a broken filter must reach the caller with the reason attached, because
+/// "this page is empty" and "this page's content is unreadable" look identical on screen
+/// and mean opposite things.
+///
+/// Nothing here is guessed at either. The damaged bytes are not run through the operator
+/// table as though they were content, and no substitute is drawn in their place — the page
+/// reports and stops.
+#[test]
+fn a_content_stream_that_will_not_decode_is_reported() {
+    // A `/FlateDecode` stream whose bytes are not a deflate stream at all. This is the
+    // shape of a truncated or corrupted file, and it is the case where a decoder that
+    // returns something anyway must say that it did.
+    let damaged = page_with_filtered("/Filter /FlateDecode", b"\x00\x01\x02 not deflate", 200);
+    let render = render(damaged, 1.0);
+
+    assert!(
+        render.notes.iter().any(|n| n.contains("FlateDecode")),
+        "the reason a content stream could not be read belongs in the notes: {:?}",
+        render.notes
+    );
+    assert!(
+        render
+            .notes
+            .iter()
+            .all(|n| !n.contains("is not in the table")),
+        "and the damaged bytes must not be read as operators: {:?}",
+        render.notes
+    );
+}
+
+/// A content stream behind a filter nobody implements is reported by name.
+///
+/// The other half of refusing. An unknown filter is not a corrupt file and not an empty
+/// one: the content is there and this build cannot read it. Naming it is the difference
+/// between a report a reader can act on and a page that is mysteriously blank.
+#[test]
+fn a_content_stream_behind_an_unknown_filter_is_reported_by_name() {
+    let bytes = page_with_filtered("/Filter /NoSuchDecode", b"0 0 0 rg 0 0 100 100 re f", 200);
+    let render = render(bytes, 1.0);
+
+    assert!(
+        render
+            .notes
+            .iter()
+            .any(|n| n.contains("NoSuchDecode") && n.contains("content stream")),
+        "the filter is named, and it is named as the page's content: {:?}",
+        render.notes
+    );
+    // The bytes behind `/NoSuchDecode` are still encoded. They are deliberately written as
+    // readable content here so that drawing them would be *possible*, which is exactly the
+    // case a test has to rule out: a renderer that hands encoded bytes to the operator
+    // table will pass this file and get a plausible page out of it. Zero marks is the
+    // honest answer — the file says its content is filtered and we cannot read it.
+    assert_eq!(
+        render.marks, 0,
+        "and nothing is drawn from bytes we cannot read, even when they would parse: {:?}",
+        render.notes
+    );
+    assert!(render.is_blank(), "so the page is paper, and says why");
+}
+
+/// A page whose content is an *array* of streams decodes each one and says which failed.
+///
+/// `/Contents` is an array at least as often as it is a single stream, and an array has
+/// more than one thing that can go wrong. A note that does not say which of the streams
+/// failed leaves the reader with a page and a filter and no way to tell whether the
+/// missing part was the first or the last.
+#[test]
+fn an_array_of_content_streams_names_the_one_that_failed() {
+    // Two streams: the first draws a black square and decodes; the second is damaged.
+    let good = mangle_filters::deflate(
+        b"0 0 0 rg 0 0 100 100 re f",
+        mangle_filters::DeflateLevel::Default,
+    );
+    let bad = b"\x00\x01\x02 not deflate";
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 6];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R] >>\nendobj\n",
+    );
+    let parts: [(&[u8], &[u8]); 2] = [
+        (b"/Filter /FlateDecode", good.as_slice()),
+        (b"/Filter /FlateDecode", bad.as_slice()),
+    ];
+    for (i, (filter, body)) in parts.iter().enumerate() {
+        let num = i + 4;
+        at[num] = out.len();
+        let mut stream = format!(
+            "{num} 0 obj\n<< /Length {} {} >>\nstream\n",
+            body.len(),
+            String::from_utf8_lossy(filter)
+        )
+        .into_bytes();
+        stream.extend_from_slice(body);
+        stream.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(&stream);
+    }
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 5\n");
+    for offset in at.iter().take(6).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size 6 /Root 1 0 R /ID [<0102> <0304>] >>\nstartxref\n{xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+
+    let render = render(out, 1.0);
+    assert!(
+        render
+            .notes
+            .iter()
+            .any(|n| n.contains("content stream 2 of 2")),
+        "the note says which of the two failed: {:?}",
+        render.notes
+    );
+    assert_eq!(
+        render.marks, 1,
+        "and the stream that did decode is still drawn — a broken neighbour is not a reason \
+         to drop the whole page"
+    );
+    assert_eq!(
+        render.image.get(50, 150),
+        Some([0, 0, 0, 255]),
+        "which means the square from the first stream is on the page (its `re f` is in the \
+         lower left of the page, which is a large y in the image)"
+    );
 }
 
 #[test]

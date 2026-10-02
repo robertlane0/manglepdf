@@ -32,37 +32,98 @@ images of different sizes. That was D3, and D3 is now fixed.
 
 ---
 
-## D1 — `render_page` renders a blank page for any Flate-compressed content stream
+## D1 — `render_page` rendered a blank page for any Flate-compressed content stream
 
-**Severity: critical. 440 of 460 measured pages.**
+**Severity: was critical — every page of every file. FIXED, and it was smaller than it looked.**
 
-`render_page` hands the *raw* stream bytes to the content-stream interpreter instead of the
-decoded ones. The interpreter then reports the compressed bytes as operator names.
+`render_page` called `Page::contents`, which returns the content stream's *encoded* bytes,
+and handed them to the content-stream interpreter. The interpreter then reported the
+compressed bytes as operator names and drew nothing. The decoder was never at fault:
+`Page::decoded_contents` existed, worked, and was used by text extraction and by the CLI.
 
-Evidence, `pdfjs__alphatrans.pdf` page 1 — a plain classic-cross-reference PDF whose
-`/Contents` is object 6, `<</Filter /FlateDecode /Length 412>>`:
+One line in `crates/mangle-render/src/page.rs`:
 
-- Our render: a blank white page. `marks: 0`.
-- Our note, from `corpus/wild/report/pdfjs__alphatrans.md`:
-  `operator \`x????N?0??y??RL=vL=K'\` at byte 0 is not in the table and was not executed`.
-- The object 6 stream in the file begins `x µ Á N ã 0 ï y  RL = v  »  \ K '`. **The garbage in
-  the note is that byte for byte.** `zlib.decompress` on those exact bytes yields
-  `0.57 w 0 J 0 j [] 0 d 0 G 0 g\nBT /F1 12.00 Tf ET\n…`.
-- The decoder is not broken: `manglepdf-cli extract pdfjs__alphatrans.pdf -page 0`, which
-  goes through `Page::decoded_contents`, prints `Red: stroke=1, fill=1.` … `Powered by TCPDF`.
-  So `decoded_contents` decodes and `render_page` does not use it.
+```rust
+let content = page.contents(doc);          // encoded bytes
+let content = page.decoded_contents(doc);  // decoded bytes
+```
 
-Files where every measured page drew nothing: `freeculture.pdf` (344 of 350 pages, a
-352-page typeset book), `TAMReview.pdf` (23 of 23), `nist-nistir7255.pdf` (60 of 62),
-`bug1992868.pdf` (14 of 14), `issue12337.pdf` (14 of 14), `arxiv-1206.5537.pdf` (23 of 23),
-`arxiv-1512.03385.pdf` (12 of 12), and 21 single-page files.
+### Why the fixture suite missed it
 
-`freeculture.pdf` page 255 makes it plain: `W077-p255-ours.png` is empty paper,
-`W077-p255-theirs.png` is a full comic page, and `W077-p255-diff.png` is therefore a
-perfect black silhouette of every panel and every letter.
+Every hand-written fixture wrote its content stream unfiltered. `text_page`'s own comment
+says the choice is deliberate — an embedded font program is written uncompressed so that a
+comparison measures outlines rather than the font loader — and `page_with` wrote content in
+the clear for the same reason. Nothing in the suite ever asked the renderer to inflate
+anything, so no test could tell a renderer that decodes content from one that does not.
 
-**Why the fixture suite missed it:** every hand-written fixture writes its content stream
-unfiltered or through `/ASCIIHexDecode`, both of which need no inflate.
+The fixture is now `page_with_flate`, which is `page_with`'s content behind `/FlateDecode`
+and nothing else. Four tests in `crates/mangle-render/tests/pages.rs` hold it down, and all
+four fail against the old code:
+
+| test | what it pins |
+|---|---|
+| `a_compressed_content_stream_is_decoded_and_not_read_as_operators` | the regression: same content, filtered, same three marks and same four pixels |
+| `a_content_stream_that_will_not_decode_is_reported` | a damaged `FlateDecode` names itself in the notes |
+| `a_content_stream_behind_an_unknown_filter_is_reported_by_name` | an unimplemented filter is named, and its bytes are not drawn |
+| `an_array_of_content_streams_names_the_one_that_failed` | a note says *which* of several `/Contents` streams failed |
+
+### What the fix actually bought, measured
+
+Before, **all 542 pages of the 77-file wild corpus rendered with `marks: 0` and no ink.**
+After, 103 pages draw and 439 are still blank. So D1 was the cause of the blankness on
+19% of pages, and on the other 81% it was hiding a second, larger defect (D7) behind silence.
+
+The page this finding was opened with barely moves, and the reason matters:
+
+| `gov__arxiv-1206.5537.pdf` page 1 | marks | ink pixels | SSIM |
+|---|---|---|---|
+| before | 0 | 0 | 0.791534 |
+| after | 58 | **0** | 0.791534 |
+
+Identical to six places. **The page is blank both before and after**, for two different
+reasons: before because the content was never decoded, after because all seven of its fonts
+refuse (D7). The SSIM of a blank page against a page with 5.4% ink is 0.7915 whatever the
+reason for the blankness is, so this figure could not have moved and its not moving is not
+evidence that the fix failed. Two other pages show the difference D1 made:
+
+| page | before | after |
+|---|---|---|
+| `pdfjs__alphatrans.pdf` 1 | 0 marks, 0 ink, **0.89054** | 12 marks, 373 262 ink, **0.88921** |
+| `pdfbox__openoffice-test-document.pdf` 1 | 0 marks, 0 ink, **0.99954** | 4 marks, 315 ink, **0.99998** |
+
+`alphatrans` goes *down* by 0.0013 while gaining 373 262 ink pixels, because the page has a
+shading named `/Sh1` that its resources do not define, so the part we now draw is drawn
+without it. Drawing a page wrongly scores worse than not drawing it, and it also reports
+why — which is the trade the second half of this fix is for.
+
+**The high scorers in the old "What is not wrong" list were an artefact of this bug.**
+`openoffice-test-document.pdf` scored 0.9995 while rendering nothing whatsoever, and scores
+0.99998 now that it draws its 315 pixels. A blank page compared against a nearly-blank
+oracle is a high score for the wrong reason, and the median was computed over 436 pages of
+which the great majority were blank.
+
+### The second half: a stream that will not decode has to say so
+
+Decoding the content is the fix; *reporting* it is what stops the next file being another
+two-hour mystery. A page that lost its content to a broken filter and a page with no content
+look identical on screen and mean opposite things, so the reason now travels with the bytes:
+
+- `Resolver::decoded_full` is the new primitive and returns the decoder's own `Decoded`,
+  notes and all; `Resolver::decoded` is defined in terms of it, so the two cannot disagree.
+- `Page::decoded_contents_full` concatenates the streams and prefixes every note with which
+  stream it came from — `content stream 2 of 4: FlateDecode: input ended before a block
+  header` — because `/Contents` is an array at least as often as it is one stream and "the
+  second of four failed" is a different finding from "something failed".
+- `Decoded` gained an `encoded` flag, because "the decode went wrong" and "these bytes are
+  not decoded" are different facts. A truncated `FlateDecode` gives a prefix that is worth
+  drawing; an **unimplemented** filter gives back bytes that are still encoded, and handing
+  those to the interpreter is D1 all over again. When `encoded` is set the content path
+  refuses and reports. That test deliberately writes readable content behind
+  `/NoSuchDecode`, so that a renderer which drew it anyway would produce a plausible page
+  and pass.
+
+Nothing here guesses. There is no fallback that treats encoded bytes as content, and no
+substitute drawn in place of content that could not be read.
 
 ---
 
@@ -281,7 +342,16 @@ FINISH.md G3.3 is not yet assessable.
 ## What is not wrong
 
 Worth recording, because a corpus that only finds faults is as misleading as one that only
-finds faults being called a corpus. Where pages *did* draw something:
+finds faults being called a corpus.
+
+**Read this list with D1 in hand.** Before that fix every one of these pages rendered with
+`marks: 0` and no ink at all, so a score near 1.0 meant *our page and the oracle's page were
+both nearly empty*. `openoffice-test-document.pdf` has 315 ink pixels on it now and scored
+0.9995 while drawing nothing; the others are in the same position to a greater or lesser
+degree. What follows is evidence that these files are *not* resisted by the parser — which is
+still worth knowing — and it is not evidence that they render correctly.
+
+Where pages *did* draw something:
 
 - `pdfbox__openoffice-test-document.pdf` — **0.9995**
 - `pdfbox__PDFA3A.pdf` (Word 2016 → PDF/A-3a, tagged, with transparency) — **0.9962**
@@ -298,6 +368,80 @@ the Arabic shaping order are in reasonable shape. And `bug1980958.pdf`, a 219-by
 file, scores 1.0000: both renderers recover the same thing from it, which is what a graceful
 degradation looks like.
 
-The D1 blank-page finding is almost certainly masking everything downstream of it. Until D1 is
-fixed, the render numbers for a Flate-compressed document describe an empty page, and any
-of the nine files above could be hiding a real defect behind it.
+---
+
+## D7 — 78% of the corpus is blank because the font cannot be read, not because the content could not
+
+**Severity: critical, and it is what D1 was hiding. 422 of 542 pages.**
+
+D1 is fixed and the corpus was re-measured, and this is what the numbers say. All 542 pages,
+rendered at 150 DPI with the fix in place:
+
+| | pages |
+|---|---|
+| draw something | **103** |
+| still blank | **439** |
+
+And of the 439 still-blank pages, the notes say why — which is the first time the corpus has
+been able to answer that question at all:
+
+| the reason in the notes | pages |
+|---|---|
+| a bare CFF font whose charset is not read | **355** |
+| the font has no `/FontDescriptor` at all | **67** |
+| something else | 17 |
+
+22 of the 76 readable files are blank on every page. The other 17 are JPEG 2000 and JBIG2
+images with no decoder (9), images claiming 0 by 0 pixels (4), two CID-keyed CFF variants,
+one colour space, one truncated `FlateDecode` stream, and one page whose content still does
+not parse.
+
+### The dominant one: a bare CFF's charset is not read
+
+355 pages — 65% of the whole corpus, and most of the LaTeX and comic-book material in it —
+carry fonts like this:
+
+```
+$ qpdf --show-object=18 corpus/wild/gov__arxiv-1206.5537.pdf
+<< /BaseFont /JEKHOJ+CMR10 /Encoding 612 0 R /FirstChar 0 /FontDescriptor 19 0 R
+   /LastChar 122 /Subtype /Type1 /Type /Font /Widths [...] >>
+```
+
+A `Type1` simple font whose `/FontDescriptor` carries a `/FontFile3` — a **bare** CFF table,
+with no `sfnt` wrapper and therefore no `cmap`. A character code reaches a glyph like this:
+
+```
+code  ->  /Encoding /Differences name  ->  CFF charset: name -> GID  ->  CharStrings
+```
+
+The first and last steps work. The middle one does not: `Program::code_refusal` refuses
+rather than guess, because the charset is exactly the table that maps a glyph *name* to a
+glyph number, and nothing here reads it. So the whole font is refused on the first glyph and
+every character on the page in it goes undrawn. The note it leaves is accurate and is
+recorded on every such page:
+
+> the `/FontFile3` of `/R18` it is a bare CFF font whose codes name glyphs through an
+> `/Encoding` this does not resolve, so no character on the page in it can be drawn
+
+Refusing was the right call at the time and the notes it produces are why this is now a
+two-hour fix rather than a two-week mystery. But the refusal is 355 pages of blank paper,
+and the charset is a bounded table: ISO 10581 §5.2, three formats (a flat array of SIDs,
+ranges of SIDs, and ranges of GIDs) plus the 391-entry Standard Strings list. Nothing about
+it is hard. It is simply the next piece of work, and until it is done **every render number
+in this file describes a page with no glyphs on it.**
+
+### The second: fonts that are not embedded at all
+
+67 pages name a base-14 font with no `/FontDescriptor` — `Times-Roman` on the arXiv page,
+which is the vertical stamp down its left margin. A viewer with the standard 14 font
+programs built in draws it; one without does not, and says so. This is a smaller job than
+the charset and worth ordering first, because it is also what the `manglepdf-cli extract`
+path needs to agree with `pdftotext`.
+
+### What this means for the numbers in this file
+
+The Tier-B median of 0.6929 was measured over pages that were blank, and blank pages scored
+against pages with ink. It is a real measurement of the defect it describes, and the defect
+it describes is overwhelmingly not the one named at the top of it. Nothing in the SSIM
+figures in this file should be read as a fidelity claim until D7 is fixed, because a corpus
+that cannot draw a single glyph cannot say anything about fidelity.
