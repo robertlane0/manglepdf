@@ -50,19 +50,16 @@ The spine is where the architecture is decided, so it is built first and deeply.
 
 1. **The font kinds** (F19–F21): CFF and Type 1 charstrings, then the standard fourteen,
    then Type 3, then two-byte codes. TrueType is done and compared against an oracle.
-2. **Keep a clip in force for more than the next mark.** The interpreter records the clip on
-   every record, but the renderer resets it after each mark drawn, so a clip applies to one
-   mark rather than to the rest of the page. The render loop should trust `record.clip`.
-3. **Patterns**: the tiling loop and the colour-space converter, for the painting and
+2. **Patterns**: the tiling loop and the colour-space converter, for the painting and
    shading pattern types.
-4. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
+3. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
    not going to be built.
-5. **Fill the Inspector's right-hand region** from the object model, which is the window work
+4. **Fill the Inspector's right-hand region** from the object model, which is the window work
    that has not been started.
-6. **Break the symmetry of the remaining fixtures.** The diagonal-clip page is asymmetric now
+5. **Break the symmetry of the remaining fixtures.** The diagonal-clip page is asymmetric now
    and scored 0.51652 when its clip was a box, where every symmetric fixture had scored above
    0.99 through the same bug. The rest still need the same treatment.
-7. Tier B with `SOURCES.md`: a real-world corpus, which is the only way to find the encoding
+6. Tier B with `SOURCES.md`: a real-world corpus, which is the only way to find the encoding
    problems a hand-written fixture cannot express.
 
 Settled and no longer queued: images decode and draw, axial and radial shadings paint, the
@@ -76,6 +73,11 @@ double-count (a `TJ` kern also displaces the glyph that follows it, not the one 
 index), and the standard-14 width tables are verified rather than trusted — every one of the
 1043 widths was measured against two independent renderers and Adobe's own metrics, so
 nobody should re-derive them from a local URW clone.
+
+The clip work is otherwise finished: a clip stays in force until a `W` changes it or a `Q`
+restores it, so a mark's rendering depends only on its own record. What is left is the cap —
+a page's clip keeps at most 32 paths, past which the outermost are dropped for box-only
+culling, and the fix is one shared sweep over the paths rather than a larger number.
 
 One loose end on the write side: `StreamCompression::Flate` is defined but not wired into
 `encode_stream`, so a stream chosen for writing is not compressed. What the compressor now

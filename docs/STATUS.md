@@ -105,6 +105,14 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   because no circle in the family passes through the family's own centre and the parameter
   there is negative rather than absent.
 
+  **Clips are regions, not boxes.** A clip path is rasterised into a per-pixel coverage
+  mask and intersects with any mask already in force, so a diagonal clip is a diagonal and
+  two nested clips are their intersection. A mark's rendering depends only on its own record
+  — the clip in force when it was created — and not on what the renderer happened to draw
+  first, so rendering a page twice gives byte-identical output. A `W n` with an empty path is
+  an *empty* clip rather than an absent one, which is the case that separates "nothing is
+  drawn" from "everything is drawn".
+
   A page names a *pattern* and the pattern names a shading, so both shapes are accepted,
   and the pattern's own `/Matrix` composes inside the mark's transformation rather than
   replacing it. Types 1, 4, 5, 6 and 7 are reported as notes rather than painted wrongly.
@@ -119,7 +127,7 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Tests
 
-577, none ignored, no warnings. Ten kinds matter:
+593, none ignored, no warnings. Ten kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -149,6 +157,11 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   that one the expectation is the gradient's own closed form evaluated at each pixel's
   centre rather than a snapshot, so the assertion states what the gradient should be rather
   than what this renderer last produced.
+  Two of those fixtures are about the clip: a diagonal-clip page scores **0.99639** against
+  `mutool`, and so does a page whose clip outlives the mark that set it, which is the case a
+  per-mark reset got wrong. Both are deliberately asymmetric — nothing is mirrored in either
+  axis — because a symmetric page scores above 0.99 whether or not the clip is the right
+  shape, so a symmetric fixture cannot see an error sitting off the centre.
 - **Fidelity against `mutool`, measured** — the shapes page, the clipped page and the
   diagonal-clip page rendered by `mutool` at 150 DPI (the resolution the acceptance criteria
   name) and compared with SSIM. Shapes **0.99829**, clipped **0.98537**, diagonal clip
@@ -195,13 +208,10 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Gaps, in the order they block
 
-1. **A clip is only in force for the mark that follows it.** The interpreter records the clip
-   on every mark, but the renderer applies it when it reaches a `W n` and drops it after the
-   next mark is drawn, because the mark's own cull and that reset are the same rectangle. A
-   page that clips once and then draws twenty things draws nineteen of them unclipped. The
-   fix is for the render loop to trust each record's clip rather than the mark before it,
-   which means deciding whether re-applying a clip is cheap enough to do per mark or wants a
-   handle comparing clips by identity.
+1. **A clip's paths are capped at 32.** A page nesting more than that drops its outermost
+   paths and falls back to box-only culling, so a deeply nested clip loses an antialiased
+   edge. The cap exists because each path costs a full coverage rasterisation, and the
+   honest fix is to composite the paths in a shared sweep rather than to raise the number.
 2. **Only embedded TrueType outlines draw.** A glyph is filled from a `/FontFile2` program
    and compared against `mutool` at 0.962 SSIM. Four kinds are still missing: the standard
    fourteen, which have no program at all; CFF and Type 1, which need a charstring
