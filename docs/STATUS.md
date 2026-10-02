@@ -149,12 +149,39 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   that one the expectation is the gradient's own closed form evaluated at each pixel's
   centre rather than a snapshot, so the assertion states what the gradient should be rather
   than what this renderer last produced.
-- **Fidelity against `mutool`, measured** — the shapes page and the clipped page rendered
-  by `mutool` at 150 DPI (the resolution the acceptance criteria name) and compared with
-  SSIM. Shapes **0.99829**, clipped **0.99917**, against a bar of 0.95. Both renderings are
-  flattened onto one background first, because `mutool` writes an unpainted page as
-  transparent and this renderer writes white paper, and comparing raw buffers would compare
-  conventions rather than renderers. Skipped cleanly when `mutool` is absent.
+- **Fidelity against `mutool`, measured** — the shapes page, the clipped page and the
+  diagonal-clip page rendered by `mutool` at 150 DPI (the resolution the acceptance criteria
+  name) and compared with SSIM. Shapes **0.99829**, clipped **0.98537**, diagonal clip
+  **0.99639**, against a bar of 0.95. Both renderings are flattened onto one background
+  first, because `mutool` writes an unpainted page as transparent and this renderer writes
+  white paper, and comparing raw buffers would compare conventions rather than renderers.
+  Skipped cleanly when `mutool` is absent.
+- **Why the clipped page's score went down, and why that is right** — it was 0.99917 when a
+  clip was its bounding box and is 0.98537 now. The whole difference is one column of 209
+  pixels: `mutool` hard-steps a clip edge onto the pixel grid, snapping a clip at 104.17px to
+  105px, while this renderer antialiases it and covers that pixel by its actual share. A sweep
+  of the clip edge across one pixel in steps of a tenth of a pixel shows `mutool` producing
+  no intermediate value at any of them. The clip's *position* agrees to the pixel: the
+  diagonal-clip page's edge sits at the same column on every row checked. Antialiasing a
+  clipping path is what the specification permits and what makes a diagonal clip a diagonal,
+  so this renderer antialiases it and the disagreement is recorded rather than matched.
+- **The diagonal-clip fixture is deliberately asymmetric** — content away from the centre,
+  nothing mirrored in either axis — because every earlier fixture was symmetric about the
+  page centre, and a symmetric page scores above 0.99 whether or not the clip is the right
+  shape. This one scored **0.51652** with the clip as its bounding box and **0.99639** with
+  the clip as its path, which is the difference the fixture exists to catch.
+- **A clip is a region** — the interpreter records the clipping path, its fill rule and its
+  box, and the renderer rasterises the path into a per-pixel coverage mask that is multiplied
+  into each fill's own coverage rather than tested against it, so a diagonal clip is a
+  diagonal and a circular one is round. Successive clips multiply rather than replace, the
+  box is kept as a cheap bound and narrowed whenever the mask is, and a `W n` with an empty
+  path is a clip to nothing rather than no clip, which is what the specification says.
+- **The clip's region decides visibility, not its box** — a triangle's corner just outside
+  the hypotenuse is paper rather than ink, a disc leaves all four corners bare with an
+  antialiased edge between them, two successive clips leave only their intersection, a
+  rectangle clip is still exact and still costs one branch per pixel, an empty clip draws
+  nothing at all, and `reset_clip` brings the whole page back with the mask and the box
+  together.
 - **The text model against another renderer** — 400 cases through `mutool draw -F trace`,
   compared glyph position by glyph position, failing loudly rather than skipping when the
   renderer is absent so that it cannot pass by having nothing to compare against. This is
@@ -168,18 +195,20 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Gaps, in the order they block
 
-1. **A clip is honoured as its bounding box.** A clip path can be any shape; what the
-   interpreter records is the rectangle that bounds it, which draws slightly more than it
-   should rather than slightly less. A diagonal clip and a circular one are both boxes now.
-   The renderer needs the real clip region, and the renderer is where it belongs: the
-   interpreter's job is to say *what* was clipped, not to rasterise it.
+1. **A clip is only in force for the mark that follows it.** The interpreter records the clip
+   on every mark, but the renderer applies it when it reaches a `W n` and drops it after the
+   next mark is drawn, because the mark's own cull and that reset are the same rectangle. A
+   page that clips once and then draws twenty things draws nineteen of them unclipped. The
+   fix is for the render loop to trust each record's clip rather than the mark before it,
+   which means deciding whether re-applying a clip is cheap enough to do per mark or wants a
+   handle comparing clips by identity.
 2. **Only embedded TrueType outlines draw.** A glyph is filled from a `/FontFile2` program
    and compared against `mutool` at 0.962 SSIM. Four kinds are still missing: the standard
    fourteen, which have no program at all; CFF and Type 1, which need a charstring
    interpreter rather than a table walk; Type 3, whose glyphs are content streams; and
    composite fonts (Type 0 and Identity-H), whose character codes are two bytes rather than
    one. A page using one is reported rather than drawn blank.
-3. **The font size is applied once, in one place, and the model is tested against another
+4. **The font size is applied once, in one place, and the model is tested against another
    renderer.** The text matrix is measured in ems and carries no font size; the size enters
    when a glyph is drawn. The model is pinned by a differential test over 400 cases against
    `mutool draw -F trace`, which is how the last three text bugs were found and how the

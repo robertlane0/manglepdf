@@ -742,6 +742,13 @@ pub fn draw(
             if let Some(a) = px.get_mut(3) {
                 *a = (f64::from(*a) * masked).clamp(0.0, 255.0).round() as u8;
             }
+            // And the clip does the same, for the same reason and with the same result at
+            // the edge: a clip that is a region antialiases rather than steps.
+            if let Some(share) = device.clip_coverage(x, y) {
+                if let Some(a) = px.get_mut(3) {
+                    *a = (f64::from(*a) * share).clamp(0.0, 255.0).round() as u8;
+                }
+            }
             if px.get(3).copied().unwrap_or(0) == 0 {
                 continue;
             }

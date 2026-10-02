@@ -506,6 +506,36 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
 /// them rather than by a function that has to reach into both.
 type FontLookup<'a> = &'a mut dyn FnMut(&str) -> Result<FontProgram, String>;
 
+/// A rectangle carried through the page placement, as a device-space rectangle.
+///
+/// Every corner goes through the matrix and the result is re-bounded, because a
+/// transformation that rotates or flips does not map an axis-aligned rectangle to an
+/// axis-aligned one.
+fn placed_rect(bounds: &mangle_content::ClipBounds, placement: &Matrix) -> Rect {
+    let corners = [
+        placement.apply(bounds.x0, bounds.y0),
+        placement.apply(bounds.x1, bounds.y0),
+        placement.apply(bounds.x1, bounds.y1),
+        placement.apply(bounds.x0, bounds.y1),
+    ];
+    let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+    let max_x = corners
+        .iter()
+        .map(|c| c.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+    let max_y = corners
+        .iter()
+        .map(|c| c.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    Rect {
+        x0: min_x,
+        y0: min_y,
+        x1: max_x,
+        y1: max_y,
+    }
+}
+
 /// Draw one mark.
 #[allow(clippy::too_many_arguments)]
 fn draw_mark(
@@ -573,38 +603,30 @@ fn draw_mark(
             }
             device.reset_clip();
         }
-        Mark::ClipChanged(Some(bounds)) => {
-            // The interpreter has already put these bounds through the CTM that was in force
-            // when the clip was set, so they are in the page's own space and the *only*
-            // transformation left is the page placement. Pushing them through the mark's
-            // matrix as well applies the CTM twice, which is invisible under an identity
-            // CTM and turns a scaled clip into no clip at all.
+        Mark::ClipChanged(Some(clip)) => {
+            // The interpreter has already put this region's bounds and its path through the
+            // CTM that was in force when the clip was set, so they are in the page's own
+            // space and the *only* transformation left is the page placement. Pushing them
+            // through the mark's matrix as well applies the CTM twice, which is invisible
+            // under an identity CTM and turns a scaled clip into no clip at all.
             //
-            // All four corners go through the matrix and the result is re-bounded, because
-            // a transformation that rotates or flips does not map an axis-aligned rectangle
-            // to an axis-aligned rectangle.
-            let corners = [
-                placement.apply(bounds.x0, bounds.y0),
-                placement.apply(bounds.x1, bounds.y0),
-                placement.apply(bounds.x1, bounds.y1),
-                placement.apply(bounds.x0, bounds.y1),
-            ];
-            let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-            let max_x = corners
-                .iter()
-                .map(|c| c.0)
-                .fold(f64::NEG_INFINITY, f64::max);
-            let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-            let max_y = corners
-                .iter()
-                .map(|c| c.1)
-                .fold(f64::NEG_INFINITY, f64::max);
-            device.clip_to(Rect {
-                x0: min_x,
-                y0: min_y,
-                x1: max_x,
-                y1: max_y,
-            });
+            // All four corners of the bounds go through the matrix and the result is
+            // re-bounded, because a transformation that rotates or flips does not map an
+            // axis-aligned rectangle to an axis-aligned rectangle.
+            device.clip_to(placed_rect(&clip.bounds, placement));
+            // The region, not the box around it: a diagonal clip is a diagonal, and the box
+            // is only the bound that rejects pixels cheaply. The path is flattened after the
+            // transformation, so a curve is measured where it will be drawn.
+            let polygon = transform_path(&clip.segments, placement);
+            let rule = match clip.rule {
+                ContentRule::EvenOdd => FillRule::EvenOdd,
+                ContentRule::NonZero => FillRule::NonZero,
+            };
+            // An empty region is a clip to nothing, and a polygon with no path in it
+            // rasterises to no coverage at all, which is the same thing. Either way the
+            // device ends up with a mask that hides everything rather than one that was
+            // never installed and so shows everything.
+            device.clip_to_path(&polygon, rule);
         }
         Mark::ClipChanged(None) => device.reset_clip(),
         // A `sh` with no operand at all names nothing, and the interpreter leaves the name
@@ -618,34 +640,23 @@ fn draw_mark(
                     // that order and the gradient is sampled in its own space throughout.
                     let to_shading = to_device.concat(pattern_matrix);
                     // A shading paints the *current clip*, which for `sh` is whatever path
-                    // the page set with `W n`. The recorded bounds are that path's box, and
-                    // painting outside it would put a gradient where the page drew nothing.
-                    // They are already in the page's own space — the interpreter applied the
-                    // CTM when the clip was set — so only the placement remains, and the
-                    // CTM must not be applied again.
-                    if let Some(bounds) = record.clip {
-                        let corners = [
-                            placement.apply(bounds.x0, bounds.y0),
-                            placement.apply(bounds.x1, bounds.y0),
-                            placement.apply(bounds.x1, bounds.y1),
-                            placement.apply(bounds.x0, bounds.y1),
-                        ];
-                        let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-                        let max_x = corners
-                            .iter()
-                            .map(|c| c.0)
-                            .fold(f64::NEG_INFINITY, f64::max);
-                        let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-                        let max_y = corners
-                            .iter()
-                            .map(|c| c.1)
-                            .fold(f64::NEG_INFINITY, f64::max);
-                        device.clip_to(Rect {
-                            x0: min_x,
-                            y0: min_y,
-                            x1: max_x,
-                            y1: max_y,
-                        });
+                    // the page set with `W n`. Painting outside it would put a gradient
+                    // where the page drew nothing.
+                    //
+                    // The recorded region is that path and its box, and both are already in
+                    // the page's own space — the interpreter applied the CTM when the clip was
+                    // set — so only the placement remains, and the CTM must not be applied
+                    // again. The region goes in whole rather than only the box, for the same
+                    // reason every other mark does: a gradient inside a diagonal clip is
+                    // diagonal, and inside a circular one it is round.
+                    if let Some(clip) = record.clip.as_ref() {
+                        device.clip_to(placed_rect(&clip.bounds, placement));
+                        let polygon = transform_path(&clip.segments, placement);
+                        let rule = match clip.rule {
+                            ContentRule::EvenOdd => FillRule::EvenOdd,
+                            ContentRule::NonZero => FillRule::NonZero,
+                        };
+                        device.clip_to_path(&polygon, rule);
                     }
                     shading::paint(device, &shading, &to_shading, record.fill_alpha);
                     device.reset_clip();

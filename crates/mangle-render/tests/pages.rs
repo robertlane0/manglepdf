@@ -115,6 +115,58 @@ fn clipped_page() -> Vec<u8> {
     out
 }
 
+/// A page clipped to a diagonal, with content placed to make the comparison mean something.
+///
+/// **The asymmetry is the point.** Every other fixture here is symmetric about the centre
+/// of the page — a shape in each quadrant, a clip down the middle — and a symmetric page
+/// scores above 0.99 whether or not the clip is the right shape, because a transform applied
+/// twice lands somewhere else and the two somewhere-elses look alike. Nothing here mirrors
+/// in either axis: the clip is a triangle whose hypotenuse runs from the lower right to the
+/// upper left, the shapes sit in three different corners, and one of them straddles the
+/// diagonal so that the clip edge is compared against real ink rather than against paper.
+fn diagonal_clip_page() -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 5];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    // The clip is the triangle (0,0) (200,0) (30,200): a diagonal hypotenuse from the lower
+    // right to the upper left, and nothing at all above or to the right of it. A renderer
+    // that honours only the bounding box paints the whole of that box instead, which is
+    // most of the page, so the two cannot be mistaken for one another.
+    //
+    // Each fill repeats the clip path. That is redundant in a correct renderer and is
+    // written this way so that the fixture tests the shape of the clip rather than how long
+    // a renderer remembers one.
+    let content = b"q 0 0 0 rg 0 0 m 200 0 l 30 200 l h W n 0 0 200 200 re f Q \
+                    q 1 0 0 rg 0 0 m 200 0 l 30 200 l h W n 10 10 60 30 re f Q \
+                    q 0 0 1 rg 0 0 m 200 0 l 30 200 l h W n 60 120 90 40 re f Q \
+                    q 0 153 0 rg 0 0 m 200 0 l 30 200 l h W n 140 150 40 40 re f Q";
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content);
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 4\n");
+    for offset in at.iter().take(5).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size 5 /Root 1 0 R /ID [<0102> <0304>] >>\nstartxref\n{xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    out
+}
+
 fn open(bytes: Vec<u8>) -> Document {
     Document::open(bytes, OpenOptions::default()).expect("the file should open")
 }
@@ -694,6 +746,71 @@ fn our_clip_agrees_with_mutools() {
     );
     let metrics = &comparison.metrics;
     eprintln!("clipped page: {}", metrics.summary());
+    assert!(
+        metrics.meets_fidelity_bar(0.95),
+        "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",
+        metrics.ssim,
+        metrics.summary()
+    );
+}
+
+/// The diagonal-clip page, against the oracle.
+///
+/// A clip is where a renderer is most likely to be subtly wrong, and where a difference
+/// shows up as ink in the wrong place rather than as a slightly soft edge. This is the
+/// check that a clip is a *region* and not the box around it: with the box, the whole of
+/// the upper right of this page would be black, and the score below would say so.
+#[test]
+fn our_diagonal_clip_agrees_with_mutools() {
+    if mutool().is_none() {
+        eprintln!("skipped: mutool is not installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join("mangle-render-oracle");
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let pdf = dir.join("diagonal-clip.pdf");
+    std::fs::write(&pdf, diagonal_clip_page()).expect("a file to render");
+
+    let scale = 150.0 / 72.0;
+    let ours = render(diagonal_clip_page(), scale);
+    let theirs_path = dir.join("diagonal-clip.pam");
+    let Some(data) = mutool_render(&pdf, scale, &theirs_path) else {
+        eprintln!("skipped: mutool could not render the page");
+        return;
+    };
+    let Some((w, h, depth, body)) = read_pam(&data) else {
+        eprintln!("skipped: could not read mutool's output");
+        return;
+    };
+    let theirs = flatten_onto_paper(&pam_to_image(w, h, depth, body));
+
+    // The page's own claims, checked on *both* renderings. The upper right is outside the
+    // hypotenuse, so it is paper in a renderer that clips to the region and black in one
+    // that clips to the box: this is the assertion that tells the two apart, and it is why
+    // the fixture is asymmetric.
+    for (image, who) in [(&ours.image, "ours"), (&theirs, "mutool")] {
+        assert!(
+            region_is_fraction(image, 0.6, 0.05, 0.95, 0.45, [255, 255, 255]),
+            "{who} puts ink where the diagonal clip says there is none"
+        );
+        assert!(
+            region_is_fraction(image, 0.4, 0.85, 0.75, 0.95, [0, 0, 0]),
+            "{who} leaves the lower right bare inside the clip"
+        );
+        assert!(
+            region_is_fraction(image, 0.33, 0.36, 0.45, 0.39, [0, 0, 255]),
+            "{who} loses the part of the blue bar that the clip keeps"
+        );
+    }
+
+    let comparison = compare(&ours.image, &theirs, &SsimOptions::default());
+    assert!(
+        comparison.is_valid(),
+        "the comparison did not happen: {:?}",
+        comparison.refused
+    );
+    let metrics = &comparison.metrics;
+    eprintln!("diagonal clip page: {}", metrics.summary());
     assert!(
         metrics.meets_fidelity_bar(0.95),
         "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",

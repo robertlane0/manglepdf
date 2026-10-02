@@ -1289,7 +1289,8 @@ pub const MAX_PROGRAM: usize = 4096;
 ///
 /// `matrix` maps the shading's own space onto the page. Each pixel of the clip is mapped
 /// *back* through its inverse, which is what makes a rotated gradient work with no special
-/// cases.
+/// cases. Where the clip is a region rather than a box, the pixel's share of that region
+/// multiplies the gradient's own coverage.
 pub fn paint(device: &mut Device, shading: &Shading, matrix: &Matrix, alpha: f64) -> bool {
     let area = device.clip();
     let Some((columns, rows)) = area.pixels() else {
@@ -1299,10 +1300,10 @@ pub fn paint(device: &mut Device, shading: &Shading, matrix: &Matrix, alpha: f64
         return false;
     };
     let extend = shading.extend();
-    let x0 = columns.start;
-    let y0 = rows.start;
     let mut painted = 0usize;
 
+    // Every pixel is written at its own coordinates, which are the clip's own: a shading
+    // inside a clip that does not start at the origin is still painted where it belongs.
     for y in rows.clone() {
         for x in columns.clone() {
             let (sx, sy) = inverse.apply(x as f64 + 0.5, y as f64 + 0.5);
@@ -1353,13 +1354,20 @@ pub fn paint(device: &mut Device, shading: &Shading, matrix: &Matrix, alpha: f64
             if coverage <= 0.0 {
                 continue;
             }
+            let a = (coverage * alpha).clamp(0.0, 1.0);
+            // The clip mask multiplies the gradient's own coverage rather than deciding it,
+            // so a shading inside a diagonal clip has that edge antialiased instead of
+            // stopping at it.
+            let a = a * device.clip_coverage(x, y).unwrap_or(1.0);
+            if a <= 0.0 {
+                continue;
+            }
             let Some(colour) = shading.colour_at(t) else {
                 continue;
             };
-            let a = (coverage * alpha).clamp(0.0, 1.0);
             device.put(
-                x - x0,
-                y - y0,
+                x,
+                y,
                 [
                     (colour[0].clamp(0.0, 1.0) * 255.0).round() as u8,
                     (colour[1].clamp(0.0, 1.0) * 255.0).round() as u8,

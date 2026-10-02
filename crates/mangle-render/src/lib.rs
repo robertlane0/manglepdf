@@ -796,6 +796,23 @@ fn normalise(v: (f64, f64)) -> (f64, f64) {
 /// contributes `as·(1 - αs)` and the source contributes `αs`, so compositing the same
 /// colour twice converges to it rather than overshooting.
 pub fn composite(image: &mut Image, cov: &Coverage, rgba: [u8; 4], origin: (usize, usize)) {
+    composite_masked(image, cov, rgba, origin, None);
+}
+
+/// Composite a coverage buffer, with a per-pixel clip mask folded into the coverage.
+///
+/// `mask` is the whole image's mask and its width, or `None` for no clip beyond the box.
+///
+/// The mask is a *coverage* and is multiplied into the shape's own, so the two edges
+/// antialias against each other. Treating it as a boundary instead would round each pixel
+/// to 1 or 0 at the clip edge, which is the hard step a diagonal clip must not have.
+pub fn composite_masked(
+    image: &mut Image,
+    cov: &Coverage,
+    rgba: [u8; 4],
+    origin: (usize, usize),
+    mask: Option<(&[u8], usize)>,
+) {
     let alpha = f64::from(rgba[3]);
     for (x, y, a) in cov.covered() {
         let (Some(px), Some(py)) = (origin.0.checked_add(x), origin.1.checked_add(y)) else {
@@ -803,6 +820,16 @@ pub fn composite(image: &mut Image, cov: &Coverage, rgba: [u8; 4], origin: (usiz
         };
         let Some(dst) = image.get(px, py) else {
             continue;
+        };
+        // The mask is in the image's coordinates and the coverage in the clipped area's, so
+        // the pixel is found by where it will land rather than by where it was rasterised.
+        let a = match mask {
+            Some((m, width)) if width > 0 && py < image.height => {
+                let clipped = f32::from(m.get(py * width + px).copied().unwrap_or(0)) / 255.0;
+                a * clipped
+            }
+            Some(_) => 0.0,
+            None => a,
         };
         let src_a = alpha * f64::from(a) / 255.0;
         if src_a <= 0.0 {
@@ -899,11 +926,81 @@ impl Rect {
     }
 }
 
+/// The whole image's mask, from a coverage buffer rasterised over a rectangle.
+///
+/// `area` is the rectangle that was rasterised and `width` the image's width. A coverage
+/// buffer covers only the pixels its rectangle reaches, so this is where a region is grown
+/// into the image's own shape; the rest stays at zero, which is right, because those pixels
+/// are outside the clip path by construction.
+fn mask_from(cov: &Coverage, area: Rect, width: usize, height: usize) -> Vec<u8> {
+    let mut mask = vec![0u8; width * height];
+    let Some((columns, rows)) = area.pixels() else {
+        return mask;
+    };
+    for (x, y, alpha) in cov.covered() {
+        let (Some(column), Some(row)) = (columns.start.checked_add(x), rows.start.checked_add(y))
+        else {
+            continue;
+        };
+        if column >= width || row >= height {
+            continue;
+        }
+        if let Some(slot) = mask.get_mut(row * width + column) {
+            *slot = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+    mask
+}
+
+/// Two masks multiplied together, which is how two successive clips nest.
+///
+/// Multiplying rather than choosing is what makes a clip to a circle inside a clip to a
+/// rectangle the shape the page drew, and it costs one multiply per pixel on a page that has
+/// asked for it.
+fn intersect_masks(a: &[u8], b: &[u8]) -> Vec<u8> {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| ((u32::from(*x) * u32::from(*y) + 127) / 255) as u8)
+        .collect()
+}
+
+/// Zero every pixel outside a rectangle, so a mask agrees with a box that has just narrowed.
+fn narrow_mask(mask: &mut [u8], width: usize, height: usize, rect: Rect) {
+    let area = rect.normalised();
+    for y in 0..height {
+        let row = y * width;
+        let Some(cells) = mask.get_mut(row..row.saturating_add(width)) else {
+            continue;
+        };
+        let row_y = y as f64;
+        if row_y < area.y0 || row_y >= area.y1 {
+            cells.fill(0);
+            continue;
+        }
+        for (x, cell) in cells.iter_mut().enumerate() {
+            let column = x as f64;
+            if column < area.x0 || column >= area.x1 {
+                *cell = 0;
+            }
+        }
+    }
+}
+
 /// The current rendering state: the clip, and the base colour.
 #[derive(Debug, Clone)]
 pub struct Device {
     image: Image,
+    /// The clip's bounding box, which is the fast bound: it rejects a pixel before any
+    /// coverage is computed, and it is all a rectangle clip needs.
     clip: Rect,
+    /// The clip's per-pixel coverage, one byte per pixel in the image's own order, when the
+    /// clip is not a rectangle.
+    ///
+    /// Coverage rather than a flag, because a clip edge is a place where two renderers
+    /// legitimately differ by a fraction of a pixel and a hard boundary there is a
+    /// staircase down a diagonal. `None` means the clip is the box alone, which is the case
+    /// for almost every page and costs a branch per pixel on the rest.
+    clip_mask: Option<Vec<u8>>,
     /// The colour new marks are drawn in, as straight RGBA.
     pub fill: [u8; 4],
     pub stroke: [u8; 4],
@@ -918,6 +1015,7 @@ impl Device {
         Self {
             image,
             clip,
+            clip_mask: None,
             fill: [0, 0, 0, 255],
             stroke: [0, 0, 0, 255],
             stroke_style: StrokeStyle::default(),
@@ -950,15 +1048,60 @@ impl Device {
         self.image.put(x, y, rgba);
     }
 
-    /// Narrow the clip. A clip to nothing means nothing further is drawn, which is a
-    /// state and not an error.
+    /// Narrow the clip to a rectangle.
+    ///
+    /// A clip to nothing means nothing further is drawn, which is a state and not an error.
+    /// A mask already in force is narrowed to the rectangle as well: a clip and a mask that
+    /// disagree about where the page stops is not a fast path, it is two answers to one
+    /// question, and the renderer would draw whatever the looser of the two allows.
     pub fn clip_to(&mut self, rect: Rect) {
         self.clip = self.clip.intersect(rect);
+        if let Some(mask) = self.clip_mask.as_mut() {
+            narrow_mask(mask, self.image.width, self.image.height, self.clip);
+        }
     }
 
-    /// Restore the clip to the whole image.
+    /// Narrow the clip to a path, under a fill rule.
+    ///
+    /// The path is rasterised with the same code that fills a shape, and the result becomes
+    /// the device's mask. An existing mask is *intersected* rather than replaced, because two
+    /// successive clip operators nest: a second `W n` inside a first one can only ever
+    /// remove pixels, and replacing the mask would widen the clip to the second path on its
+    /// own. The rectangle is narrowed to the path's box at the same time, so a caller that
+    /// never reads the mask still gets its pixels rejected early.
+    pub fn clip_to_path(&mut self, polygon: &Polygon, rule: FillRule) {
+        // The mask is the whole image, because it is read by pixel coordinate and a mask
+        // that started at some later pixel would have to be offset on every read.
+        let area = self.image.rect();
+        let coverage = rasterise(&polygon.edges(), area, rule);
+        let fresh = mask_from(&coverage, area, self.image.width, self.image.height);
+        self.clip_mask = Some(match self.clip_mask.take() {
+            Some(existing) => intersect_masks(&existing, &fresh),
+            None => fresh,
+        });
+        if let Some(bounds) = polygon.bounds() {
+            self.clip = self.clip.intersect(bounds);
+        }
+    }
+
+    /// The clip's coverage at a pixel, or `None` when the clip is only a box.
+    ///
+    /// `None` on the common path is the point: a page whose clips are rectangles — which is
+    /// nearly all of them — pays one branch per pixel and nothing else.
+    #[must_use]
+    pub fn clip_coverage(&self, x: usize, y: usize) -> Option<f64> {
+        let mask = self.clip_mask.as_ref()?;
+        let w = self.image.width;
+        if y >= self.image.height || x >= w {
+            return Some(0.0);
+        }
+        mask.get(y * w + x).map(|c| f64::from(*c) / 255.0)
+    }
+
+    /// Restore the clip to the whole image, box and mask both.
     pub fn reset_clip(&mut self) {
         self.clip = self.image.rect();
+        self.clip_mask = None;
     }
 
     #[must_use]
@@ -976,6 +1119,11 @@ impl Device {
     }
 
     /// Fill a polygon.
+    ///
+    /// The clip mask is folded into the coverage rather than used to reject pixels, so a
+    /// fill that crosses a diagonal clip is antialiased against that edge. Clipping to the
+    /// mask as a boundary would draw a staircase, which is exactly what a bounding box does
+    /// today and exactly what a clip is supposed not to do.
     pub fn fill_polygon(&mut self, polygon: &Polygon, rule: FillRule, colour: [u8; 4]) {
         let Some(bounds) = polygon.bounds() else {
             return;
@@ -989,7 +1137,11 @@ impl Device {
             area.x0.floor().max(0.0) as usize,
             area.y0.floor().max(0.0) as usize,
         );
-        composite(&mut self.image, &cov, colour, origin);
+        let mask = self
+            .clip_mask
+            .as_ref()
+            .map(|m| (m.as_slice(), self.image.width));
+        composite_masked(&mut self.image, &cov, colour, origin, mask);
     }
 
     /// Stroke a polygon's outline, with caps, joins and dashes.
@@ -1540,6 +1692,333 @@ mod tests {
             Some([255, 255, 255, 255]),
             "the shape is outside the clip, so the page is untouched"
         );
+    }
+
+    // ── Clipping by a region rather than by a box ───────────────────────────────
+
+    const BLACK: [u8; 4] = [0, 0, 0, 255];
+
+    /// A device with a white page of the given size.
+    fn paper(w: usize, h: usize) -> Device {
+        Device::new(Image::filled(w, h, [255, 255, 255, 255]))
+    }
+
+    /// How many of the page's pixels are within `tolerance` of black.
+    fn near_black(image: &Image, tolerance: u32) -> usize {
+        (0..image.height)
+            .flat_map(|y| (0..image.width).map(move |x| (x, y)))
+            .filter(|(x, y)| darkness(image, *x, *y) > tolerance)
+            .count()
+    }
+
+    /// How dark is this pixel? 0 is paper and 255 is ink, on luma so that a coloured fill
+    /// counts as dark too.
+    fn darkness(image: &Image, x: usize, y: usize) -> u32 {
+        let Some([r, g, b, _]) = image.get(x, y) else {
+            return 0;
+        };
+        let luma = (u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000;
+        255 - luma
+    }
+
+    #[test]
+    fn a_diagonal_clip_is_a_diagonal_and_not_the_box_around_it() {
+        // The triangle (0,0) (100,0) (0,100) on a 100 by 100 page, filled black over the
+        // whole page. Its box is the whole page, so a renderer that clips to the box paints
+        // all of it; the corner just outside the hypotenuse is the pixel that tells the two
+        // apart.
+        let mut device = paper(100, 100);
+        let clip = Polygon {
+            subpaths: vec![vec![(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)]],
+        };
+        device.clip_to_path(&clip, FillRule::NonZero);
+        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+
+        assert_eq!(
+            device.image().get(10, 10),
+            Some(BLACK),
+            "just inside the hypotenuse is inside the clip"
+        );
+        assert_eq!(
+            device.image().get(90, 90),
+            Some([255, 255, 255, 255]),
+            "just outside the hypotenuse is outside the clip, which a box clip gets wrong"
+        );
+        // Half the page is inside the triangle and half is outside it, so this is not a check
+        // that passes because almost everything was drawn, and the diagonal pixels on the
+        // hypotenuse are the ones with partial coverage.
+        let black = near_black(device.image(), 200);
+        assert!(
+            (4_800..5_000).contains(&black),
+            "half the page should be ink, got {black} pixels"
+        );
+    }
+
+    #[test]
+    fn a_circular_clip_leaves_the_corners_bare_and_antialiases_its_edge() {
+        // A disc of radius 40 about (50,50) on a 100 by 100 page. Every corner of the page is
+        // outside it and the middle is well inside, so a clip that leaked would show at the
+        // corners first.
+        let mut device = paper(100, 100);
+        let disc = disc(50.0, 50.0, 40.0);
+        device.clip_to_path(&disc, FillRule::NonZero);
+        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+
+        for (x, y) in [(2, 2), (97, 2), (2, 97), (97, 97)] {
+            assert_eq!(
+                device.image().get(x, y),
+                Some([255, 255, 255, 255]),
+                "the corner at ({x},{y}) is outside a disc of radius 40"
+            );
+        }
+        assert_eq!(
+            device.image().get(50, 50),
+            Some(BLACK),
+            "the middle is inside"
+        );
+        // Both halves of the edge are substantial: a solid interior and a solid margin, with
+        // a boundary between them. The disc's area is about 5000 of the page's 10000.
+        let solid = near_black(device.image(), 250);
+        assert!(
+            solid > 4_500,
+            "the interior should be solidly ink, got {solid} pixels"
+        );
+        let blank = near_black(device.image(), 5);
+        assert!(
+            blank > 3_000,
+            "the margin should be solidly paper, got {} ink pixels",
+            10_000 - blank
+        );
+        // And the edge itself is a ramp rather than a step: a clip that rounds each pixel to
+        // 1 or 0 has no such pixels at all, which is what a staircase down a circle looks
+        // like when it is drawn at four times the resolution.
+        let partial = (0..100)
+            .flat_map(|y| (0..100).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let d = darkness(device.image(), *x, *y);
+                (10..245).contains(&d)
+            })
+            .count();
+        assert!(
+            partial > 60,
+            "the edge of the clip should be antialiased, found {partial} partial pixels"
+        );
+    }
+
+    /// A disc as the four cubics a page draws one with.
+    ///
+    /// The offset 0.5522847498 is the one that makes four quarter-circle cubics: it is the
+    /// control-point distance that a circle's own arc needs. The segments go through
+    /// `transform_path` because that is what a clip path goes through on its way to the
+    /// device, and a disc built from points would test something no page writes.
+    fn disc(cx: f64, cy: f64, r: f64) -> Polygon {
+        let k = 0.552_284_749_8 * r;
+        let (right, left) = (cx + r, cx - r);
+        let (top, bottom) = (cy + r, cy - r);
+        let segments = vec![
+            PathSegment::Move(right, cy),
+            PathSegment::Curve(right, cy + k, cx + k, top, cx, top),
+            PathSegment::Curve(cx - k, top, left, cy + k, left, cy),
+            PathSegment::Curve(left, cy - k, cx - k, bottom, cx, bottom),
+            PathSegment::Curve(cx + k, bottom, right, cy - k, right, cy),
+            PathSegment::Close,
+        ];
+        transform_path(&segments, &Matrix::IDENTITY)
+    }
+
+    #[test]
+    fn two_clips_nest_rather_than_replacing_one_another() {
+        // The left half, then the top half. Device y grows downward, so the top half is
+        // y = 0 to 50. Their intersection is the top left quadrant and only that: a second
+        // clip that overwrote the first would paint half the page.
+        let mut device = paper(100, 100);
+        device.clip_to(Rect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 50.0,
+            y1: 100.0,
+        });
+        device.clip_to_path(&square(0.0, 0.0, 100.0, 50.0), FillRule::NonZero);
+        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+
+        assert_eq!(device.image().get(25, 25), Some(BLACK), "inside both");
+        // Each of these is inside one of the two clips and outside the other, which is the
+        // whole of what nesting means.
+        for (x, y) in [(75, 25), (25, 75), (75, 75), (10, 90), (90, 10), (98, 98)] {
+            assert_eq!(
+                device.image().get(x, y),
+                Some([255, 255, 255, 255]),
+                "({x},{y}) is inside at most one of the two clips"
+            );
+        }
+        let black = near_black(device.image(), 200);
+        assert!(
+            (2_450..2_550).contains(&black),
+            "a quarter of the page should be ink, got {black} pixels"
+        );
+    }
+
+    #[test]
+    fn a_clip_set_from_a_rectangle_behaves_exactly_as_it_did() {
+        // The common case, and the fast path: a rectangle clip is a box, so no mask is
+        // installed and the coverage is untouched. Every other change to the clip is a change
+        // to this case's behaviour if it leaks.
+        let mut device = paper(100, 100);
+        assert_eq!(device.clip_coverage(50, 50), None, "no mask before a clip");
+        device.clip_to(Rect {
+            x0: 10.0,
+            y0: 10.0,
+            x1: 40.0,
+            y1: 40.0,
+        });
+        assert_eq!(device.clip_coverage(20, 20), None, "a box is not a mask");
+        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+
+        for (x, y) in [(10, 10), (25, 25), (39, 39)] {
+            assert_eq!(device.image().get(x, y), Some(BLACK), "({x},{y}) is inside");
+        }
+        for (x, y) in [(9, 20), (40, 20), (20, 9), (20, 40), (60, 60)] {
+            assert_eq!(
+                device.image().get(x, y),
+                Some([255, 255, 255, 255]),
+                "({x},{y}) is outside"
+            );
+        }
+        // No antialiasing at the edges, because the box is on integer pixels: the box clip is
+        // still a hard edge and is meant to be.
+        let black = near_black(device.image(), 200);
+        assert_eq!(black, 30 * 30, "exactly the rectangle, with no soft edge");
+    }
+
+    #[test]
+    fn a_clip_to_nothing_draws_nothing_at_all() {
+        // `W n` with an empty path. The clip is empty, so the fill is invisible — and it
+        // stays invisible, because a clip that shows nothing is a state rather than an event.
+        let mut device = paper(20, 20);
+        device.clip_to_path(&Polygon::default(), FillRule::NonZero);
+        device.fill_polygon(&square(0.0, 0.0, 20.0, 20.0), FillRule::NonZero, BLACK);
+        assert!(
+            device
+                .image()
+                .pixels
+                .chunks_exact(4)
+                .all(|p| p == [255, 255, 255, 255]),
+            "an empty clip draws nothing"
+        );
+
+        // And a fill that does not even overlap the box gets nothing either: the clip to
+        // nothing is not a box that happens to be empty, it has to reject on its own terms.
+        let mut other = paper(20, 20);
+        other.clip_to(Rect {
+            x0: 100.0,
+            y0: 100.0,
+            x1: 110.0,
+            y1: 110.0,
+        });
+        other.fill_polygon(&square(0.0, 0.0, 20.0, 20.0), FillRule::NonZero, BLACK);
+        assert!(
+            other
+                .image()
+                .pixels
+                .chunks_exact(4)
+                .all(|p| p == [255, 255, 255, 255]),
+            "a box that overlaps nothing draws nothing"
+        );
+    }
+
+    #[test]
+    fn a_rectangle_narrows_a_mask_that_is_already_there() {
+        // A box and a mask that disagree about where the page stops is two answers to one
+        // question, and a caller that reads the mask would be told the page is wider than the
+        // box says it is. The device's own draws use a box to cull with, so this is not a
+        // corner case: it is what happens to a clip on every mark after it.
+        let mut device = paper(100, 100);
+        device.clip_to_path(&square(0.0, 0.0, 60.0, 100.0), FillRule::NonZero);
+        assert_eq!(device.clip_coverage(50, 20), Some(1.0), "inside the mask");
+        assert_eq!(device.clip_coverage(70, 20), Some(0.0), "outside the mask");
+
+        // A box over the top half. The region is now the top left quadrant: the mask is
+        // narrowed by the box rather than left disagreeing with it.
+        device.clip_to(Rect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 100.0,
+            y1: 40.0,
+        });
+        assert_eq!(device.clip_coverage(50, 20), Some(1.0), "inside both");
+        for (x, y) in [(50, 60), (70, 20), (70, 60)] {
+            assert_eq!(
+                device.clip_coverage(x, y),
+                Some(0.0),
+                "({x},{y}) is outside the mask or the box"
+            );
+        }
+        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        assert_eq!(device.image().get(50, 20), Some(BLACK), "inside both");
+        assert_eq!(
+            device.image().get(50, 60),
+            Some([255, 255, 255, 255]),
+            "outside the box the mask may not allow it"
+        );
+        assert_eq!(
+            device.image().get(70, 20),
+            Some([255, 255, 255, 255]),
+            "outside the mask the box may not allow it"
+        );
+
+        // A box that misses the mask entirely is an empty clip, not a mask that ignores the
+        // box: nothing further is drawn until the clip is reset.
+        let mut second = paper(100, 100);
+        second.clip_to_path(&square(0.0, 0.0, 60.0, 100.0), FillRule::NonZero);
+        second.clip_to(Rect {
+            x0: 80.0,
+            y0: 80.0,
+            x1: 90.0,
+            y1: 90.0,
+        });
+        assert_eq!(second.clip_coverage(50, 50), Some(0.0), "the mask is empty");
+        second.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        assert!(
+            second
+                .image()
+                .pixels
+                .chunks_exact(4)
+                .all(|p| p == [255, 255, 255, 255]),
+            "a clip whose box misses the region shows nothing"
+        );
+    }
+
+    #[test]
+    fn a_clip_is_restored_by_a_reset() {
+        // The mask has to go with the box. A mask that survived a reset would go on hiding
+        // the page after `Q`, which is the sort of bug a user sees as a page that comes back
+        // blank.
+        let mut device = paper(100, 100);
+        device.clip_to_path(
+            &Polygon {
+                subpaths: vec![vec![(0.0, 0.0), (30.0, 0.0), (0.0, 30.0)]],
+            },
+            FillRule::NonZero,
+        );
+        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        // The triangle's area is 450, and the fifteen pixels along its hypotenuse are shared
+        // with the page rather than fully covered, so the ink is a little under it.
+        let black = near_black(device.image(), 200);
+        assert!(
+            (430..450).contains(&black),
+            "the triangle is painted, minus the pixels on the diagonal: {black}"
+        );
+        assert_eq!(
+            device.image().get(20, 20),
+            Some([255, 255, 255, 255]),
+            "and nothing outside it"
+        );
+
+        device.reset_clip();
+        assert_eq!(device.clip(), device.image().rect(), "the box is restored");
+        assert_eq!(device.clip_coverage(80, 80), None, "and so is the mask");
+        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        assert_eq!(device.image().get(80, 80), Some(BLACK), "the page is back");
     }
 
     #[test]

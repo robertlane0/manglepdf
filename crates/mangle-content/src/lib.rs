@@ -46,8 +46,8 @@ use mangle_font::metrics::Declared;
 pub use interp::{FillRule, Mark, PageContent, Record, bbox_of, bounds_of, run, run_with};
 pub use matrix::Matrix;
 pub use state::{
-    ClipBounds, Colour, ColourSpace, Dash, ExtGState, ExtGStates, GraphicsState, LineCap, LineJoin,
-    PathSegment, RenderMode, Rgba, StateStack, StrokeStyle, TextState,
+    Clip, ClipBounds, Colour, ColourSpace, Dash, ExtGState, ExtGStates, GraphicsState, LineCap,
+    LineJoin, PathSegment, RenderMode, Rgba, StateStack, StrokeStyle, TextState,
 };
 pub use tokens::{ContentKind, ContentStream, ContentToken, Operation};
 

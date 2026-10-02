@@ -537,14 +537,13 @@ pub struct GraphicsState {
     pub fill: Colour,
     pub stroking: Colour,
     pub text: TextState,
-    /// The clip, as a rectangle in device space.
+    /// The clip in force: a region, not a box.
     ///
-    /// A rectangle is not the whole truth — a clip can be any path — but it is the
-    /// part that decides what is visible for the overwhelming majority of pages, and
-    /// the renderer computes the real region from the path itself. Recording a
-    /// *bounding* box here would be a claim this type cannot keep, so it is called what
-    /// it is.
-    pub clip: Option<ClipBounds>,
+    /// `None` is no clip at all, which is what a page starts with and what `Q` restores. A
+    /// `Some` with an empty path is a clip to nothing, which is a different state: the
+    /// specification makes `W n` with an empty path set the region to the empty one, and a
+    /// reader that cannot tell those two apart draws a page that should be blank.
+    pub clip: Option<Clip>,
     pub fill_alpha: f64,
     pub stroke_alpha: f64,
     pub blend_mode: String,
@@ -585,6 +584,83 @@ impl ClipBounds {
             y1: self.y1.min(other.y1),
         };
         (r.x0 < r.x1 && r.y0 < r.y1).then_some(r)
+    }
+}
+
+/// A clipping region: the path, the rule that decides its inside, and its bounding box.
+///
+/// The box is not the region. It is a cheap bound that rejects most pixels before any
+/// coverage is computed, and it is recorded because every path has one for free. What
+/// decides visibility is the path and the rule.
+///
+/// `segments` is the *most recent* clipping path. Two successive `W n` operations nest, and
+/// the intersection of two arbitrary paths is not itself one path under either fill rule, so
+/// the nesting is expressed by the box and enforced by the renderer, which intersects the
+/// coverage of one path with the coverage of the next. A consumer that only wants to reject
+/// pixels can read the box; a consumer that draws can read the path and let its own
+/// accumulator take the intersection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Clip {
+    /// The bounding box, in the page's coordinate space, with the CTM already applied.
+    pub bounds: ClipBounds,
+    /// The clipping path, in the same space.
+    pub segments: Vec<PathSegment>,
+    /// Which rule decides inside: non-zero or even-odd, taken from the `W` operator.
+    pub rule: crate::interp::FillRule,
+}
+
+impl Clip {
+    /// The clip that hides the whole page, which is what `W n` with no path means.
+    ///
+    /// A clip is a state and not an error, and the specification says so outright: a `W n`
+    /// with an empty path sets the clipping region to the empty region, and nothing is drawn
+    /// until the clip is reset. An empty path is therefore *not* an absent clip, and this
+    /// constructor is what keeps the two apart — `None` means no clip at all, and this means
+    /// a clip that shows nothing.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            bounds: ClipBounds {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 0.0,
+                y1: 0.0,
+            },
+            segments: Vec::new(),
+            rule: crate::interp::FillRule::NonZero,
+        }
+    }
+
+    /// A clip with no path in it, which is a clip to nothing rather than no clip.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+            || self.bounds.x0 >= self.bounds.x1
+            || self.bounds.y0 >= self.bounds.y1
+    }
+
+    /// Narrow this clip by another one.
+    ///
+    /// The box is the intersection of the two boxes, and the path is the newer one, because
+    /// an intersection of two paths is not a path. An empty clip on either side wins: a
+    /// region that shows nothing intersected with anything is nothing, and a box that does
+    /// not overlap is exactly that.
+    #[must_use]
+    pub fn intersect(&self, other: &Self) -> Self {
+        if self.is_empty() {
+            return self.clone();
+        }
+        if other.is_empty() {
+            return other.clone();
+        }
+        let Some(bounds) = self.bounds.intersect(other.bounds) else {
+            return Self::empty();
+        };
+        Self {
+            bounds,
+            segments: other.segments.clone(),
+            rule: other.rule,
+        }
     }
 }
 

@@ -17,7 +17,7 @@ use mangle_syntax::object::{Object, Stream};
 use crate::matrix::Matrix;
 use crate::ops;
 use crate::state::{
-    ClipBounds, Colour, ColourSpace, Dash, GraphicsState, LineCap, LineJoin, PathSegment,
+    Clip, ClipBounds, Colour, ColourSpace, Dash, GraphicsState, LineCap, LineJoin, PathSegment,
     StateStack,
 };
 use crate::tokens::{ContentStream, ContentToken, Operation};
@@ -74,10 +74,14 @@ pub enum Mark {
     },
     /// A shading, filled into the current clip.
     Shading { name: String, matrix: Matrix },
-    /// A clip was narrowed. The bounds are the bounding box of the clipping path in the
-    /// page's coordinate space, as of the moment the clip was set, with the CTM then in
-    /// force already applied.
-    ClipChanged(Option<ClipBounds>),
+    /// A clip was narrowed. The region is the clipping path with the rule that decides its
+    /// inside, in the page's coordinate space, as of the moment the clip was set, with the
+    /// CTM then in force already applied. The box travels with it as a bound, not as the
+    /// thing that decides visibility.
+    ///
+    /// `None` means the clip was reset to none. `Some` with an empty path is a clip to
+    /// nothing, which is a state rather than an error.
+    ClipChanged(Option<Clip>),
 }
 
 /// How a path's interior is decided.
@@ -96,13 +100,13 @@ pub struct Record {
     pub span: Range<usize>,
     /// The transformation the page had when it was drawn.
     pub ctm: Matrix,
-    /// The clip in force: the bounding box of the clipping path, in the page's coordinate
-    /// space, as of the moment the clip was set.
+    /// The clip in force: the region — the clipping path, its rule, and its box — in the
+    /// page's coordinate space, as of the moment the clip was set.
     ///
-    /// The CTM in force when the clip was set is already applied to these bounds, so a
-    /// renderer only has to apply the page placement on top. Applying the mark's CTM again
-    /// would apply it twice.
-    pub clip: Option<ClipBounds>,
+    /// The CTM in force when the clip was set is already applied to the path and to the
+    /// bounds, so a renderer only has to apply the page placement on top. Applying the
+    /// mark's CTM again would apply it twice.
+    pub clip: Option<Clip>,
     /// The fill and stroke alphas, which a compositing renderer needs and a geometry
     /// one does not.
     pub fill_alpha: f64,
@@ -209,7 +213,7 @@ pub fn bounds_of(mark: &Mark) -> Option<ClipBounds> {
                     .fold(f64::NEG_INFINITY, f64::max);
                 Some(ClipBounds { x0, y0, x1, y1 })
             }
-            Mark::ClipChanged(bounds) => *bounds,
+            Mark::ClipChanged(clip) => clip.as_ref().map(|c| c.bounds),
         }
     }
 }
@@ -647,15 +651,46 @@ impl Context<'_> {
     /// Record what a painting operator drew, and end the path.
     fn record_mark(&mut self, op: Operation, name: &[u8], operands: &[&Object]) {
         let clip_pending = std::mem::take(&mut self.clip_pending);
+        // The rule an operator carries in its name, and the same rule the clip it sets is
+        // decided by: `W f*` clips by the even-odd rule exactly as it fills by it.
+        let op_rule = if matches!(name, b"f*" | b"B*" | b"b*") {
+            FillRule::EvenOdd
+        } else {
+            FillRule::NonZero
+        };
         // The clip is the path that is being built, whatever the operator is going to
         // do with it: `W n` clips to it and `W f` clips to it and fills it.
-        let clip_path = if clip_pending && self.state.has_path() {
-            Some(bounds_of(&Mark::Path {
-                segments: self.state.device_path(),
-                fill: None,
-                stroke: None,
-                rule: FillRule::NonZero,
-            }))
+        //
+        // The region and its box are built from this one path, in one place, so that they
+        // cannot disagree. A box computed from a different path than the one being clipped
+        // to is worse than either of them being wrong alone: it is a claim about a shape
+        // that is not on the page.
+        //
+        // A pending `W` with no path is not "no clip". The specification says an empty path
+        // sets the region to the empty region, and until the clip is reset nothing is drawn.
+        let clip_path = if clip_pending {
+            if self.state.has_path() {
+                let segments = self.state.device_path();
+                let bounds = bounds_of(&Mark::Path {
+                    segments: segments.clone(),
+                    fill: None,
+                    stroke: None,
+                    rule: op_rule,
+                })
+                .unwrap_or(ClipBounds {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 0.0,
+                    y1: 0.0,
+                });
+                Some(Clip {
+                    bounds,
+                    segments,
+                    rule: op_rule,
+                })
+            } else {
+                Some(Clip::empty())
+            }
         } else {
             None
         };
@@ -677,15 +712,11 @@ impl Context<'_> {
                 } else {
                     Some(self.state.stroking.clone())
                 },
-                rule: if matches!(name, b"f*" | b"B*" | b"b*") {
-                    FillRule::EvenOdd
-                } else {
-                    FillRule::NonZero
-                },
+                rule: op_rule,
             },
             // `n` paints nothing. It is here only because a pending `W` needs an
             // operation to attach itself to, and the attachment is the mark.
-            b"n" => Mark::ClipChanged(self.state.clip),
+            b"n" => Mark::ClipChanged(self.state.clip.clone()),
             b"sh" => Mark::Shading {
                 name: operands
                     .first()
@@ -720,18 +751,16 @@ impl Context<'_> {
 
         // A pending `W` narrows the clip for this mark and every one after it.
         if clip_pending {
-            // `n` with an empty path says nothing about a clip: there is no path to
-            // clip to, and a reader must not conclude the page is now unclipped.
-            let device = clip_path.unwrap_or(self.state.clip);
-            self.state.clip = match (self.state.clip, device) {
-                (Some(existing), Some(b)) => existing.intersect(b),
-                (None, Some(b)) => Some(b),
-                // A clip to nothing means nothing is drawn from here on, which is a
-                // state rather than an error.
-                (Some(_), None) => None,
+            // Two clips nest: the second is intersected with the first rather than replacing
+            // it, and the intersection of the boxes is what a consumer that only has a box
+            // can honour exactly.
+            self.state.clip = match (&self.state.clip, &clip_path) {
+                (Some(existing), Some(next)) => Some(existing.intersect(next)),
+                (Some(existing), None) => Some(existing.clone()),
+                (None, Some(next)) => Some(next.clone()),
                 (None, None) => None,
             };
-            mark = Mark::ClipChanged(self.state.clip);
+            mark = Mark::ClipChanged(self.state.clip.clone());
         }
 
         let span = match self.path_start {
@@ -743,7 +772,7 @@ impl Context<'_> {
             mark,
             span,
             ctm: self.state.ctm,
-            clip: self.state.clip,
+            clip: self.state.clip.clone(),
             fill_alpha: self.state.fill_alpha,
             stroke_alpha: self.state.stroke_alpha,
             blend_mode: self.state.blend_mode.clone(),
@@ -867,7 +896,7 @@ impl Context<'_> {
             },
             span: op.span.clone(),
             ctm: self.state.ctm,
-            clip: self.state.clip,
+            clip: self.state.clip.clone(),
             fill_alpha: self.state.fill_alpha,
             stroke_alpha: self.state.stroke_alpha,
             blend_mode: self.state.blend_mode.clone(),
@@ -1617,8 +1646,8 @@ mod tests {
     fn a_clip_narrows_and_the_narrowing_is_visible() {
         let out = run_bytes(b"0 0 100 100 re W n 0 0 m 10 10 l S");
         let rec = out.records.first().expect("a mark");
-        let clip = rec.clip.expect("a clip");
-        assert!(near(clip.x0, 0.0) && near(clip.x1, 100.0));
+        let clip = rec.clip.as_ref().expect("a clip");
+        assert!(near(clip.bounds.x0, 0.0) && near(clip.bounds.x1, 100.0));
         // The mark records that the clip changed rather than the path it changed it
         // with, because the path is not drawn.
         assert!(matches!(rec.mark, Mark::ClipChanged(_)));
@@ -1628,12 +1657,89 @@ mod tests {
     fn two_clips_intersect() {
         let out = run_bytes(b"q 0 0 100 100 re W n 0 0 10 10 re W n 0 0 m 1 1 l S Q");
         // One record per clipping operator, then the stroke inside both.
-        let clips: Vec<ClipBounds> = out.records.iter().filter_map(|r| r.clip).collect();
+        let clips: Vec<ClipBounds> = out
+            .records
+            .iter()
+            .filter_map(|r| r.clip.as_ref().map(|c| c.bounds))
+            .collect();
         assert_eq!(clips.len(), 3, "two clips and a stroke");
         let widths: Vec<f64> = clips.iter().map(|c| c.x1 - c.x0).collect();
         // The first clip is 100 wide; the second is the intersection with a 10-wide
         // rectangle, not a replacement; and the stroke inside both sees the narrower one.
         assert_eq!(widths, vec![100.0, 10.0, 10.0]);
+    }
+
+    /// The region is the path, not only its box: a clip set from a rectangle carries that
+    /// rectangle, so a renderer can draw to the region rather than to the bound around it.
+    #[test]
+    fn a_clip_from_a_rectangle_records_that_rectangle_as_its_path() {
+        let out = run_bytes(b"0 0 100 60 re W n 0 0 m 1 1 l S");
+        let clip = out
+            .records
+            .first()
+            .and_then(|r| r.clip.as_ref())
+            .expect("a clip");
+        assert_eq!(clip.rule, FillRule::NonZero);
+        assert!(!clip.is_empty(), "a rectangle is not an empty region");
+        let corners: Vec<(f64, f64)> = clip
+            .segments
+            .iter()
+            .filter_map(|s| match *s {
+                PathSegment::Move(x, y) | PathSegment::Line(x, y) => Some((x, y)),
+                _ => None,
+            })
+            .collect();
+        // The four corners a `re` puts down, in the order it puts them down, and the box
+        // they make. Both come from one path, so they cannot disagree.
+        assert_eq!(
+            corners,
+            vec![(0.0, 0.0), (100.0, 0.0), (100.0, 60.0), (0.0, 60.0)]
+        );
+        assert!(near(clip.bounds.x0, 0.0) && near(clip.bounds.x1, 100.0));
+        assert!(near(clip.bounds.y0, 0.0) && near(clip.bounds.y1, 60.0));
+    }
+
+    /// `W n` with no path is a clip to *nothing*, not no clip at all.
+    ///
+    /// This is where a clip that is a box and a clip that is a region come apart. If an
+    /// empty path were read as "no clip", `None` would reach the renderer and the page would
+    /// be drawn in full — the opposite of what the specification says, and a page that looks
+    /// fine until someone looks for the box the page said it was clipping to.
+    #[test]
+    fn a_clip_to_an_empty_path_is_an_empty_clip_rather_than_no_clip() {
+        let out = run_bytes(b"W n 0 0 100 100 re f 0 0 m 1 1 l S");
+        let first = out.records.first().expect("the clip mark");
+        let clip = first.clip.as_ref().expect("a clip, not the absence of one");
+        assert!(clip.is_empty(), "an empty path clips everything away");
+        assert!(clip.segments.is_empty(), "and it has no path");
+        // The fill after it carries the same empty clip, because the clip is in force.
+        let fill = out.records.get(1).expect("the fill");
+        let Mark::Path { .. } = &fill.mark else {
+            panic!("the second mark should be the fill");
+        };
+        assert!(
+            fill.clip.as_ref().is_some_and(|c| c.is_empty()),
+            "the empty clip is still in force for the fill"
+        );
+        // And so is it for the stroke, which is drawn against nothing.
+        let stroke = out.records.get(2).expect("the stroke");
+        assert!(
+            stroke.clip.as_ref().is_some_and(|c| c.is_empty()),
+            "and for the stroke"
+        );
+    }
+
+    /// `Q` restores the clip that was in force before the `q`, so an empty clip does not
+    /// outlive the state it was set in.
+    #[test]
+    fn an_empty_clip_is_restored_by_q() {
+        let out = run_bytes(b"q W n 0 0 10 10 re f Q 0 0 10 10 re f");
+        // Three marks: the clip, the fill inside `q`, and the fill after `Q`.
+        assert_eq!(out.records.len(), 3);
+        let inside = out.records.get(1).expect("the fill inside q");
+        assert!(inside.clip.as_ref().is_some_and(|c| c.is_empty()));
+        let after = out.records.get(2).expect("the fill after Q");
+        assert!(after.clip.is_none(), "Q restores the clip, which was none");
     }
 
     #[test]
