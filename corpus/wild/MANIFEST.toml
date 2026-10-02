@@ -1,0 +1,1456 @@
+# Tier B: the wild corpus.
+#
+# The PDFs are not in this repository. They are fetched by `cargo xtask corpus fetch`,
+# which checks every byte against the SHA-256 below and refuses anything that does not
+# match. A corpus whose contents are not pinned is a test that changes under you.
+#
+# `SOURCES.md` states where each file came from and under what licence. Only files whose
+# licence permits local testing are listed; none of them is redistributed by this project.
+#
+# The field names below are the ones `fixtures/MANIFEST.toml` uses, and `expect` and
+# `reader_repairs` mean the same thing in both:
+#
+#   expect          "valid"    `qpdf --check` exits 0.
+#                  "repaired" `qpdf --check` exits 2 or 3: a reader has to tolerate or
+#                              rebuild something. `qpdf_verdict` is qpdf's own last line,
+#                              kept verbatim, so the classification can be checked rather
+#                              than trusted.
+#                  "rejected" qpdf cannot open the file at all.
+#
+#   reader_repairs  whether this reader is expected to have had to rebuild the file's
+#                   structure, following `expect`.
+#
+# Both are claims to be checked by reading the report, not gates. `crates/mangle-render/
+# tests/wild_corpus.rs` asserts nothing about any individual file: a corpus test's job is
+# to find things, and a hard threshold on a document nobody has read yet turns the first
+# unexpected result into a permanent red build.
+#
+# `fixtures/MANIFEST.toml` has a `text` field listing strings a fixture must contain. This
+# manifest deliberately has none: nobody has read these documents, so any expected string
+# here would be a guess, and a guessed expectation asserted by a test is worse than none.
+
+# The resolution every comparison in the corpus harness runs at, recorded so a report can
+# be read months later without guessing what it was measured against.
+dpi = 150
+
+
+# ─── LaTeX papers (8 files) ───────────────────────────────────────────
+
+[[corpus]]
+id = "W001"
+file = "pdfjs__bug1885505.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bug1885505.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "latex"
+purpose = "A pdfeTeX 1.21a page with heavy mathematics and an unusual font subset."
+pages = 1
+bytes = 109851
+expect = "repaired"
+reader_repairs = true
+sha256 = "d411e2804f2f8f146f7b893c6da138460cc4d0ecfece7192280328c532b1b7f9"
+producer = "pdfeTeX-1.21a"
+pdf_version = "1.6"
+features = ["annots", "form-or-sig", "linearized", "objstm", "shading", "transparency"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W002"
+file = "pdfjs__bug1992868.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bug1992868.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "latex"
+purpose = "A 14-page pdfeTeX paper: shadings, an SMask, an embedded raster figure and multi-column body."
+pages = 14
+bytes = 1017948
+expect = "valid"
+reader_repairs = false
+sha256 = "af41aa0cd6cef10543dd51c40f94b9876bdb1118316953bb2626d5b37005a134"
+producer = "pdfeTeX-1.21a"
+pdf_version = "1.4"
+features = ["annots", "shading", "smask"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W003"
+file = "pdfjs__issue12337.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue12337.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "latex"
+purpose = "The same pdfeTeX producer on a paper whose figures mix shading and scanned images."
+pages = 14
+bytes = 1016953
+expect = "valid"
+reader_repairs = false
+sha256 = "15ac6c9eb5c04719c49632bbc3138f9ef1c1a8b87f767ab5161302a114523cb3"
+producer = "pdfeTeX-1.21a"
+pdf_version = "1.4"
+features = ["annots", "shading", "smask"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W004"
+file = "pdfjs__bug886717.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bug886717.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "latex"
+purpose = "pdfTeX 1.4 output with old-style Type 1 fonts and PDF 1.4 structure."
+pages = 1
+bytes = 133458
+expect = "repaired"
+reader_repairs = true
+sha256 = "ecb11c144044be8a8bb6cc45a6b85c12640650cb8cf3f57108a0a15da6f37b4c"
+producer = "pdfTeX"
+pdf_version = "1.4"
+features = ["annots", "linearized"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W005"
+file = "pdfjs__bug1539074.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bug1539074.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "latex"
+purpose = "pdfTeX 1.40.17 output: a modern LaTeX build with OpenType-era subsetting."
+pages = 1
+bytes = 6015
+expect = "valid"
+reader_repairs = false
+sha256 = "1daa1ed8e6d2611c41e4072daf226be9bad3d261b7a36783a4cc560790be5adf"
+producer = "pdfTeX-1.40.17"
+pdf_version = "1.5"
+features = ["objstm"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W006"
+file = "pdfjs__bug1937438_af_from_latex.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bug1937438_af_from_latex.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "latex"
+purpose = "luaTeX output, a different TeX engine reaching the same page."
+pages = 1
+bytes = 39945
+expect = "valid"
+reader_repairs = false
+sha256 = "d0ed52c5298140bbe5bf9fb25a510667bf66befdcbc547c22c8a2652a26dfb36"
+producer = "luahbtex-1.17.0"
+pdf_version = "2.0"
+features = ["composite-font", "tagged"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W007"
+file = "gov__arxiv-1512.03385.pdf"
+url = "https://arxiv.org/pdf/1512.03385"
+origin = "US Government publications and arXiv"
+licence = "arXiv perpetual non-exclusive distribution licence"
+category = "latex"
+purpose = "A 12-page pdfTeX-1.40.12 paper: Type 1 body text, composite-font maths, many inline equations."
+pages = 12
+bytes = 819383
+expect = "valid"
+reader_repairs = false
+sha256 = "1e0651b6810ecba34a3dbc5b5b0209226f889004607c1f203540a48d64e5a93a"
+producer = "pdfTeX-1.40.12"
+pdf_version = "1.5"
+features = ["annots", "composite-font", "objstm"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W008"
+file = "gov__arxiv-1206.5537.pdf"
+url = "https://arxiv.org/pdf/1206.5537"
+origin = "US Government publications and arXiv"
+licence = "arXiv perpetual non-exclusive distribution licence"
+category = "latex"
+purpose = "A 23-page paper re-encoded by Ghostscript, so the object graph is not what TeX wrote."
+pages = 23
+bytes = 599495
+expect = "valid"
+reader_repairs = false
+sha256 = "39234135952afe69de24c76264941fc676c0920c0f94eff59b284fee519a51ff"
+producer = "GPL Ghostscript 10.01.2"
+pdf_version = "1.4"
+features = ["annots", "form-or-sig"]
+qpdf_verdict = "(no verdict)"
+
+
+# ─── InDesign / Illustrator / browser re-render (7 files) ─────────────
+
+[[corpus]]
+id = "W009"
+file = "pdfjs__issue10529.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue10529.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "design"
+purpose = "Carries an Adobe InDesign private-data stream alongside ordinary PDF: a producer fingerprint readers must ignore."
+pages = 1
+bytes = 120681
+expect = "valid"
+reader_repairs = false
+sha256 = "01e1abc883c25e4b7d952d260717da5f533b23ccd8d5b10d95f4d8581b294f42"
+producer = "(none recorded)"
+pdf_version = "1.7"
+features = ["composite-font", "indesign", "linearized", "smask"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W010"
+file = "pdfjs__bug1703683_page2_reduced.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bug1703683_page2_reduced.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "design"
+purpose = "InDesign output written by Adobe PDF Library 15.0: placed artwork and transparency groups."
+pages = 1
+bytes = 330131
+expect = "repaired"
+reader_repairs = true
+sha256 = "2466bf4bbeb96cc70847f7888661f3279a8e90363e70afd9ca033834f65a94db"
+producer = "Adobe PDF Library 15.0"
+pdf_version = "1.6"
+features = ["indesign", "jpeg", "linearized", "objstm", "shading", "smask", "tagged"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W011"
+file = "pdfjs__issue12798_page1_reduced.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue12798_page1_reduced.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "design"
+purpose = "A page from an InDesign-placed publication with an embedded colour profile."
+pages = 1
+bytes = 128707
+expect = "repaired"
+reader_repairs = true
+sha256 = "e94da08aae5a5dde73b99d80ec7da8c997c045cb16b09cfc92b9080511259fd0"
+producer = "Adobe PDF Library 15.0"
+pdf_version = "1.6"
+features = ["indesign", "jpeg", "linearized", "objstm", "shading"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W012"
+file = "pdfjs__issue13325_reduced.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue13325_reduced.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "design"
+purpose = "Design-tool output where the visual result depends on getting an unusual blend sequence right."
+pages = 1
+bytes = 73842
+expect = "valid"
+reader_repairs = false
+sha256 = "35d0716fb3c5304d69c890129325332f75d391492502d5b41619cee0f9c8f5c3"
+producer = "Adobe PDF Library 15.0"
+pdf_version = "1.6"
+features = ["indesign", "jpeg", "linearized", "objstm"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W013"
+file = "pdfjs__issue19360.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue19360.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "design"
+purpose = "A larger InDesign page: 1.2 MB of placed art in one PDF 1.5 page."
+pages = 1
+bytes = 1223311
+expect = "repaired"
+reader_repairs = true
+sha256 = "6661a7b83eb7141ad9134cda5830a4dd3507e3f4c020fc24065866935b12445c"
+producer = "Adobe PDF Library 15.0"
+pdf_version = "1.5"
+features = ["annots", "composite-font", "indesign", "jpeg", "shading", "smask", "transparency"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W014"
+file = "pdfjs__issue20324.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue20324.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "design"
+purpose = "Small design-tool output, useful as a fast regression canary."
+pages = 1
+bytes = 11151
+expect = "repaired"
+reader_repairs = true
+sha256 = "033cbfb8667324b4d23be0e2debcd74747caf80ab22672a945b76124bad8b733"
+producer = "Adobe PDF Library 17.0"
+pdf_version = "1.4"
+features = ["indesign", "linearized", "objstm", "smask", "tagged"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W015"
+file = "pdfjs__issue18032.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue18032.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "design"
+purpose = "Written by Firefox, i.e. an InDesign document re-rendered through a browser print path."
+pages = 1
+bytes = 103353
+expect = "repaired"
+reader_repairs = true
+sha256 = "d6b82f30eb0ad60e5bf1fa64b2df7a4a3f7f0543f0373e27c7a8d313261521d3"
+producer = "Firefox"
+pdf_version = "1.7"
+features = ["form-or-sig", "indesign", "jpeg", "linearized", "objstm", "shading"]
+qpdf_verdict = "operation succeeded with warnings"
+
+
+# ─── Word and Office exports (10 files) ───────────────────────────────
+
+[[corpus]]
+id = "W016"
+file = "pdfjs__annotation-highlight.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/annotation-highlight.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "office"
+purpose = "Microsoft Word 2013 export: a real highlight annotation on body text."
+pages = 1
+bytes = 92397
+expect = "valid"
+reader_repairs = false
+sha256 = "72b6387356ccfdfb95a0a5eff5e1ceb9b7667019807d7b04abaf64dad7ea143a"
+producer = "Microsoft® Word 2013"
+pdf_version = "1.5"
+features = ["annots", "form-or-sig", "objstm", "tagged", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W017"
+file = "pdfjs__annotation-strikeout.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/annotation-strikeout.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "office"
+purpose = "Word export with a strikeout annotation: appearance stream correctness is visible in the render."
+pages = 1
+bytes = 91804
+expect = "valid"
+reader_repairs = false
+sha256 = "ca7225dbdc6f8a26814cf0d67f5c509589e2cc09ace6bdb04a375a266db5b708"
+producer = "Microsoft® Word 2013"
+pdf_version = "1.5"
+features = ["annots", "form-or-sig", "objstm", "tagged", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W018"
+file = "pdfjs__annotation-underline.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/annotation-underline.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "office"
+purpose = "Word export with an underline annotation and its own appearance stream."
+pages = 1
+bytes = 92151
+expect = "valid"
+reader_repairs = false
+sha256 = "ef04b7049d5cab49c702887c423f20cfecf76d36905772209cc6781425d8f671"
+producer = "Microsoft® Word 2013"
+pdf_version = "1.5"
+features = ["annots", "form-or-sig", "objstm", "tagged", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W019"
+file = "pdfjs__annotation-link-text-popup.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/annotation-link-text-popup.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "office"
+purpose = "Word export with a link plus a popup annotation nesting."
+pages = 1
+bytes = 98997
+expect = "repaired"
+reader_repairs = true
+sha256 = "06917202feda6b6bb8b57b048655f946f749bdff5a8bfcb35eb0116f38910312"
+producer = "Microsoft® Word 2013"
+pdf_version = "1.5"
+features = ["annots", "form-or-sig", "objstm", "tagged", "transparency"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W020"
+file = "pdfjs__annotation-square-circle.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/annotation-square-circle.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "office"
+purpose = "Word export with a polygon annotation drawn from an appearance stream."
+pages = 1
+bytes = 88740
+expect = "repaired"
+reader_repairs = true
+sha256 = "88ed9ed813c3585b3098b9f4eef5107426f7829044117cd87f77bdc38a8e3f72"
+producer = "Microsoft® Word 2013"
+pdf_version = "1.5"
+features = ["annots", "form-or-sig", "objstm", "tagged", "transparency"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W021"
+file = "pdfjs__annotation-squiggly.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/annotation-squiggly.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "office"
+purpose = "Word export with a squiggly annotation, whose appearance is a repeated path."
+pages = 1
+bytes = 93644
+expect = "valid"
+reader_repairs = false
+sha256 = "95a2af9d01c2e532711a1483d58a258e469f3ff0e7dd1c2ae45c70bd8f9bb6e8"
+producer = "Microsoft® Word 2013"
+pdf_version = "1.5"
+features = ["annots", "form-or-sig", "objstm", "tagged", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W022"
+file = "pdfbox__PDFA3A.pdf"
+url = "https://raw.githubusercontent.com/apache/pdfbox/trunk/pdfbox/src/test/resources/input/merge/PDFA3A.pdf"
+origin = "apache/pdfbox `pdfbox/src/test/resources/input/`"
+licence = "Apache-2.0"
+category = "office"
+purpose = "Word 2016 saved as PDF/A-3a: tagged, with transparency and a logical structure tree."
+pages = 1
+bytes = 49917
+expect = "valid"
+reader_repairs = false
+sha256 = "f0d3b0e32007d4b385b8d31bd759ce0b3ec8a465d48dc7471b99faf5d8bd3b57"
+producer = "Microsoft® Word 2016"
+pdf_version = "1.7"
+features = ["tagged", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W023"
+file = "pdfbox__openoffice-test-document.pdf"
+url = "https://raw.githubusercontent.com/apache/pdfbox/trunk/pdfbox/src/test/resources/input/openoffice-test-document.pdf"
+origin = "apache/pdfbox `pdfbox/src/test/resources/input/`"
+licence = "Apache-2.0"
+category = "office"
+purpose = "OpenOffice export: a different office producer from Microsoft Word."
+pages = 1
+bytes = 12418
+expect = "valid"
+reader_repairs = false
+sha256 = "93256e712348392f3841a51d6e6e16774dcf5e2405073ebc55c64b64ac606446"
+producer = "(none recorded)"
+pdf_version = "1.4"
+features = []
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W024"
+file = "pdfbox__simple-openoffice.pdf"
+url = "https://raw.githubusercontent.com/apache/pdfbox/trunk/pdfbox/src/test/resources/input/simple-openoffice.pdf"
+origin = "apache/pdfbox `pdfbox/src/test/resources/input/`"
+licence = "Apache-2.0"
+category = "office"
+purpose = "A second OpenOffice export, smaller, for a cheap second look at the same producer."
+pages = 1
+bytes = 15023
+expect = "valid"
+reader_repairs = false
+sha256 = "85e84837601e3c21899bd4b89237fb83771179c69be4565f3f0d7248bd76c74b"
+producer = "OpenOffice.org 1.1"
+pdf_version = "1.4"
+features = []
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W025"
+file = "pdfbox__data-000001.pdf"
+url = "https://raw.githubusercontent.com/apache/pdfbox/trunk/pdfbox/src/test/resources/input/data-000001.pdf"
+origin = "apache/pdfbox `pdfbox/src/test/resources/input/`"
+licence = "Apache-2.0"
+category = "office"
+purpose = "A small document exported straight from office software with almost no styling."
+pages = 1
+bytes = 3072
+expect = "valid"
+reader_repairs = false
+sha256 = "d86e452e26a91f5dced4b903eefcdaa1bb3c0acc0bb19afcd45e526074e197a7"
+producer = "[ClibPDF Library 2.01-r2-2] FreeBSD"
+pdf_version = "1.2"
+features = []
+qpdf_verdict = "(no verdict)"
+
+
+# ─── Slide decks (2 files) ────────────────────────────────────────────
+
+[[corpus]]
+id = "W047"
+file = "pdfjs__issue16263.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue16263.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "slides"
+purpose = "Microsoft PowerPoint 2013 export: SMask images and a composite font in one page."
+pages = 1
+bytes = 58122
+expect = "valid"
+reader_repairs = false
+sha256 = "99548e25da254ed0114c31b84f92cf3dc71d458da66648a777b8fd21ff14f062"
+producer = "Microsoft® PowerPoint® 2013"
+pdf_version = "1.5"
+features = ["composite-font", "objstm", "smask", "tagged", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W048"
+file = "pdfjs__font_ascent_descent.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/font_ascent_descent.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "slides"
+purpose = "An Acrobat Distiller file whose XMP says PowerPoint: a slide deck through a print path."
+pages = 1
+bytes = 15056
+expect = "repaired"
+reader_repairs = true
+sha256 = "ac32f419e728d1fa96daa24172871f8d38cf7ad6a7f3076a2f86b76a6811517e"
+producer = "Acrobat Distiller 8.1.0 (Windows)"
+pdf_version = "1.7"
+features = ["form-or-sig", "linearized", "objstm", "powerpoint"]
+qpdf_verdict = "operation succeeded with warnings"
+
+
+# ─── Live government and interactive forms (6 files) ──────────────────
+
+[[corpus]]
+id = "W039"
+file = "gov__irs-fw4.pdf"
+url = "https://www.irs.gov/pub/irs-pdf/fw4.pdf"
+origin = "US Government publications and arXiv"
+licence = "public-domain (US Government work)"
+category = "form"
+purpose = "The IRS Form W-4: a live government form with a real AcroForm and calculated fields."
+pages = 5
+bytes = 208845
+expect = "valid"
+reader_repairs = false
+sha256 = "92444d8856ce55d9e25dca8b6d1420634fc68b11e1ab1f760916ea29ddd312b2"
+producer = "Designer 6.5"
+pdf_version = "1.7"
+features = ["annots", "form-or-sig", "linearized", "objstm", "tagged"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W040"
+file = "gov__irs-f1040.pdf"
+url = "https://www.irs.gov/pub/irs-pdf/f1040.pdf"
+origin = "US Government publications and arXiv"
+licence = "public-domain (US Government work)"
+category = "form"
+purpose = "IRS Form 1040: a second live form, different field layout and calculation order."
+pages = 2
+bytes = 220237
+expect = "valid"
+reader_repairs = false
+sha256 = "3d31c226df0d189ced80e039d01cf0f8820c1019681a0f0ca6264de277b7e982"
+producer = "Designer 6.5"
+pdf_version = "1.7"
+features = ["annots", "form-or-sig", "linearized", "objstm", "tagged"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W041"
+file = "pdfbox__acroform.pdf"
+url = "https://raw.githubusercontent.com/apache/pdfbox/trunk/pdfbox/src/test/resources/input/compression/acroform.pdf"
+origin = "apache/pdfbox `pdfbox/src/test/resources/input/`"
+licence = "Apache-2.0"
+category = "form"
+purpose = "An AcroForm with appearance streams and field flags: form rendering, not just presence."
+pages = 1
+bytes = 64609
+expect = "valid"
+reader_repairs = false
+sha256 = "c823ec6e6e852f569c3358c26e823e5fcd55ed1705891ce409d2ec703e8862c9"
+producer = "Adobe Acrobat Pro 11.0.18"
+pdf_version = "1.6"
+features = ["annots", "form-or-sig", "jpeg", "linearized", "objstm", "smask"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W042"
+file = "pdfjs__issue19484_1.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue19484_1.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "form"
+purpose = "An encrypted AcroForm: decryption and field appearance in one file."
+pages = 1
+bytes = 47688
+expect = "repaired"
+reader_repairs = true
+sha256 = "0f020604762fe289eaed602bfb5f4e3d921fb04ffc0fd61ec5423933a03f1948"
+producer = "(none recorded)"
+pdf_version = "1.6"
+features = ["encrypted", "form-or-sig", "linearized", "objstm"]
+qpdf_verdict = "pool/pdfjs/issue19484_1.pdf: invalid password"
+
+[[corpus]]
+id = "W043"
+file = "pdfjs__annotation-text-widget.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/annotation-text-widget.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "form"
+purpose = "A text-field widget annotation with its appearance stream drawn by hand."
+pages = 1
+bytes = 93171
+expect = "valid"
+reader_repairs = false
+sha256 = "9f091ceb368ad0406094efaa6c50d5033735ee52f383e0973dc53a7467089d7c"
+producer = "Adobe LiveCycle Designer ES 9.0"
+pdf_version = "1.7"
+features = ["annots", "form-or-sig", "linearized", "objstm", "tagged"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W044"
+file = "pdfjs__attachment.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/attachment.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "form"
+purpose = "A file with an embedded attachment: the embedded-file dictionary and its stream."
+pages = 1
+bytes = 15299
+expect = "valid"
+reader_repairs = false
+sha256 = "9acec9f83f1557183c83a87111b85141e657849ac2aa92864ffd63cc91572379"
+producer = "LibreOffice 6.3"
+pdf_version = "1.5"
+features = ["transparency"]
+qpdf_verdict = "(no verdict)"
+
+
+# ─── Scans: bitonal, fax and halftone (10 files) ──────────────────────
+
+[[corpus]]
+id = "W026"
+file = "pdfjs__images_1bit_grayscale.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/images_1bit_grayscale.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "scan"
+purpose = "A one-bit CCITT scan: exercises the Group 3/4 decoder and the 1 bpp image path."
+pages = 1
+bytes = 4573
+expect = "valid"
+reader_repairs = false
+sha256 = "afbed07b9fe25563b2604b81cd7186c91d4356e5428a05322b8b7eae88301e24"
+producer = "(none recorded)"
+pdf_version = "1.5"
+features = ["ccitt"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W027"
+file = "pdfjs__ccitt_EndOfBlock_false.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/ccitt_EndOfBlock_false.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "scan"
+purpose = "CCITT data whose EOB flag is false, a case a sloppy decoder silently truncates."
+pages = 1
+bytes = 3256
+expect = "valid"
+reader_repairs = false
+sha256 = "f2289b94e7e3f05f9e37754c399d3f525edf9444fb32c3279959cf64b575fe62"
+producer = "(none recorded)"
+pdf_version = "1.4"
+features = ["ccitt", "image-scanned"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W028"
+file = "pdfjs__issue13561_reduced.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue13561_reduced.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "scan"
+purpose = "Acrobat Distiller 8.1 CCITT output: a scan with real-world row and page segmentation."
+pages = 1
+bytes = 16050
+expect = "repaired"
+reader_repairs = true
+sha256 = "6ab67b2ba8e13bbca2474987c1f7091f6e5953787157150912ab45dc7a3a91a0"
+producer = "Acrobat Distiller 8.1.0 (Windows)"
+pdf_version = "1.6"
+features = ["ccitt", "linearized", "objstm", "shading"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W029"
+file = "pdfjs__issue1985.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue1985.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "scan"
+purpose = "A QuarkXPress 7.3 page with a CCITT scan: a design tool emitting fax data."
+pages = 1
+bytes = 9884
+expect = "repaired"
+reader_repairs = true
+sha256 = "0f991f71856c5e88775f48cf194bf4cd3800c27875352473461e16e01750f3d6"
+producer = "QuarkXPress(R) 7.3"
+pdf_version = "1.6"
+features = ["ccitt", "linearized", "objstm"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W030"
+file = "pdfjs__bug1795263.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bug1795263.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "scan"
+purpose = "A 356 KB CCITT scan that a later PyPDF2 pass rewrote, so the file is both scanned and re-saved."
+pages = 1
+bytes = 355886
+expect = "repaired"
+reader_repairs = true
+sha256 = "25ea0eaae9460dbc984c78cafb94e59ef0117d5d29ae96d251aab6079986da9c"
+producer = "PyPDF2"
+pdf_version = "1.3"
+features = ["ccitt", "image-scanned", "jpeg", "shading"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W031"
+file = "pdfjs__issue13372.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue13372.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "scan"
+purpose = "Ghostscript output carrying a CCITT image: a converter-produced scan."
+pages = 1
+bytes = 85444
+expect = "valid"
+reader_repairs = false
+sha256 = "2ed729efdc6a2f4454b9a468988798c556a88fa9b47507f6d3e357e4963df661"
+producer = "GPL Ghostscript 9.10"
+pdf_version = "1.4"
+features = ["ccitt", "shading"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W032"
+file = "pdfjs__bitmap-halftone-10bpp.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bitmap-halftone-10bpp.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "scan"
+purpose = "A 10-bpp halftone image: a bit depth real producers rarely send and readers rarely test."
+pages = 1
+bytes = 1311
+expect = "valid"
+reader_repairs = false
+sha256 = "8a4577a1cdbdf342e2a61e18a239423452355c13733075af76fcd008f12eac5f"
+producer = "(none recorded)"
+pdf_version = "1.4"
+features = ["image-scanned", "jbig2"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W033"
+file = "pdfjs__bitmap-composite-and-xnor-text.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bitmap-composite-and-xnor-text.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "scan"
+purpose = "Bit-level image masks composited with live text on the same page."
+pages = 1
+bytes = 1243
+expect = "valid"
+reader_repairs = false
+sha256 = "aba6249b83158532ad87ccf47ba69737c9ba2b787c2f815767d239e910564235"
+producer = "(none recorded)"
+pdf_version = "1.4"
+features = ["image-scanned", "jbig2"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W034"
+file = "gov__nist-nistir7255.pdf"
+url = "https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nistir7255.pdf"
+origin = "US Government publications and arXiv"
+licence = "public-domain (US Government work)"
+category = "scan"
+purpose = "A 66-page NIST report scanned to JBIG2 and JPEG 2000 — the only file in this corpus with both."
+pages = 66
+bytes = 5617522
+expect = "repaired"
+reader_repairs = true
+sha256 = "19986b18044639c9ca3ef80bd694f1617a260add048151e45aae5d50cfba4f8b"
+producer = "Recoded by LuraDocument PDF v2.65"
+pdf_version = "1.5"
+features = ["jbig2", "jpx", "linearized"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W035"
+file = "pdfbox__multitiff.pdf"
+url = "https://raw.githubusercontent.com/apache/pdfbox/trunk/pdfbox/src/test/resources/input/merge/multitiff.pdf"
+origin = "apache/pdfbox `pdfbox/src/test/resources/input/`"
+licence = "Apache-2.0"
+category = "scan"
+purpose = "A three-page file whose page images come from a multi-page TIFF: page-boundary handling."
+pages = 3
+bytes = 2928
+expect = "valid"
+reader_repairs = false
+sha256 = "c1b465746f17204420348015845c8979c6bdbdaaf07616d122ab6ffec00eaf15"
+producer = "(none recorded)"
+pdf_version = "1.4"
+features = ["ccitt", "image-scanned"]
+qpdf_verdict = "(no verdict)"
+
+
+# ─── JPEG 2000 (3 files) ──────────────────────────────────────────────
+
+[[corpus]]
+id = "W036"
+file = "pdfjs__bug_jpx.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bug_jpx.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "jpx"
+purpose = "A small JPEG 2000 image: the lightest possible exercise of the JPX decoder."
+pages = 1
+bytes = 5451
+expect = "repaired"
+reader_repairs = true
+sha256 = "4010d808557a72278368c05518367735ed186cbdd04974b8506275f9ac40f999"
+producer = "Adobe Acrobat (64-bit) 25.1.21151"
+pdf_version = "1.6"
+features = ["jpx", "linearized", "objstm"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W037"
+file = "pdfjs__issue12213.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue12213.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "jpx"
+purpose = "Acrobat Image Converter output with a JPX image and its colour space."
+pages = 1
+bytes = 14610
+expect = "valid"
+reader_repairs = false
+sha256 = "73abd2a46c22afc6f67a035cc143c7e3fc0e111ed41c5cb627429d50bcefbd32"
+producer = "Adobe Acrobat 20.9 Image Conversion Plug-in"
+pdf_version = "1.6"
+features = ["jpx", "objstm"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W038"
+file = "pdfjs__S2.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/S2.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "jpx"
+purpose = "Adobe PDF library 9.90 with a JPX image: an old producer, old JPX profile."
+pages = 1
+bytes = 478490
+expect = "valid"
+reader_repairs = false
+sha256 = "57d874f2760ded2b70eb58b7b5e31df407d5641b7225576b77458b5dc5009543"
+producer = "Adobe PDF library 9.90"
+pdf_version = "1.5"
+features = ["jpx", "shading", "smask", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+
+# ─── Transparency, shadings and bitwise compositing (5 files) ─────────
+
+[[corpus]]
+id = "W061"
+file = "pdfjs__alphatrans.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/alphatrans.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "transparency"
+purpose = "A page whose whole appearance is alpha compositing, so any blend bug shows immediately."
+pages = 1
+bytes = 16910
+expect = "valid"
+reader_repairs = false
+sha256 = "234c0ab8e9458f4d17133b08d2b66170eeb92be2a80e1508aa5117a2bf568f63"
+producer = "TCPDF 5.9.133 (http://www.tcpdf.org)"
+pdf_version = "1.7"
+features = ["annots", "image-scanned", "jpeg", "shading", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W062"
+file = "pdfjs__highlights.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/highlights.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "transparency"
+purpose = "A 14-page macOS file with shadings and soft masks over body text."
+pages = 14
+bytes = 969276
+expect = "repaired"
+reader_repairs = true
+sha256 = "025a8235824da8fdc2a73503d78ec0a658eb9f6620380108807e27013ae3a07d"
+producer = "macOS Version 14.4.1 (Build 23E224) Quartz PDFContext, AppendMode 1.1"
+pdf_version = "1.6"
+features = ["annots", "linearized", "objstm", "shading", "smask", "transparency"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W063"
+file = "pdfjs__comments.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/comments.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "transparency"
+purpose = "A 14-page annotated macOS file: appearance streams plus SMask images together."
+pages = 14
+bytes = 1065760
+expect = "repaired"
+reader_repairs = true
+sha256 = "283b215db9937fcdf148b22e7310892d148e43047bccffa6bf56eb4156592e5d"
+producer = "macOS Version 14.4.1 (Build 23E224) Quartz PDFContext, AppendMode 1.1"
+pdf_version = "1.6"
+features = ["annots", "image-scanned", "jpeg", "linearized", "objstm", "shading", "smask", "tagged", "transparency"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W064"
+file = "pdfjs__ShowText-ShadingPattern.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/ShowText-ShadingPattern.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "transparency"
+purpose = "Shading pattern fills used behind live text: the text must stay on top and readable."
+pages = 1
+bytes = 4671
+expect = "valid"
+reader_repairs = false
+sha256 = "13ac785e8445fbf01d5a8200e0e899daa204cdbe723b02f38f8af61ac48707bb"
+producer = "GPL Ghostscript 9.14"
+pdf_version = "1.5"
+features = ["shading"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W065"
+file = "pdfjs__bitmap-composite-or-xor-replace-text.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bitmap-composite-or-xor-replace-text.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "transparency"
+purpose = "Bitwise image compositing combined with text, a combination no fixture generator emits."
+pages = 1
+bytes = 1578
+expect = "valid"
+reader_repairs = false
+sha256 = "f4fb077e7e541f01ce21983f7822bd2b43d98f8554bf9cb421a03c7daa6442a5"
+producer = "(none recorded)"
+pdf_version = "1.4"
+features = ["image-scanned", "jbig2"]
+qpdf_verdict = "(no verdict)"
+
+
+# ─── Maps and large-canvas plotting (2 files) ─────────────────────────
+
+[[corpus]]
+id = "W045"
+file = "gov__usgs-topo-cnmi-1.pdf"
+url = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Maps/HistoricalTopo/PDF/MP/25000/MP_Commonwealth%20of%20the%20Northern%20Mariana%20Islands%20Sheet%201%20of%203_462395_2006_25000.pdf"
+origin = "US Government publications and arXiv"
+licence = "public-domain (US Government work)"
+category = "map"
+purpose = "A 1:25000 USGS topographic quadrangle, 36 by 30 inches: the largest canvas in the corpus."
+pages = 0
+bytes = 17627289
+expect = "repaired"
+reader_repairs = true
+sha256 = "a73cd3f2bdfb3612bee1cdc187346c043be5bb8587a884695b67eae49f5ca5a3"
+producer = "(none recorded)"
+pdf_version = "(unreadable)"
+features = []
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W046"
+file = "gov__usgs-topo-cnmi-3.pdf"
+url = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Maps/HistoricalTopo/PDF/MP/25000/MP_Commonwealth%20of%20the%20Northern%20Mariana%20Islands%20Sheet%203%20of%203_462344_2006_25000.pdf"
+origin = "US Government publications and arXiv"
+licence = "public-domain (US Government work)"
+category = "map"
+purpose = "A second USGS quadrangle sheet, adjacent, same producer and a different map face."
+pages = 0
+bytes = 17629409
+expect = "repaired"
+reader_repairs = true
+sha256 = "d8ea5728e821727c76c506e7d37f9fe59b6da4c42ed52e755e745b32937a664e"
+producer = "(none recorded)"
+pdf_version = "(unreadable)"
+features = []
+qpdf_verdict = "operation succeeded with warnings"
+
+
+# ─── Composite fonts, CJK and substitution (7 files) ──────────────────
+
+[[corpus]]
+id = "W066"
+file = "pdfjs__ArabicCIDTrueType.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/ArabicCIDTrueType.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "font"
+purpose = "Arabic set in a composite TrueType font: shaping order and bidi, at one page."
+pages = 1
+bytes = 39370
+expect = "valid"
+reader_repairs = false
+sha256 = "1cad1de912ba29f89a6d8b08bc5b0f84382874ffedab2c8f9e05ef608c265bb1"
+producer = "Apple pstopdffilter"
+pdf_version = "1.3"
+features = ["composite-font"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W067"
+file = "pdfjs__cid_cff.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/cid_cff.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "font"
+purpose = "CID-keyed CFF: a composite font whose glyphs are CharStrings, not TrueType outlines."
+pages = 1
+bytes = 19970
+expect = "valid"
+reader_repairs = false
+sha256 = "d894d356411217414fd9040d3d038612e1f4a1598936b2385a76458dd6d64d38"
+producer = "Corel PDF Engine Version 16.0.0.707"
+pdf_version = "1.6"
+features = ["composite-font", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W068"
+file = "pdfjs__arial_unicode_ab_cidfont.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/arial_unicode_ab_cidfont.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "font"
+purpose = "A composite TrueType font with a non-identity CMap: code to glyph is not code minus offset."
+pages = 1
+bytes = 13110
+expect = "valid"
+reader_repairs = false
+sha256 = "049a4330710d8470896061acf7ee486735e94cef2769f6cc13fec3cb13bb65aa"
+producer = "NeoOffice 3.2 Beta"
+pdf_version = "1.4"
+features = ["composite-font", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W069"
+file = "pdfjs__cidfont_cmap_overflow.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/cidfont_cmap_overflow.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "font"
+purpose = "A CIDFont whose CMap runs past its own table: a decoding overflow that must not panic."
+pages = 1
+bytes = 94168
+expect = "valid"
+reader_repairs = false
+sha256 = "ecb07ca4b3c6a9fd408db07c29c7e4426fb1bd6ee9e2bbdfa4997b65be602c13"
+producer = "(none recorded)"
+pdf_version = "1.5"
+features = ["composite-font"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W070"
+file = "pdfjs__XiaoBiaoSong.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/XiaoBiaoSong.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "font"
+purpose = "A CJK font from a Chinese producer: the encoding path a Western fixture never reaches."
+pages = 1
+bytes = 5652
+expect = "valid"
+reader_repairs = false
+sha256 = "1ea20b84d94b90fa1ccb08bdd2e79e710071e0593fde6d547ab1cd4a3ebc0f88"
+producer = "Pdftools SDK"
+pdf_version = "1.4"
+features = []
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W071"
+file = "pdfjs__ZapfDingbats.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/ZapfDingbats.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "font"
+purpose = "ZapfDingbats glyphs: a standard-14 font whose codes are symbols, not letters."
+pages = 2
+bytes = 17602
+expect = "repaired"
+reader_repairs = true
+sha256 = "f0d3d15d1dd611a8ca6904389db4fa111ff53c506cb75177743a27fb5c4273fe"
+producer = "PDFlib 3.02 (JDK 1.2/Linux 2.2.16-3)"
+pdf_version = "1.6"
+features = ["annots", "form-or-sig", "linearized", "objstm"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W072"
+file = "pdfbox__FC60_Times.pdf"
+url = "https://raw.githubusercontent.com/apache/pdfbox/trunk/pdfbox/src/test/resources/input/FC60_Times.pdf"
+origin = "apache/pdfbox `pdfbox/src/test/resources/input/`"
+licence = "Apache-2.0"
+category = "font"
+purpose = "A printer-supplied font set (FC60): device fonts a renderer must substitute for."
+pages = 1
+bytes = 25815
+expect = "repaired"
+reader_repairs = true
+sha256 = "1616a1fc70fb70812f9865e4e6648736b218ab0d44775380adaf668e4300cc0d"
+producer = "Acrobat Distiller 8.1.0 (Windows)"
+pdf_version = "1.4"
+features = ["composite-font", "linearized"]
+qpdf_verdict = "operation succeeded with warnings"
+
+
+# ─── Larger multi-page documents (5 files) ────────────────────────────
+
+[[corpus]]
+id = "W073"
+file = "gov__nist-nistir7657.pdf"
+url = "https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nistir7657.pdf"
+origin = "US Government publications and arXiv"
+licence = "public-domain (US Government work)"
+category = "large"
+purpose = "A 48-page NIST report from Acrobat Distiller 9.3: object streams, tagging, JPEG art."
+pages = 48
+bytes = 2790492
+expect = "valid"
+reader_repairs = false
+sha256 = "eb0bf6092da2382a1e76be8df4c38dda1ad12ed5b9384ea869e0705ad4f41aa1"
+producer = "Acrobat Distiller 9.3.0 (Windows)"
+pdf_version = "1.6"
+features = ["annots", "jpeg", "objstm", "tagged"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W074"
+file = "gov__nist-fips197.pdf"
+url = "https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197.pdf"
+origin = "US Government publications and arXiv"
+licence = "public-domain (US Government work)"
+category = "large"
+purpose = "A 52-page FIPS publication from Acrobat PDFWriter 3.02, a producer nothing else here uses."
+pages = 52
+bytes = 631927
+expect = "valid"
+reader_repairs = false
+sha256 = "251dfe0b5dc283abaf364adf586f7ec6dc4e495335d48dd5ee0fee6c5961da8a"
+producer = "Acrobat PDFWriter 3.02 for Windows"
+pdf_version = "1.6"
+features = ["annots", "form-or-sig", "linearized", "objstm", "smask", "tagged", "transparency"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W075"
+file = "gov__nist-sp800-88.pdf"
+url = "https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-88.pdf"
+origin = "US Government publications and arXiv"
+licence = "public-domain (US Government work)"
+category = "large"
+purpose = "A 44-page special publication from Acrobat Pro 11, with annotations and JPEG images."
+pages = 44
+bytes = 518956
+expect = "valid"
+reader_repairs = false
+sha256 = "006e64c43647fc10bb50b96bf22ced97ae9a8380ce207d43f9b3833e280a8904"
+producer = "Adobe Acrobat Pro 11.0.12"
+pdf_version = "1.6"
+features = ["annots", "jpeg", "linearized", "objstm", "tagged"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W076"
+file = "pdfjs__TAMReview.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/TAMReview.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "large"
+purpose = "A 23-page HTML-to-PDF conversion: no layout engine, so the geometry is naive and exact."
+pages = 23
+bytes = 674629
+expect = "repaired"
+reader_repairs = true
+sha256 = "a6db6d2f5e4f97e1e28a5919a875a40b89e38d0229b33cc023ca4d353f3ab3ec"
+producer = "htmldoc 1.8.27 Copyright 1997-2006 Easy Software Products, All Rights Reserved."
+pdf_version = "1.3"
+features = ["annots"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W077"
+file = "pdfjs__freeculture.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/freeculture.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "large"
+purpose = "A 352-page typeset book with CCITT plates: the corpus scale test and the page-count ceiling."
+pages = 352
+bytes = 2598727
+expect = "repaired"
+reader_repairs = true
+sha256 = "753441c619c529c8d0fc3e7e470f07c9547838fc7229bea8c1dcf854acee03b4"
+producer = "Acrobat Distiller 5.0.5 for Macintosh"
+pdf_version = "1.5"
+features = ["annots", "ccitt", "composite-font", "form-or-sig", "jpeg", "linearized", "smask"]
+qpdf_verdict = "operation succeeded with warnings"
+
+
+# ─── Damaged, fuzzed and hostile files (12 files) ─────────────────────
+
+[[corpus]]
+id = "W049"
+file = "pdfjs__bug1020226.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bug1020226.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "A 184-byte truncated file. Nothing about it is well-formed; recovery must not hang."
+pages = 0
+bytes = 184
+expect = "repaired"
+reader_repairs = true
+sha256 = "50e91d373aa313537972519c65b050f8d4d5bd996859fa20756432c2029c3ff6"
+producer = "(none recorded)"
+pdf_version = "(unreadable)"
+features = []
+qpdf_verdict = "pool/pdfjs/bug1020226.pdf: unable to find trailer dictionary while recovering damaged file"
+
+[[corpus]]
+id = "W050"
+file = "pdfjs__issue15590.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue15590.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "A 191-byte stub: shorter than most files a reader assumes are complete."
+pages = 0
+bytes = 191
+expect = "repaired"
+reader_repairs = true
+sha256 = "c711bb3357eccec499968ac7b4e286ebd3f49910b458b0596d81731c890eedb6"
+producer = "(none recorded)"
+pdf_version = "(unreadable)"
+features = []
+qpdf_verdict = "pool/pdfjs/issue15590.pdf: root of pages tree has no /Kids array"
+
+[[corpus]]
+id = "W051"
+file = "pdfjs__bug1980958.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bug1980958.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "A 219-byte file that a real producer emitted, i.e. a crash mid-write, not a test fixture."
+pages = 0
+bytes = 219
+expect = "repaired"
+reader_repairs = true
+sha256 = "777415748234d88f47f7ac09a3f620ed61f927089199698be993266c8ebddaaa"
+producer = "(none recorded)"
+pdf_version = "(unreadable)"
+features = []
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W052"
+file = "pdfjs__REDHAT-1531897-0.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/REDHAT-1531897-0.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "An 871-byte file from a distribution bug report: damaged but claiming to be linearized."
+pages = 0
+bytes = 871
+expect = "repaired"
+reader_repairs = true
+sha256 = "f468fc2f922bb179f3cb9994c9476fb1840445fe6deb6cdcca42244ab0218786"
+producer = "(none recorded)"
+pdf_version = "(unreadable)"
+features = ["linearized", "objstm"]
+qpdf_verdict = "pool/pdfjs/REDHAT-1531897-0.pdf: unable to find /Root dictionary"
+
+[[corpus]]
+id = "W053"
+file = "pdfjs__GHOSTSCRIPT-698804-1-fuzzed.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/GHOSTSCRIPT-698804-1-fuzzed.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "A fuzzed Ghostscript crash reproducer: mutated bytes, not a synthetic fixture."
+pages = 1
+bytes = 627
+expect = "repaired"
+reader_repairs = true
+sha256 = "62e518ca7894e8b8b8ed9927da3007cdc5e9ccc5b111bbb22d6101d4a8d7490e"
+producer = "(none recorded)"
+pdf_version = "1.4"
+features = []
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W054"
+file = "pdfjs__PDFBOX-3148-2-fuzzed.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/PDFBOX-3148-2-fuzzed.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "A fuzzed file that still has a valid trailer, so the damage is inside the content."
+pages = 1
+bytes = 244351
+expect = "repaired"
+reader_repairs = true
+sha256 = "1c780335b494ac52eae9fa4d05f1bba88c18ca6b24e6e302b9f271de05e256aa"
+producer = "Adobe PDF Library 15.0"
+pdf_version = "1.6"
+features = ["annots", "form-or-sig"]
+qpdf_verdict = "operation succeeded with warnings"
+
+[[corpus]]
+id = "W055"
+file = "pdfjs__Pages-tree-refs.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/Pages-tree-refs.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "A page tree whose entries point at nonsense: a cycle and self-reference hazard."
+pages = 2
+bytes = 1098
+expect = "repaired"
+reader_repairs = true
+sha256 = "77c8817ea016296ea59e0991ea1a6d1440ef2480cdcd9acb59106938b649233f"
+producer = "(none recorded)"
+pdf_version = "1.7"
+features = []
+qpdf_verdict = "errors detected"
+
+[[corpus]]
+id = "W056"
+file = "pdfjs__bad-PageLabels.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/bad-PageLabels.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "A /PageLabels number tree that does not add up: navigation metadata a reader may loop on."
+pages = 1
+bytes = 798
+expect = "valid"
+reader_repairs = false
+sha256 = "eff0ee7d1cf2e1a7ccfb25a8fc4c2bbea0ec23c838b61a199a57dbb732ddeaad"
+producer = "(none recorded)"
+pdf_version = "1.7"
+features = []
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W057"
+file = "pdfjs__issue21579.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue21579.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "An encrypted file whose xref cannot even be read to find the encryption dictionary."
+pages = 0
+bytes = 1394
+expect = "repaired"
+reader_repairs = true
+sha256 = "3b3d1db2aa4797e63d6dc7e48dc4f327c468144b93f80301771940230651da2e"
+producer = "(none recorded)"
+pdf_version = "(unreadable)"
+features = ["encrypted"]
+qpdf_verdict = "pool/pdfjs/issue21579.pdf: invalid password"
+
+[[corpus]]
+id = "W058"
+file = "pdfjs__issue15893_reduced.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/issue15893_reduced.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "An encrypted file reduced from a larger one: damaged and encrypted at once."
+pages = 0
+bytes = 1610
+expect = "repaired"
+reader_repairs = true
+sha256 = "3c2815853e6fe5c34feb76bb14402cbc46bbd484ecd57b672fc03577d0458ee8"
+producer = "(none recorded)"
+pdf_version = "(unreadable)"
+features = ["encrypted"]
+qpdf_verdict = "pool/pdfjs/issue15893_reduced.pdf: invalid password"
+
+[[corpus]]
+id = "W059"
+file = "pdfjs__ContentStreamCycleType3insideType3.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/ContentStreamCycleType3insideType3.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "A Type 3 font whose content stream re-enters itself: unbounded recursion if unguarded."
+pages = 1
+bytes = 2440
+expect = "valid"
+reader_repairs = false
+sha256 = "131aec277c444c985d502e5f589f37735d275a8ea247c1beedba0781fbe99d40"
+producer = "(none recorded)"
+pdf_version = "1.6"
+features = ["shading"]
+qpdf_verdict = "(no verdict)"
+
+[[corpus]]
+id = "W060"
+file = "pdfjs__ContentStreamNoCycleType3insideType3.pdf"
+url = "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/ContentStreamNoCycleType3insideType3.pdf"
+origin = "mozilla/pdf.js `test/pdfs/`"
+licence = "Apache-2.0"
+category = "broken"
+purpose = "The same Type 3 shape without the cycle, so a guard that fires always is visible."
+pages = 1
+bytes = 2440
+expect = "valid"
+reader_repairs = false
+sha256 = "cffddca28e1b55dba97257a3045bfc83f6daf800dcecbed58697057d493f5dd6"
+producer = "(none recorded)"
+pdf_version = "1.6"
+features = ["shading"]
+qpdf_verdict = "(no verdict)"

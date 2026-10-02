@@ -32,16 +32,42 @@ Tier A comes from `tools/fixturegen`, which depends on **no** `mangle-*` crate. 
 independence is the point: a fixture built by the same misunderstanding as the parser
 proves nothing. `cargo xtask policy` fails the build if that ever changes.
 
-Tier B is real-world files in `corpus/wild/`, each with a `SOURCES.md` naming the
-origin and licence. Tier C is held out until final acceptance and must stay unread until
-then.
+Tier B is real-world files in `corpus/wild/`. They are **not** in the repository: the PDFs
+are large and often someone else's, so `corpus/wild/` holds only `MANIFEST.toml` (every
+file's URL, licence, SHA-256 and expected structure), `SOURCES.md` (the same, written for a
+person) and a `.gitignore`. `cargo xtask corpus fetch` downloads them and refuses any file
+whose SHA-256 does not match — a corpus whose contents are not pinned is a test that
+changes under you. `corpus/wild/SOURCES.md` states the licence of every file and says which
+suggested public corpora were *not* used and why.
+
+Tier C is held out until final acceptance and must stay unread until then.
 
 Regenerate and check determinism:
 
 ```sh
 cargo xtask fixtures --seed 20260101          # write fixtures/
 cargo xtask fixtures --seed 20260101 --check  # regenerate and compare byte for byte
+cargo xtask corpus fetch                      # download Tier B and verify every hash
+cargo xtask corpus check                      # verify what is on disk; needs no network
+cargo xtask corpus list                       # one line per file
 ```
+
+## The wild corpus harness
+
+`crates/mangle-render/tests/wild_corpus.rs` walks the manifest and, for every file, renders
+every page at 150 DPI, compares it with `mutool draw` through `compare()`, and compares the
+text with `pdftotext` at word level. It writes `corpus/wild/report/SUMMARY.md`, a Markdown
+report per file, and PNGs of the worst pages: ours, mutool's, and the heatmap between them.
+
+**It asserts nothing about any individual file**, on purpose. A corpus test's job is to
+find things; a threshold on a document nobody has read yet turns the first unexpected result
+into a permanent red build, and the response to a permanent red build is to raise the
+threshold. The report is the output. A file that needs an assertion belongs in `fixtures/`,
+where the manifest can say what it must contain.
+
+Every absence is printed with its reason — no oracle installed, a file not fetched, a page
+too large to compare, a file that panicked — because a harness that reports success having
+measured nothing is worse than no harness.
 
 ## Tolerances
 

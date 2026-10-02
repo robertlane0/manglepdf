@@ -208,8 +208,43 @@ file and re-scoring drops it to 0.895, which is how the test is known to see wha
 5. **Break the symmetry of the remaining fixtures.** The diagonal-clip page is asymmetric now
    and scored 0.51652 when its clip was a box, where every symmetric fixture had scored above
    0.99 through the same bug. The rest still need the same treatment.
+
+Tier B is now standing — see "The wild corpus found" below — and it has overtaken everything
+else on this list, because nothing else in the project can see the problems it can see.
+
+## The wild corpus found
+
+`corpus/wild/` holds 77 real files from pdf.js, PDFBox, NIST, the IRS, the USGS and arXiv,
+pinned by SHA-256 in `MANIFEST.toml` and fetched by `cargo xtask corpus fetch`. The harness
+is `crates/mangle-render/tests/wild_corpus.rs`; it renders every page at 150 DPI, compares it
+with `mutool draw` through `compare()`, compares the text with `pdftotext`, and writes a
+report per file into `corpus/wild/report/`. It asserts nothing about any individual file,
+because a corpus's job is to find things and a threshold on a document nobody has read yet
+turns the first surprise into a permanent red build.
+
+The measurements and their evidence are in `docs/known-diffs.md`. In short: 460 pages
+compared, median SSIM 0.6929, 94.8% of pages below 0.95, 35 of 77 files unopenable. Three
+findings dominate, in this order:
+
+1. **`render_page` renders a blank page for any Flate-compressed content stream.** 440 of 460
+   measured pages drew nothing. The interpreter's own note contains the compressed bytes as
+   "operator names", and `Page::decoded_contents` decodes the same stream correctly, so the
+   decoder works and the renderer does not call it. Every fixture in the project writes its
+   content stream unfiltered, which is why the suite was blind to it.
+2. **A cross-reference stream carrying a PNG predictor is not decoded**, so the reader falls
+   back to scanning, cannot reach objects inside object streams, and reports zero pages. 31 of
+   the 34 files that would not open have this shape: both IRS forms, NIST FIPS 197, both USGS
+   topo sheets, every Word 2013 export in the corpus, every InDesign output. `qpdf
+   --object-streams=disable` on the same content turns 0 pages into 5 and clean into clean.
+3. **`render_page` gains a spurious row on any page whose size in points times the scale should
+   be a whole number** — `792.0 * (150.0/72.0)` is `1650.0000000000002` in f64 and the `.ceil()`
+   turns it into 1651, where `mutool` gives 1650. 80 pages across 17 files became uncomparable,
+   including every page of both arXiv papers.
+
+Fix (1) first. It is masking everything downstream: until a Flate-compressed page draws
+something, the render numbers for a real document describe an empty page.
 6. Tier B with `SOURCES.md`: a real-world corpus, which is the only way to find the encoding
-   problems a hand-written fixture cannot express.
+   problems a hand-written fixture cannot express. **Done** — see above.
 
 Settled and no longer queued: images decode and draw, axial and radial shadings paint, the
 clip bounds are transformed by exactly one matrix, a clip is now the path the page set rather

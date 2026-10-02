@@ -16,6 +16,7 @@
 #![warn(missing_debug_implementations)]
 
 mod ast;
+mod corpus;
 mod deps;
 mod fixtures;
 mod icons;
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
     let result = match command {
         "policy" => policy::cmd(rest),
         "fixtures" => fixtures::cmd(rest),
+        "corpus" => corpus::cmd(rest),
         "icons" => icons::cmd(rest),
         "deps" => deps::cmd(),
         "gauntlet" => Err(not_yet("gauntlet", "M12")),
@@ -64,6 +66,7 @@ cargo xtask <command>
 
   policy    [--only G0.1,G0.4]   Gate 0: hygiene, dependencies, docs, icons
   fixtures  [--seed N] [--out D] regenerate the Tier-A fixture corpus
+  corpus    fetch|check|list    the Tier-B wild corpus: fetch and verify against its pins
   icons     gallery|lint         build or check assets/icons
   deps                          print the third-party dependency table
   gauntlet  [--seed N]           the full acceptance run
