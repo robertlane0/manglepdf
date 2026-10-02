@@ -370,9 +370,76 @@ degradation looks like.
 
 ---
 
+## D8 — the CFF charset was read from the wrong offset, and looked plausible while it did it
+
+**Severity: silent, and the reason the charset reader is written against an oracle rather
+than against the specification text.**
+
+D7's first half is fixed: a name-keyed CFF charset is read, in all three of its formats, and
+`code → /Encoding name → charset name → GID → CharStrings` reaches a glyph. Two pages
+measured blank now draw, against `mutool draw` at 150 DPI:
+
+| page | SSIM before | SSIM after | our ink before | our ink after | `mutool`'s ink |
+|---|---|---|---|---|---|
+| `gov__arxiv-1206.5537.pdf` p1 (22 bare CMR/CMMI fonts, format 0) | 0.7915 | **0.8784** | 0 | **61 262** | 130 395 |
+| `pdfjs__freeculture.pdf` p4 (9 bare CFF fonts, format 1) | 0.9476 | **0.9926** | 0 | **24 954** | 25 929 |
+
+`freeculture` p4 is now within 4% of `mutool`'s ink at 0.9926 SSIM. The arXiv page draws
+about half of what `mutool` draws, and the rest of that page is the base-14 stamp down its
+margin — D7's second half, still missing.
+
+What is worth recording is not the fix but how it went wrong first. The charset reader was
+written from a description of the three formats that said each begins with a `u16` count.
+**None of the three does.** Every charset is a format byte followed by entries, and the count
+is the glyph count from the CharStrings INDEX:
+
+* format 0 — one SID per glyph after `.notdef`, and no count;
+* formats 1 and 2 — runs of `{first: u16, nLeft}`, one after another, and no count.
+
+A reader that assumes a count reads a real entry as a header. For format 0 the first entry's
+SID is usually below 256, so it reads as a count of **zero** and the whole charset comes back
+empty. That is what happened to every font in the wild corpus: **74 charsets, 0 glyph names
+resolved.** The three test builders had been written to match the same mistake, so all three
+passed. The cross-check against `fontTools` over the corpus is the only thing that found it.
+
+Two more layout facts came out of the same cross-check, and both are the shape one assumes
+wrong:
+
+* **A String INDEX entry has no length byte.** The length is the INDEX's own offset
+  arithmetic. Across the 84 String INDEX entries in the corpus, not one begins with a byte
+  equal to its own length, which is what a `Pascal string` would. A reader that strips a
+  length byte reads the first character as a number, so for a name starting with a capital
+  letter it truncates at 65 characters and refuses the rest.
+* **The first glyph a run names is glyph 1, not glyph 0**, because `.notdef` is glyph 0 and
+  no format lists it.
+
+The 391-name Standard Strings were transcribed and then checked against two independent
+sources, which agree on all 391 entries: Ghostscript's `CFFStandardStrings` pseudo-encoding,
+whose own source annotates every name with the SID it holds, and the Adobe Glyph List
+toolchain's `cffStandardStrings`.
+
+The standing check is `crates/mangle-font/tests/charset_real.rs`: it lifts every name-keyed
+CFF out of the corpus, hands the same bytes to `fontTools` and to this reader, and asserts
+they agree on **every glyph name**. It reports
+
+```
+74 charsets, 1874 glyph names agree with fontTools, 0 do not, 2 unreadable
+```
+
+The 2 unreadable are a Private DICT this cannot bound — a different defect, and not the
+charset.
+
+---
+
 ## D7 — 78% of the corpus is blank because the font cannot be read, not because the content could not
 
 **Severity: critical, and it is what D1 was hiding. 422 of 542 pages.**
+
+> **Partly fixed — see [D8](#d8--the-cff-charset-was-read-from-the-wrong-offset-and-looked-plausible-while-it-did-it).**
+> The charset half is done: a name-keyed CFF font's codes reach glyphs and the 355-page
+> refusal is gone. The counts below were measured before that and are kept as they were
+> measured. The remaining half — 67 pages naming a font that is not embedded at all — is
+> untouched.
 
 D1 is fixed and the corpus was re-measured, and this is what the numbers say. All 542 pages,
 rendered at 150 DPI with the fix in place:
@@ -414,21 +481,19 @@ with no `sfnt` wrapper and therefore no `cmap`. A character code reaches a glyph
 code  ->  /Encoding /Differences name  ->  CFF charset: name -> GID  ->  CharStrings
 ```
 
-The first and last steps work. The middle one does not: `Program::code_refusal` refuses
+The first and last steps work. The middle one did not: `Program::code_refusal` refuses
 rather than guess, because the charset is exactly the table that maps a glyph *name* to a
-glyph number, and nothing here reads it. So the whole font is refused on the first glyph and
-every character on the page in it goes undrawn. The note it leaves is accurate and is
-recorded on every such page:
+glyph number, and nothing here read it. So the whole font was refused on the first glyph and
+every character on the page in it went undrawn. The note it left is accurate and was recorded
+on every such page:
 
 > the `/FontFile3` of `/R18` it is a bare CFF font whose codes name glyphs through an
 > `/Encoding` this does not resolve, so no character on the page in it can be drawn
 
-Refusing was the right call at the time and the notes it produces are why this is now a
-two-hour fix rather than a two-week mystery. But the refusal is 355 pages of blank paper,
-and the charset is a bounded table: ISO 10581 §5.2, three formats (a flat array of SIDs,
-ranges of SIDs, and ranges of GIDs) plus the 391-entry Standard Strings list. Nothing about
-it is hard. It is simply the next piece of work, and until it is done **every render number
-in this file describes a page with no glyphs on it.**
+Refusing was the right call at the time and the notes it produced are why this was a two-hour
+fix rather than a two-week mystery. The charset is now read — see [D8](#d8--the-cff-charset-was-read-from-the-wrong-offset-and-looked-plausible-while-it-did-it) —
+and a name the charset lacks is a reason rather than a guess, which is the same rule applied
+one level down.
 
 ### The second: fonts that are not embedded at all
 

@@ -88,13 +88,15 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
   Three things are **not** covered, and each says so rather than drawing something plausible:
 
-  - **A bare `/Subtype /Type1C` font with a name-keyed charset cannot resolve a character
-    code.** The codes in a content stream name glyphs through the font's `/Encoding`, and the
-    charset that turns those names into glyph numbers is a table this does not read. The
-    *outlines* are read from that same table, so the report says exactly that rather than
-    leaving a page of blank where the text should be. The `/Subtype /OpenType` form of the
-    same font is fully supported, because its `cmap` beside the `CFF ` table answers the
-    question.
+  - **A charset this cannot walk resolves no code.** A name-keyed CFF's `charset` *is* read,
+    in all three of its formats and over both the 391 Standard Strings and the font's own
+    String INDEX, so a bare `/Subtype /Type1C` font resolves its codes like any other. What is
+    still refused is a charset that is *present and unreadable*: one of the three predefined
+    charsets, whose offsets are not a table at all but a statement that every glyph has a
+    standard name. That case says so on the page rather than drawing nothing. A name the
+    charset lacks is a reason rather than a guess, because on a subsetted font there is always
+    a nearby glyph and drawing that one puts a character nobody asked for in place of one
+    they did.
   - **A CID-keyed CFF is read only through the identity charset.** `/FDArray` and
     `/FDSelect` are both read, so each glyph gets its own Private DICT, its own subroutines
     and its own widths — which is the part that is easy to get wrong and silent. What is not
@@ -331,14 +333,36 @@ tests in the same file check the harness itself and run by default. Ten kinds ma
    different language from the Type 2 this reads, so a font that says so is refused with a
    reason.
 
-   This is the top item on the list by corpus weight, not by difficulty. **355 of the wild
-   corpus's 542 pages are blank because of it.** A `Type1` simple font whose descriptor
-   carries a bare CFF (`/FontFile3` with no `sfnt` wrapper, so no `cmap`) needs its charset
-   to get from a character code to a glyph — `code → /Encoding /Differences name → charset
-   name → GID` — and the charset is not read, so the font is refused rather than guessed at
-   and every character in it goes undrawn. Another 67 pages name a standard fourteen font
-   that is not embedded. The charset is ISO 10581 §5.2: three formats and the 391-entry
-   Standard Strings list. See D7 in `docs/known-diffs.md` for the measurements.
+   **This is done.** A `Type1` simple font whose descriptor carries a bare CFF
+   (`/FontFile3` with no `sfnt` wrapper, so no `cmap`) gets from a character code to a glyph
+   by `code → /Encoding /Differences name → charset name → GID`, and all three steps work.
+   That was **355 of the wild corpus's 542 pages**, blank because the charset was not read.
+
+   Three things about it were not obvious and are worth recording, because each was a way of
+   reading good bytes into a wrong answer:
+
+   - **No charset format has a count.** All three are a format byte and then entries, and the
+     count is the glyph count from the CharStrings INDEX. A reader that looks for a `u16`
+     count reads the first entry as a header — for format 0, usually a count of zero, so the
+     charset comes back empty while the bytes are fine.
+   - **A String INDEX entry has no length byte.** The length is the INDEX's own offset
+     arithmetic. Across the 84 String INDEX entries in the corpus not one begins with a byte
+     equal to its own length.
+   - **The first glyph a run names is glyph 1**, because `.notdef` is glyph 0 and no format
+     lists it.
+
+   The 391 Standard Strings are transcribed and were checked against two independent sources
+   that agree on all 391: Ghostscript's `CFFStandardStrings` pseudo-encoding, whose source
+   annotates each name with its SID, and the Adobe Glyph List toolchain's
+   `cffStandardStrings`. The 355-page refusal was replaced by a standing cross-check against
+   `fontTools` over the whole corpus — `crates/mangle-font/tests/charset_real.rs`, which
+   hands the same bytes to both readers and asserts they agree on **every glyph name**
+   (currently 74 charsets and 1874 names, no disagreements). Without it the three layout
+   mistakes above would all have shipped, because the hand-built test fonts were written to
+   match them.
+
+   What is left of D7 is the other half: 67 pages name a standard fourteen font that is not
+   embedded at all. See D7 and D8 in `docs/known-diffs.md` for the measurements.
 3. **Composite fonts read two-byte codes, and the mark says so.** A `/Type0` font's
    character codes are two bytes, so a string is split into codes rather than bytes and the
    pen advances by the width of each code. Two things had to change together for that to be
@@ -455,13 +479,16 @@ Re-measured with the fix in place, the corpus says:
 So D1 was the cause of the blankness on 19% of pages and on the other 81% it was *hiding* a
 second and much larger defect behind silence. That defect is fonts, and it is now named,
 measured and written down as D7: 355 pages carry a `Type1` font whose `/FontFile3` is a bare
-CFF table, where a character code reaches a glyph through the CFF charset, and nothing reads
-the charset. Another 67 name a base-14 font that is not embedded at all.
+CFF table, where a character code reaches a glyph through the CFF charset, and nothing read
+the charset. **That half is now fixed** — see D8 — and the same arXiv page is the measurement
+of it. Another 67 pages name a base-14 font that is not embedded at all, and that half is
+untouched.
 
-**The arXiv page's SSIM did not move, and that is the right result.** It is 0.791534 before
-and after, because the page is blank both ways for two different reasons — before because
-the content was never decoded, after because all seven of its fonts refuse. A blank page
-against a page with 5.4% ink scores 0.7915 whatever the reason for the blankness is.
+**The arXiv page's SSIM is now 0.878445, up from 0.791534, and its ink from 0 to 61 262.**
+`mutool` puts 130 395 pixels on that page, so roughly half of it is still missing and the
+missing half is the base-14 stamp and the images. `pdfjs__freeculture.pdf` p4 goes from
+0.947615 and no ink at all to 0.992561 and 24 954 against `mutool`'s 25 929 — a page that was
+blank because of the charset, measured against the oracle, four per cent of the ink away.
 
 The reporting is the durable part of the fix. Every filter that goes wrong now says so in
 `render.notes`, naming the filter and which of the page's `/Contents` streams it came from,

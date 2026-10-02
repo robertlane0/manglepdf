@@ -346,6 +346,25 @@ pub fn is_agl_name(name: &str) -> bool {
     agl(name).is_some()
 }
 
+/// The AGL name a Unicode scalar value is canonically called, or `None` if it is not in the
+/// AGL.
+///
+/// The reverse of [`agl`], and it exists because a name has two spellings in a CFF charset:
+/// the file's `/Encoding` writes `A` and the font's own charset writes `uni0041`, and
+/// whichever one a table holds, the other has to be derivable from it.
+///
+/// Where two names share a code point — `Delta` is both U+2206 and U+0394 — the first in
+/// table order is answered, which is the same choice [`agl`] makes. `None` for a scalar the
+/// AGL does not name, which includes every one beyond U+FFFF except the small range the AGL
+/// extends with `uniXXXX` names of its own.
+#[must_use]
+pub fn agl_name(code: u32) -> Option<&'static str> {
+    AGL_NAMES
+        .iter()
+        .find(|(_, candidate)| *candidate == code)
+        .map(|(name, _)| *name)
+}
+
 /// A name in a sorted `(code, name)` table.
 fn lookup(table: &[(u32, &'static str)], code: u32) -> Option<&'static str> {
     let index = table.binary_search_by(|(at, _)| at.cmp(&code)).ok()?;

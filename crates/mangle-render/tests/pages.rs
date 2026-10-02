@@ -2687,28 +2687,26 @@ fn our_cff_glyphs_agree_with_mutools() {
 
 // There is deliberately no oracle test for the bare `/Subtype /Type1C` form.
 //
-// `mutool` resolves a bare CFF font's character codes — through the charset and the standard
-// encoding — and draws the page, while this renderer **refuses it and says why** (the test
-// below). Comparing the two would measure the refusal rather than the outlines, and a score
-// above the bar would be a lie about what this renderer does. The honest comparison for that
-// shape is the one that already runs: the same outlines, taken out of the same `CFF ` table,
-// and drawn through the `sfnt` wrapper's `cmap`.
+// `mutool` resolves a bare CFF font's character codes through the charset and the standard
+// encoding. This renderer resolves them through the charset too, but the same glyphs are
+// already compared against `mutool` through the `sfnt` wrapper's `cmap` (the test above), and
+// comparing the *same outlines* twice would measure the page fixture rather than the charset.
+// What is tested below is the thing a charset reader can get quietly wrong: whether the codes
+// reach a glyph at all.
 
-/// A bare CFF font whose codes name glyphs through an `/Encoding` says so, rather than
-/// drawing nothing.
+/// A bare CFF font whose codes name glyphs through an `/Encoding` draws them.
 ///
 /// A `/Subtype /Type1C` program is the font with no `sfnt` wrapper and so no `cmap`: the codes
-/// in a content stream name glyphs through the font's `/Encoding`, and the `charset` that
-/// resolves those names to glyph numbers is a table this does not read. The *outlines* are
-/// read — the same `CFF ` table, walked by the same reader — so what is missing is only the
-/// code lookup, and saying so once is the whole of the fix.
+/// in a content stream name glyphs through the font's `/Encoding`, and the `charset` is what
+/// resolves those names to glyph numbers. This used to be a refusal, with the reason on the
+/// page, because the charset was not read; it is read now, in all three of its formats.
 ///
-/// Drawing nothing for every character on the page, with nothing in the report, is the failure
-/// this guards against: a user sees a page with no text and no idea why. And drawing the
-/// outline for glyph *n* because the code was *n* would be worse — a page of the wrong
-/// letters, which looks like a font problem rather than a reader one.
+/// So this asserts the thing the reading is *for*: the page has ink in it, and the notes say
+/// nothing about a charset. The failure this guards against is the one a charset reader can
+/// produce quietly — a lookup that returns `None` for every code, which draws nothing and
+/// looks exactly like the refusal it replaced.
 #[test]
-fn a_bare_name_keyed_cff_font_reports_why_it_cannot_draw() {
+fn a_bare_name_keyed_cff_font_draws_through_its_charset() {
     let font = match cff_font() {
         Ok(font) => font,
         Err(reason) => {
@@ -2721,14 +2719,26 @@ fn a_bare_name_keyed_cff_font_reports_why_it_cannot_draw() {
         return;
     };
     let render = render_cff_page(cff_page(&font, "Type1C", &bare), 2.0).expect("a font");
-    let said = render
-        .notes
-        .iter()
-        .any(|note| note.contains("Encoding") && note.contains("does not resolve"));
     assert!(
-        said,
-        "a bare name-keyed CFF font must say why its codes cannot be resolved: {:?}",
+        !render
+            .notes
+            .iter()
+            .any(|note| note.contains("charset") && note.contains("does not read")),
+        "a readable charset must not produce a refusal: {:?}",
         render.notes
+    );
+    // And the page is not blank. The fixture draws a filled rectangle as well as three lines
+    // of text, so this counts every non-white pixel rather than only the text: a charset that
+    // resolved nothing would leave the rectangle and lose the words.
+    let ink = render
+        .image
+        .pixels
+        .chunks_exact(4)
+        .filter(|px| px[0] < 250 || px[1] < 250 || px[2] < 250)
+        .count();
+    assert!(
+        ink > 1_000,
+        "only {ink} non-white pixels: the page's text is not being drawn"
     );
 }
 

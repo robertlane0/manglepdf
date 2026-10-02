@@ -199,11 +199,12 @@ impl Program {
 
     /// Why a character code cannot be turned into a glyph here, if it cannot.
     ///
-    /// `None` means the program can. The one case that cannot is a *bare* CFF font with a
-    /// name-keyed charset: the codes in a content stream name glyphs through the font's
-    /// `/Encoding`, and the charset that resolves those names to glyph numbers is a table
-    /// this does not read. Saying so once beats drawing nothing for every character on the
-    /// page and saying nothing about why.
+    /// `None` means the program can. The one case that cannot is a *bare* CFF font whose
+    /// charset is written out in a form this does not read: the codes in a content stream
+    /// name glyphs through the font's `/Encoding`, and the charset resolves those names to
+    /// glyph numbers, so a charset that is missing is the identity mapping and a charset
+    /// that is present and unreadable resolves nothing. Saying so once beats drawing nothing
+    /// for every character on the page and saying nothing about why.
     pub fn code_refusal(&mut self) -> Option<String> {
         if let Err(reason) = self.inspect() {
             return Some(reason);
@@ -217,15 +218,16 @@ impl Program {
         let table = cff::cff_bytes(&self.data)?;
         // A CID-keyed font resolves an identifier through its charset, and the only
         // charset this reads is the identity one, which `Cff::parse` has already insisted
-        // on — so the code is the glyph number.
+        // on — so the code is the glyph number. A name-keyed one resolves through a charset
+        // this reads, in all three of its formats.
         match Cff::parse(table, 0) {
-            Ok(cff) if cff.is_cid_keyed() => None,
+            Ok(cff) if cff.resolves_names() => None,
             // An `sfnt` carries a `cmap`, so a code reaches a glyph through it whatever the
             // outlines are made of.
             _ if Face::parse(&self.data, 0).is_ok() => None,
             _ => Some(
-                "it is a bare CFF font whose codes name glyphs through an /Encoding this \
-                 does not resolve, so no character on the page in it can be drawn"
+                "it is a bare CFF font whose charset names glyphs in a form this does not \
+                 read, so no character on the page in it can be drawn"
                     .into(),
             ),
         }
@@ -342,9 +344,12 @@ impl Program {
                 (code < in_range).then_some(code)
             }
             // A bare CFF has no `sfnt` directory, so the subtables above are not there to
-            // be tried. A CID-keyed one says the identifier and the glyph number are the
-            // same number; a name-keyed one has nothing to say.
-            Err(_) => self.identity_cid(code),
+            // be tried. A name-keyed one answers through its charset and the name the
+            // encoding gave; a CID-keyed one says the identifier and the glyph number are
+            // the same number.
+            Err(_) => name
+                .and_then(|n| self.glyph_for_name(n))
+                .or_else(|| self.identity_cid(code)),
         }
     }
 
@@ -358,6 +363,30 @@ impl Program {
     ) -> Option<(Outline, u16)> {
         let glyph = self.glyph_for_code_named(code, name)?;
         self.outline(glyph)
+    }
+
+    /// The glyph number one glyph name names in a bare CFF font.
+    ///
+    /// A name-keyed CFF font names its glyphs in its charset and nothing else, so this is
+    /// the whole of how a character code reaches a glyph in one: the `/Encoding` turns the
+    /// code into a name, and the charset turns the name into a number. A name the charset
+    /// does not have is `None`, because the alternative — guessing which nearby glyph was
+    /// meant — draws a character nobody asked for in place of one they did.
+    ///
+    /// Two names for one character are both tried, in this order: the name itself, then the
+    /// other spelling of it. A real font says `uni0041` in its charset while the PDF's
+    /// `/Encoding` says `A`, and a reader that takes only one of the two draws a page of
+    /// nothing and reports nothing about why. `uniXXXX`, `uXXXX` and an AGL name are three
+    /// spellings of one character, and which two of them meet depends on which program
+    /// wrote the font.
+    #[must_use]
+    pub fn glyph_for_name(&self, name: &str) -> Option<u32> {
+        let table = cff::cff_bytes(&self.data)?;
+        let cff = Cff::parse(table, 0).ok()?;
+        if cff.is_cid_keyed() {
+            return None;
+        }
+        cff.glyph_for_name(name)
     }
 
     /// The glyph number one character code names.
@@ -1207,6 +1236,81 @@ mod tests {
             em_scale(0),
             1.0,
             "and the guard itself answers 1, which is the whole of its contract"
+        );
+    }
+
+    // ── the refusal, and what it is for ────────────────────────────────────────
+
+    /// A CFF font somewhere on this machine, unwrapped from its `sfnt` if it has one.
+    ///
+    /// Deliberately a short candidate list: this is about what a bare CFF program's codes
+    /// reach, and a font nobody has installed is a skip rather than a failure.
+    fn bare_cff_on_this_machine() -> Option<Vec<u8>> {
+        const CANDIDATES: [&str; 4] = [
+            "/usr/share/fonts/gnu-free/FreeSerif.otf",
+            "/usr/share/fonts/gnu-free/FreeSans.otf",
+            "/usr/share/fonts/gsfonts/NimbusSans-Regular.otf",
+            "/usr/share/fonts/gsfonts/NimbusRoman-Regular.otf",
+        ];
+        CANDIDATES
+            .iter()
+            .find_map(|path| cff::cff_bytes(&std::fs::read(path).ok()?).map(<[u8]>::to_vec))
+    }
+
+    /// A bare name-keyed CFF font no longer refuses, because its charset is read.
+    ///
+    /// The refusal this replaces was the right answer while the charset was unread — it said
+    /// so once rather than drawing nothing silently — and it is the wrong answer now, for the
+    /// same reason a page of nothing is: the font *can* be read. What makes a character code
+    /// reach a glyph here is `/Encoding` saying `A` and the charset saying which glyph `A`
+    /// is, and both of those are answered.
+    #[test]
+    fn a_bare_name_keyed_cff_font_resolves_names_and_so_does_not_refuse() {
+        let Some(bare) = bare_cff_on_this_machine() else {
+            eprintln!("skipped: no CFF font found to unwrap");
+            return;
+        };
+        let mut program = Program::new(bare);
+        assert_eq!(
+            program.code_refusal(),
+            None,
+            "a readable charset is not a reason a page cannot be drawn"
+        );
+        // And it is not merely a refusal that went away: the codes reach glyphs. `A` is a
+        // name in the Standard Strings and every real font has it, and `notoneglyph` is a
+        // name in none of them.
+        assert!(
+            program.glyph_for_name("A").is_some(),
+            "a standard name resolves through a real font's charset"
+        );
+        assert_eq!(
+            program.glyph_for_name("definitelynotaglyphname"),
+            None,
+            "and a name the font does not have resolves to nothing rather than to a guess"
+        );
+    }
+
+    /// A CID font's charset is an identifier map, and it is still refused when it is not the
+    /// identity. This is the one refusal here that is a limit rather than a gap, and it must
+    /// survive the charset reader arriving: a name-keyed reader applied to a CID font would
+    /// resolve an identifier as if it were a name.
+    #[test]
+    fn a_cid_font_still_refuses_a_charset_that_is_not_the_identity() {
+        // There is no CID font in the candidate list, and building one here would need a CFF
+        // builder this module does not have — `cff.rs` owns that. So this asserts the half
+        // that is checkable from here: a CID font is not one this can resolve names through,
+        // and a program that is not a font at all is refused for the reason it actually is.
+        assert!(
+            Program::new(b"not a font at all".to_vec())
+                .code_refusal()
+                .is_some(),
+            "a program that is not a font is refused, and saying so is the point"
+        );
+        assert!(
+            Program::new(b"not a font at all".to_vec())
+                .glyph_for_name("A")
+                .is_none(),
+            "and it resolves no names either"
         );
     }
 }

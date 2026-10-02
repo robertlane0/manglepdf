@@ -13,8 +13,17 @@
 //!
 //! Left out, on purpose:
 //!
-//! * **The `Name` and `String` INDEXes and every glyph name.** Nothing below needs to know
-//!   that glyph 4 is `H`; a charstring is addressed by number.
+//! * **The `Name` INDEX.** Nothing below needs to know what the font calls itself; a
+//!   charstring is addressed by number.
+//!
+//! Read since the last revision: the `charset`, the `String` INDEX and the 391 Standard
+//! Strings, which together are what turns a character code into a glyph number in a
+//! name-keyed font. That is the whole route from a code to a glyph: `/Encoding` says `A`,
+//! the charset says which glyph `A` is, and the charstring draws it. Without the charset a
+//! name-keyed CFF font can be walked but no character on the page in it can be placed, and
+//! the page says so rather than drawing nothing. A CID font's charset is the other thing
+//! entirely — an identifier map rather than a name map — and it is **not** claimed; see
+//! below.
 //! * **Every Private DICT key except `Subrs`, `defaultWidthX` and `nominalWidthX`.** The
 //!   rest — `BlueValues`, `StdHW`, `ExpansionFactor` — describe how to *hint* stems to a
 //!   rasterizer's pixel grid. This renderer computes exact analytic coverage and has no
@@ -36,7 +45,8 @@
 //! `Subrs` and widths.
 //!
 //! What is *not* claimed is the other half. A CID font maps character identifiers to glyphs
-//! through its `charset`, and only the identity mapping is read. A CID font whose charset
+//! through its `charset`, and only the identity mapping is read — the name-keyed reader above
+//! does not apply, because a CID font's charset names no glyphs. A CID font whose charset
 //! says something else is **refused with a reason** rather than drawn, because treating its
 //! identifiers as glyph numbers produces the wrong shape for every character and nothing
 //! downstream can tell.
@@ -441,6 +451,615 @@ const KEY_VARSTORE: u16 = 24;
 /// default is 2, and a font that does not say has Type 2 charstrings.
 const KEY_CHARSTRING_TYPE: u16 = 0x0c06;
 
+/// The CFF Standard Strings: the 391 names ISO 10581 §5.2 Table D.5 fixes, by SID.
+///
+/// A SID below 391 is an index into this table; 391 and above are an index into the
+/// font's own String INDEX, which is what carries a subset's `g17` and `a84`.
+///
+/// This is transcribed, so it is checked rather than trusted. Two independent sources
+/// agree on all 391 entries: Ghostscript's `CFFStandardStrings` pseudo-encoding, whose
+/// source annotates every name with the SID it holds, and the Adobe Glyph List toolchain's
+/// `cffStandardStrings`. `standard_strings_agree_with_the_glyph_list` re-checks the ends and
+/// the absence of duplicates on every run; the two sources were compared entry by entry when
+/// the table was written.
+pub const STANDARD_STRINGS: [&str; 391] = [
+    ".notdef",
+    "space",
+    "exclam",
+    "quotedbl",
+    "numbersign",
+    "dollar",
+    "percent",
+    "ampersand",
+    "quoteright",
+    "parenleft",
+    "parenright",
+    "asterisk",
+    "plus",
+    "comma",
+    "hyphen",
+    "period",
+    "slash",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "colon",
+    "semicolon",
+    "less",
+    "equal",
+    "greater",
+    "question",
+    "at",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "bracketleft",
+    "backslash",
+    "bracketright",
+    "asciicircum",
+    "underscore",
+    "quoteleft",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "j",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u",
+    "v",
+    "w",
+    "x",
+    "y",
+    "z",
+    "braceleft",
+    "bar",
+    "braceright",
+    "asciitilde",
+    "exclamdown",
+    "cent",
+    "sterling",
+    "fraction",
+    "yen",
+    "florin",
+    "section",
+    "currency",
+    "quotesingle",
+    "quotedblleft",
+    "guillemotleft",
+    "guilsinglleft",
+    "guilsinglright",
+    "fi",
+    "fl",
+    "endash",
+    "dagger",
+    "daggerdbl",
+    "periodcentered",
+    "paragraph",
+    "bullet",
+    "quotesinglbase",
+    "quotedblbase",
+    "quotedblright",
+    "guillemotright",
+    "ellipsis",
+    "perthousand",
+    "questiondown",
+    "grave",
+    "acute",
+    "circumflex",
+    "tilde",
+    "macron",
+    "breve",
+    "dotaccent",
+    "dieresis",
+    "ring",
+    "cedilla",
+    "hungarumlaut",
+    "ogonek",
+    "caron",
+    "emdash",
+    "AE",
+    "ordfeminine",
+    "Lslash",
+    "Oslash",
+    "OE",
+    "ordmasculine",
+    "ae",
+    "dotlessi",
+    "lslash",
+    "oslash",
+    "oe",
+    "germandbls",
+    "onesuperior",
+    "logicalnot",
+    "mu",
+    "trademark",
+    "Eth",
+    "onehalf",
+    "plusminus",
+    "Thorn",
+    "onequarter",
+    "divide",
+    "brokenbar",
+    "degree",
+    "thorn",
+    "threequarters",
+    "twosuperior",
+    "registered",
+    "minus",
+    "eth",
+    "multiply",
+    "threesuperior",
+    "copyright",
+    "Aacute",
+    "Acircumflex",
+    "Adieresis",
+    "Agrave",
+    "Aring",
+    "Atilde",
+    "Ccedilla",
+    "Eacute",
+    "Ecircumflex",
+    "Edieresis",
+    "Egrave",
+    "Iacute",
+    "Icircumflex",
+    "Idieresis",
+    "Igrave",
+    "Ntilde",
+    "Oacute",
+    "Ocircumflex",
+    "Odieresis",
+    "Ograve",
+    "Otilde",
+    "Scaron",
+    "Uacute",
+    "Ucircumflex",
+    "Udieresis",
+    "Ugrave",
+    "Yacute",
+    "Ydieresis",
+    "Zcaron",
+    "aacute",
+    "acircumflex",
+    "adieresis",
+    "agrave",
+    "aring",
+    "atilde",
+    "ccedilla",
+    "eacute",
+    "ecircumflex",
+    "edieresis",
+    "egrave",
+    "iacute",
+    "icircumflex",
+    "idieresis",
+    "igrave",
+    "ntilde",
+    "oacute",
+    "ocircumflex",
+    "odieresis",
+    "ograve",
+    "otilde",
+    "scaron",
+    "uacute",
+    "ucircumflex",
+    "udieresis",
+    "ugrave",
+    "yacute",
+    "ydieresis",
+    "zcaron",
+    "exclamsmall",
+    "Hungarumlautsmall",
+    "dollaroldstyle",
+    "dollarsuperior",
+    "ampersandsmall",
+    "Acutesmall",
+    "parenleftsuperior",
+    "parenrightsuperior",
+    "twodotenleader",
+    "onedotenleader",
+    "zerooldstyle",
+    "oneoldstyle",
+    "twooldstyle",
+    "threeoldstyle",
+    "fouroldstyle",
+    "fiveoldstyle",
+    "sixoldstyle",
+    "sevenoldstyle",
+    "eightoldstyle",
+    "nineoldstyle",
+    "commasuperior",
+    "threequartersemdash",
+    "periodsuperior",
+    "questionsmall",
+    "asuperior",
+    "bsuperior",
+    "centsuperior",
+    "dsuperior",
+    "esuperior",
+    "isuperior",
+    "lsuperior",
+    "msuperior",
+    "nsuperior",
+    "osuperior",
+    "rsuperior",
+    "ssuperior",
+    "tsuperior",
+    "ff",
+    "ffi",
+    "ffl",
+    "parenleftinferior",
+    "parenrightinferior",
+    "Circumflexsmall",
+    "hyphensuperior",
+    "Gravesmall",
+    "Asmall",
+    "Bsmall",
+    "Csmall",
+    "Dsmall",
+    "Esmall",
+    "Fsmall",
+    "Gsmall",
+    "Hsmall",
+    "Ismall",
+    "Jsmall",
+    "Ksmall",
+    "Lsmall",
+    "Msmall",
+    "Nsmall",
+    "Osmall",
+    "Psmall",
+    "Qsmall",
+    "Rsmall",
+    "Ssmall",
+    "Tsmall",
+    "Usmall",
+    "Vsmall",
+    "Wsmall",
+    "Xsmall",
+    "Ysmall",
+    "Zsmall",
+    "colonmonetary",
+    "onefitted",
+    "rupiah",
+    "Tildesmall",
+    "exclamdownsmall",
+    "centoldstyle",
+    "Lslashsmall",
+    "Scaronsmall",
+    "Zcaronsmall",
+    "Dieresissmall",
+    "Brevesmall",
+    "Caronsmall",
+    "Dotaccentsmall",
+    "Macronsmall",
+    "figuredash",
+    "hypheninferior",
+    "Ogoneksmall",
+    "Ringsmall",
+    "Cedillasmall",
+    "questiondownsmall",
+    "oneeighth",
+    "threeeighths",
+    "fiveeighths",
+    "seveneighths",
+    "onethird",
+    "twothirds",
+    "zerosuperior",
+    "foursuperior",
+    "fivesuperior",
+    "sixsuperior",
+    "sevensuperior",
+    "eightsuperior",
+    "ninesuperior",
+    "zeroinferior",
+    "oneinferior",
+    "twoinferior",
+    "threeinferior",
+    "fourinferior",
+    "fiveinferior",
+    "sixinferior",
+    "seveninferior",
+    "eightinferior",
+    "nineinferior",
+    "centinferior",
+    "dollarinferior",
+    "periodinferior",
+    "commainferior",
+    "Agravesmall",
+    "Aacutesmall",
+    "Acircumflexsmall",
+    "Atildesmall",
+    "Adieresissmall",
+    "Aringsmall",
+    "AEsmall",
+    "Ccedillasmall",
+    "Egravesmall",
+    "Eacutesmall",
+    "Ecircumflexsmall",
+    "Edieresissmall",
+    "Igravesmall",
+    "Iacutesmall",
+    "Icircumflexsmall",
+    "Idieresissmall",
+    "Ethsmall",
+    "Ntildesmall",
+    "Ogravesmall",
+    "Oacutesmall",
+    "Ocircumflexsmall",
+    "Otildesmall",
+    "Odieresissmall",
+    "OEsmall",
+    "Oslashsmall",
+    "Ugravesmall",
+    "Uacutesmall",
+    "Ucircumflexsmall",
+    "Udieresissmall",
+    "Yacutesmall",
+    "Thornsmall",
+    "Ydieresissmall",
+    "001.000",
+    "001.001",
+    "001.002",
+    "001.003",
+    "Black",
+    "Bold",
+    "Book",
+    "Light",
+    "Medium",
+    "Regular",
+    "Roman",
+    "Semibold",
+];
+
+// ── the Standard Strings and the charset ──────────────────────────────────────────
+
+/// A glyph's name, for the SIDs below [`STANDARD_STRINGS`]'s length.
+///
+/// A SID below 391 is an index into [`STANDARD_STRINGS`] and names a glyph of every CFF
+/// font; a SID of 391 or more names one of *this* font's own strings, which is a subset's
+/// `g17` or `a84` and is resolved through the font's String INDEX.
+#[must_use]
+pub fn standard_string(sid: u32) -> Option<&'static str> {
+    STANDARD_STRINGS.get(usize::try_from(sid).ok()?).copied()
+}
+
+/// Where the font's own String INDEX begins, which resolves the SIDs at and above 391.
+///
+/// A subset renames its glyphs, and the charset's SIDs for those renamed glyphs are 391 and
+/// up. So a charset is half meaningless without this table, and a reader that stops at 391
+/// resolves the Latin letters and refuses everything a subsetter actually named — which for
+/// a subsetted font is most of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StringIndex {
+    /// Where the table begins, which is where the third of the four declared INDEXes is.
+    at: usize,
+}
+
+/// Which name each glyph has, which is what turns a character code into a glyph number.
+///
+/// This is a name-keyed font's only route from a code to a glyph. "Glyph 4 is `H`" is the
+/// whole of what makes byte 72 draw an H: a charstring is addressed by number and knows
+/// nothing of its own name.
+///
+/// `Identity` is the font that writes no charset, where the specification says glyph *n* has
+/// SID *n*. It is kept as its own case rather than expanded into `Sids`, because a font with
+/// no charset is the common case and answering one of its codes must not cost a table.
+#[derive(Debug, Clone, PartialEq)]
+enum Charset {
+    /// No charset: glyph *n* has SID *n*, in both directions.
+    Identity,
+    /// Format 0: one SID per glyph after `.notdef`, in order.
+    Sids(Vec<u16>),
+    /// Formats 1 and 2: `(first glyph, first SID, how many glyphs)`, kept as written rather
+    /// than expanded. A run may cover the whole glyph space, and expanding it to answer one
+    /// lookup would cost a vector the size of the font.
+    Ranges(Vec<(u32, u16, u32)>),
+    /// A charset this cannot walk, so no code reaches a glyph through it. A font naming one
+    /// of the three predefined charsets lands here: those say every glyph has a standard
+    /// name, which is neither the identity nor a table there is to read.
+    Unreadable,
+}
+
+impl Charset {
+    /// The SID of one glyph.
+    fn sid_for_glyph(&self, glyph: u32) -> Option<u16> {
+        match self {
+            Self::Identity => u16::try_from(glyph).ok(),
+            // `.notdef` is glyph 0 and no format lists it, so the entry for glyph `g` is the
+            // one before it in the table.
+            Self::Sids(sids) => sids
+                .get(usize::try_from(glyph.checked_sub(1)?).ok()?)
+                .copied(),
+            Self::Ranges(ranges) => {
+                // Glyph 0 is `.notdef` and no format lists it, so the first run starts at
+                // glyph 1. Glyphs are visited in order, so the run that covers this one is
+                // found by walking until the walk has passed it.
+                let mut at = 1u32;
+                for (first_glyph, first_sid, len) in ranges {
+                    if glyph < at {
+                        break;
+                    }
+                    if let Some(delta) = glyph.checked_sub(at)
+                        && delta < *len
+                    {
+                        return first_sid.checked_add(u16::try_from(delta).ok()?);
+                    }
+                    at = first_glyph.saturating_add(*len);
+                }
+                None
+            }
+            Self::Unreadable => None,
+        }
+    }
+}
+
+/// The Unicode scalar value a `uniXXXX` or `uXXXX` glyph name stands for.
+///
+/// The digits are hexadecimal, their case is not, and four is the minimum because a name
+/// shorter than that is not a Unicode name at all. A name that is not one of the three
+/// spellings has no scalar, which is not an error: most glyph names are AGL names.
+fn unicode_name(name: &str) -> Option<u32> {
+    let digits = name
+        .strip_prefix("uni")
+        .or_else(|| name.strip_prefix('u'))?;
+    if !(4..=6).contains(&digits.len()) || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(digits, 16)
+        .ok()
+        .filter(|c| char::from_u32(*c).is_some())
+}
+
+/// Every way this glyph may be spelled, given one spelling of it.
+///
+/// Three spellings meet in real files, and which two of them meet is not something this can
+/// know before looking: a PDF's `/Encoding` says `A`, a font's charset says `uni0041`, and
+/// which of those two a given file uses depends on which program subset it.
+///
+/// * **`uniXXXX` and `uXXXX`** — the same four to six hexadecimal digits under either
+///   prefix, so `uni0041` and `u0041` are both tried whichever one was given. Six digits
+///   matter because U+01D400 is a letter beyond the BMP and a four-digit name cannot spell
+///   it.
+/// * **The AGL name** for the character, which is what a charset and a `/Differences` entry
+///   usually write.
+///
+/// The name as given is first, because it is the most specific statement and the case where
+/// the two tables agree. Nothing here invents a name: each entry is either the input or the
+/// standard spelling of the character the input names.
+fn name_spellings(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    let code = unicode_name(name).or_else(|| crate::encoding::agl(name));
+    let Some(code) = code else {
+        return out;
+    };
+    for digits in [4, 6] {
+        for prefix in ["uni", "u"] {
+            let spelled = format!("{prefix}{code:0digits$X}");
+            if !out.contains(&spelled) {
+                out.push(spelled);
+            }
+        }
+    }
+    if unicode_name(name).is_some()
+        && let Some(agl) = crate::encoding::agl_name(code)
+        && !out.iter().any(|s| s == agl)
+    {
+        out.push(agl.to_string());
+    }
+    out
+}
+
+/// The charset a CFF 1 font's Top DICT points at.
+///
+/// `Some(Identity)` when the font writes none, which is the identity mapping and the fast
+/// path, and `Some(Unreadable)` when it writes one that cannot be walked. The three formats
+/// differ in one place only — how wide a run's `nLeft` is — so all three share this walk.
+fn read_charset(data: &[u8], at: usize, glyphs: u32) -> Option<Charset> {
+    // 0, 1 and 2 are the three predefined name-keyed charsets. They are not the identity and
+    // not a table in the file: there is nothing at those offsets to read.
+    if at < 3 {
+        return Some(Charset::Unreadable);
+    }
+    // The format byte comes first in all three formats. After it they differ:
+    //
+    // * **Format 0** is one SID per glyph after `.notdef`, and nothing else.
+    // * **Formats 1 and 2** are runs of glyphs — `{first: u16, nLeft}` — one after another,
+    //   and nothing else.
+    //
+    // **No format states how many entries there are.** The count is the glyph count, which is
+    // in the CharStrings INDEX this charset belongs to: format 0's entries run to one per
+    // glyph after `.notdef`, and a run's own `nLeft` says how many glyphs it covers. A reader
+    // that looks for a count field reads a real entry as a header — for format 0, where the
+    // first entry's SID is usually below 256, that is a count of zero and a charset that
+    // comes back empty while the bytes are perfectly good.
+    let fmt = *data.get(at)?;
+    let listed = usize::try_from(glyphs).ok()?.checked_sub(1)?;
+    match fmt {
+        0 => {
+            let mut sids = Vec::with_capacity(listed);
+            for i in 0..listed {
+                sids.push(be16(
+                    data,
+                    at.checked_add(1)?.checked_add(i.checked_mul(2)?)?,
+                )?);
+            }
+            Some(Charset::Sids(sids))
+        }
+        1 | 2 => {
+            // Format 1 counts the glyphs after a run's first in one byte, which caps a run
+            // at 256 glyphs; format 2 spends two bytes and caps it at 65 536. Reading a
+            // format 2 run as format 1 turns one run into a different number of glyphs, and
+            // every glyph from there to the end of the font into a different shape.
+            let width = if fmt == 1 { 1 } else { 2 };
+            let mut ranges = Vec::new();
+            let mut at = at.checked_add(1)?;
+            // `.notdef` is glyph 0 and no format lists it, so the first run starts at glyph 1.
+            let mut glyph = 1u32;
+            let mut covered = 0usize;
+            while covered < listed {
+                let first = be16(data, at)?;
+                let n_left = if width == 1 {
+                    usize::from(*data.get(at.checked_add(2)?)?)
+                } else {
+                    usize::from(be16(data, at.checked_add(2)?)?)
+                };
+                let len = u32::try_from(n_left).unwrap_or(u32::MAX).saturating_add(1);
+                ranges.push((glyph, first, len));
+                glyph = glyph.saturating_add(len);
+                covered = covered.saturating_add(usize::try_from(len).unwrap_or(usize::MAX));
+                at = at.checked_add(2 + width)?;
+            }
+            Some(Charset::Ranges(ranges))
+        }
+        _ => Some(Charset::Unreadable),
+    }
+}
+
 // ── the font ──────────────────────────────────────────────────────────────────────
 
 /// One Private DICT's two numbers a charstring walk needs, plus its subroutines.
@@ -499,6 +1118,11 @@ pub struct Cff<'a> {
     /// How many variation regions each item-variation record has. `blend` cannot know how
     /// many operands it is eating without it, so without a store a blend is damage.
     regions: Option<Vec<u32>>,
+    /// Which name each glyph has, and so how a character code reaches a glyph number.
+    charset: Charset,
+    /// The font's own String INDEX, for the SIDs at and above 391. `None` for a CFF 2 font,
+    /// which has neither a charset nor a String INDEX.
+    strings: Option<StringIndex>,
     cff2: bool,
     cid_keyed: bool,
 }
@@ -529,7 +1153,7 @@ impl<'a> Cff<'a> {
         }
         let count_size = if cff2 { 4 } else { 2 };
 
-        let (top, global_subrs) = if cff2 {
+        let (top, global_subrs, name_index_len, top_index_len) = if cff2 {
             let top_len = usize::from(be16(data, 3).ok_or("its header is cut short")?);
             let end = header_size
                 .checked_add(top_len)
@@ -542,14 +1166,29 @@ impl<'a> Cff<'a> {
             (
                 Dict::parse(bytes).ok_or("its Top DICT is malformed")?,
                 subrs,
+                0,
+                0,
             )
         } else {
             // CFF 1 states no sizes: the four INDEXes follow one another, so each is found
             // by adding the length of the ones before it.
-            let top_bytes = top_dict_index(data, header_size, font)?;
-            let top = Dict::parse(&top_bytes).ok_or("its Top DICT is malformed")?;
+            let name = Index::parse(data, header_size, 2).ok_or("its Name INDEX is malformed")?;
+            let name_index_len = name.len_of();
+            let tops = Index::parse(
+                data,
+                header_size
+                    .checked_add(name_index_len)
+                    .ok_or("its header length overflows")?,
+                2,
+            )
+            .ok_or("its Top DICT INDEX is malformed")?;
+            let top_index_len = tops.len_of();
+            let top_bytes = tops
+                .get(usize::try_from(font).unwrap_or(0))
+                .ok_or("it has no Top DICT at that index")?;
+            let top = Dict::parse(top_bytes).ok_or("its Top DICT is malformed")?;
             let subrs = global_subr_index(data, header_size)?;
-            (top, subrs)
+            (top, subrs, name_index_len, top_index_len)
         };
 
         let at = top
@@ -607,6 +1246,30 @@ impl<'a> Cff<'a> {
         };
         let regions = if cff2 { regions(data, &top) } else { None };
 
+        // A CFF 2 font has neither a charset nor a String INDEX: its glyphs are addressed by
+        // number through the wrapper's own tables, and a name-keyed font is what a charset
+        // belongs to. Reading one anyway would find whatever the offsets happen to point at.
+        //
+        // The glyph count is what a format 0 charset is sized by: it lists one SID per glyph
+        // after `.notdef` and says nothing about how many that is.
+        let glyphs = u32::try_from(charstrings.len()).unwrap_or(0);
+        let (charset, strings) = if cff2 {
+            (Charset::Identity, None)
+        } else {
+            (
+                top.number(KEY_CHARSET)
+                    .and_then(offset)
+                    .and_then(|at| read_charset(data, at, glyphs))
+                    .unwrap_or(Charset::Identity),
+                Some(StringIndex {
+                    at: header_size
+                        .checked_add(name_index_len)
+                        .and_then(|at| at.checked_add(top_index_len))
+                        .ok_or("its String INDEX offset overflows")?,
+                }),
+            )
+        };
+
         Ok(Self {
             charstrings,
             global_subrs,
@@ -615,6 +1278,8 @@ impl<'a> Cff<'a> {
             font_matrix,
             privates,
             regions,
+            charset,
+            strings,
             cff2,
             cid_keyed,
         })
@@ -636,6 +1301,77 @@ impl<'a> Cff<'a> {
     #[must_use]
     pub fn is_cff2(&self) -> bool {
         self.cff2
+    }
+
+    /// Can a character code be resolved to a glyph through this font?
+    ///
+    /// A CID-keyed font's charset is an identifier-to-glyph map, and `Cff::parse` only
+    /// admits one that is the identity — so the code *is* the glyph number and needs no
+    /// charset at all. A name-keyed font's charset is the whole route from a code to a glyph,
+    /// so a charset that could not be walked resolves nothing.
+    #[must_use]
+    pub fn resolves_names(&self) -> bool {
+        !self.cid_keyed && !matches!(self.charset, Charset::Unreadable)
+    }
+
+    /// The glyph number one glyph name names, for a name-keyed font.
+    ///
+    /// The name is resolved against the charset under every spelling it may have, because
+    /// real files disagree with themselves about which one to use: a `/Encoding` writes `A`
+    /// where the same font's charset writes `uni0041`, and a name the charset lacks is a
+    /// reason rather than a guess. See [`name_spellings`].
+    ///
+    /// A name in the Standard Strings and a name in the font's own String INDEX are both
+    /// answerable, so a subset that renamed its glyphs is as readable here as one that did
+    /// not — which is the whole of what a subsetter does to a font.
+    #[must_use]
+    pub fn glyph_for_name(&self, name: &str) -> Option<u32> {
+        if self.cid_keyed {
+            // A CID font's charset maps character *identifiers* to glyphs, not names, and
+            // `Cff::parse` has only allowed a CID font through when that map is the identity.
+            // A name means nothing to one, and applying it would read a character code as an
+            // identifier.
+            return None;
+        }
+        name_spellings(name)
+            .iter()
+            .find_map(|spelling| self.glyph_for_sid_name(spelling))
+    }
+
+    /// The glyph whose charset entry is exactly this name.
+    ///
+    /// Glyph 0 is `.notdef` and no format lists it, so a glyph the charset says nothing
+    /// about is skipped rather than ending the walk: the walk is over every glyph in the
+    /// font, and one unreadable entry is not a reason to stop before the readable ones. The
+    /// first glyph with the name is the answer, because a charset may name two glyphs the
+    /// same and a character code names one shape rather than two.
+    fn glyph_for_sid_name(&self, name: &str) -> Option<u32> {
+        let glyphs = u32::try_from(self.num_glyphs()).ok()?;
+        (0..glyphs).find(|glyph| {
+            self.charset
+                .sid_for_glyph(*glyph)
+                .and_then(|sid| self.name_for_sid(sid))
+                == Some(name)
+        })
+    }
+
+    /// The name one SID gives a glyph, from the Standard Strings or the String INDEX.
+    fn name_for_sid(&self, sid: u16) -> Option<&'a str> {
+        if let Some(name) = standard_string(u32::from(sid)) {
+            return Some(name);
+        }
+        // 391 and up is the font's own String INDEX, where a subset's `g17` and `a84` live.
+        let i = usize::try_from(u32::from(sid).checked_sub(STANDARD_STRINGS.len() as u32)?).ok()?;
+        let index = Index::parse(self.charstrings.data, self.strings?.at, 2)?;
+        // An entry is its own bytes, with the length given by the INDEX's offsets and **no
+        // length byte inside it**. That is the opposite of a `Pascal string`, which is what
+        // the shape invites you to assume, and it is worth stating because every font in the
+        // wild corpus and the reference implementation agree on it: of 84 String INDEX
+        // entries read across that corpus, none begins with a byte equal to its own length. A
+        // reader that expects a length byte reads the first character as a number, so for a
+        // name starting with a capital letter it truncates at 65 or so characters and refuses
+        // whatever is left.
+        std::str::from_utf8(index.get(i)?).ok()
     }
 
     /// The local subroutines one glyph's charstring may call.
@@ -712,26 +1448,6 @@ impl<'a> Cff<'a> {
             .get(index)
             .ok_or_else(|| why("its CharStrings INDEX has a hole where that glyph should be"))
     }
-}
-
-/// The bytes of a CFF 1 font's Top DICT.
-///
-/// The Name INDEX comes first and the Top DICT INDEX second, with neither stating a size,
-/// so the second is found by adding the length of the first.
-fn top_dict_index(data: &[u8], header_size: usize, font: u32) -> Result<Vec<u8>, String> {
-    let name = Index::parse(data, header_size, 2).ok_or("its Name INDEX is malformed")?;
-    let wanted = usize::try_from(font).unwrap_or(0);
-    let tops = Index::parse(
-        data,
-        header_size
-            .checked_add(name.len_of())
-            .ok_or("its header length overflows")?,
-        2,
-    )
-    .ok_or("its Top DICT INDEX is malformed")?;
-    tops.get(wanted)
-        .map(<[u8]>::to_vec)
-        .ok_or_else(|| "it has no Top DICT at that index".to_string())
 }
 
 /// The bytes of a CFF 1 font's global subroutines, the fourth and last INDEX.
@@ -935,9 +1651,10 @@ fn identity_charset(data: &[u8], top: &Dict, num_glyphs: usize) -> bool {
     if data.get(at) != Some(&0) {
         return false;
     }
-    // Format 0: one identifier per glyph after `.notdef`, in order, so the entry for glyph
-    // `gid` sits at `at + 1 + (gid - 1) * 2`. The whole array is checked rather than the
-    // first entry, and a charset cut short is not shown to be the identity either.
+    // Format 0: the format byte, then one identifier per glyph after `.notdef`, in order and
+    // with no count — so the entry for glyph `gid` sits at `at + 1 + (gid - 1) * 2`. The whole
+    // array is checked rather than the first entry, and a charset cut short is not shown to be
+    // the identity either.
     (1..num_glyphs).all(|gid| {
         let at = at
             .saturating_add(1)
@@ -1979,6 +2696,11 @@ mod tests {
         /// `Some(1)` makes the Top DICT claim Type 1 charstrings, which is the one dialect
         /// this refuses.
         charstring_type: Option<i32>,
+        /// The charset table, written out verbatim after the global subroutines. `None`
+        /// writes no `/charset` at all, which is the identity mapping.
+        charset: Option<Vec<u8>>,
+        /// The String INDEX: one name per glyph whose SID is 391 or above.
+        strings: Vec<String>,
     }
 
     impl Spec {
@@ -1991,6 +2713,8 @@ mod tests {
                 nominal_width_x: 0,
                 default_width_x: 500,
                 charstring_type: None,
+                charset: None,
+                strings: Vec::new(),
             }
         }
 
@@ -2002,6 +2726,45 @@ mod tests {
             }
         }
 
+        /// `count` glyphs, each a bare `endchar`, for a charset test that needs more than one
+        /// glyph to name.
+        fn glyphs(count: usize) -> Self {
+            let mut spec = Self::one(Charstring::default());
+            spec.glyphs = vec![vec![14]; count];
+            spec
+        }
+
+        /// A charset in format 0: the format byte and then one SID per glyph after
+        /// `.notdef`, with no count of anything.
+        fn charset_format_0(sids: &[u16]) -> Vec<u8> {
+            let mut out = vec![0u8];
+            for sid in sids {
+                out.extend_from_slice(&sid.to_be_bytes());
+            }
+            out
+        }
+
+        /// A charset in format 1: runs of `{first: u16, nLeft: u8}`, with no count.
+        fn charset_format_1(runs: &[(u16, u8)]) -> Vec<u8> {
+            let mut out = vec![1u8];
+            for (first, n_left) in runs {
+                out.extend_from_slice(&first.to_be_bytes());
+                out.push(*n_left);
+            }
+            out
+        }
+
+        /// A charset in format 2: the same runs with `nLeft` as a `u16`, which is what lets
+        /// a run cover more than 256 glyphs, and with no count either.
+        fn charset_format_2(runs: &[(u16, u16)]) -> Vec<u8> {
+            let mut out = vec![2u8];
+            for (first, n_left) in runs {
+                out.extend_from_slice(&first.to_be_bytes());
+                out.extend_from_slice(&n_left.to_be_bytes());
+            }
+            out
+        }
+
         fn widths(mut self, nominal: i32, default: i32) -> Self {
             self.nominal_width_x = nominal;
             self.default_width_x = default;
@@ -2011,6 +2774,10 @@ mod tests {
 
     /// A name-keyed CFF 1 font: header, Name, Top DICT, String and global subroutines,
     /// and then the tables the Top DICT names by offset.
+    ///
+    /// The charset is written in, because a font with one is the case under test and a font
+    /// without one is only the identity mapping — so a builder that could not express a
+    /// charset could not test that the three formats are read.
     fn cff1(spec: &Spec) -> Vec<u8> {
         let charstrings = index(&spec.glyphs);
         let gsubrs = index(&spec.global_subrs);
@@ -2030,15 +2797,33 @@ mod tests {
         private.extend(fixed(subrs_at));
         private.push(19); // Subrs
 
+        // The String INDEX holds one name per glyph the font defines itself, which is what a
+        // charset's SIDs at 391 and above index into. It is the third of the four INDEXes CFF
+        // 1 declares in order — Name, Top DICT, String, Global Subr — so it goes here and the
+        // charset follows the global subroutines, which is where a reader looking for the
+        // fourth INDEX expects to find them.
+        //
+        // An entry is the name and nothing else: its length is the INDEX's own offset
+        // arithmetic. See `name_for_sid`.
+        let strings: Vec<Vec<u8>> = spec.strings.iter().map(|n| n.as_bytes().to_vec()).collect();
+        let string_index = index(&strings);
+
+        // A charset is written out only when a test asked for one. `None` leaves the Top
+        // DICT with no `/charset`, which is the identity mapping and the fast path.
+        let charset = spec.charset.clone().unwrap_or_default();
+
         // Every Top DICT operand is three bytes wide, so the Top DICT's length is known
-        // whichever font this is — 4 for CharStrings, 7 for Private, and 4 more for a
-        // CharstringType — and the tables below can be placed by arithmetic rather than by
-        // patching bytes into a finished file.
-        let top_len = 11 + if spec.charstring_type.is_some() { 5 } else { 0 };
+        // whichever font this is — 4 for CharStrings, 7 for Private, and four more each for a
+        // CharstringType and a charset — and the tables below can be placed by arithmetic
+        // rather than by patching bytes into a finished file.
+        let top_len = 11
+            + if spec.charstring_type.is_some() { 5 } else { 0 }
+            + if spec.charset.is_some() { 4 } else { 0 };
         let top_index = index(&[vec![0u8; top_len]]);
         let top_at = 6;
         let string_at = top_at + top_index.len();
-        let charstrings_at = string_at + 2 + gsubrs.len();
+        let charset_at = string_at + string_index.len() + gsubrs.len();
+        let charstrings_at = charset_at + charset.len();
         let private_at = charstrings_at + charstrings.len();
 
         let mut top = Vec::new();
@@ -2051,6 +2836,10 @@ mod tests {
         top.extend(fixed(private.len()));
         top.extend(fixed(private_at));
         top.push(18); // Private
+        if spec.charset.is_some() {
+            top.extend(fixed(charset_at));
+            top.push(15); // charset
+        }
         assert_eq!(
             top.len(),
             top_len,
@@ -2060,8 +2849,9 @@ mod tests {
         let mut out = vec![1u8, 0, 4, 4]; // major, minor, hdrSize, offSize
         out.extend_from_slice(&index(&[])); // Name INDEX
         out.extend_from_slice(&index(&[top]));
-        out.extend_from_slice(&index(&[])); // String INDEX
+        out.extend_from_slice(&string_index);
         out.extend_from_slice(&gsubrs);
+        out.extend_from_slice(&charset);
         out.extend_from_slice(&charstrings);
         out.extend_from_slice(&private);
         out.extend_from_slice(&lsubrs);
@@ -2113,7 +2903,9 @@ mod tests {
         let top_index = index(&[vec![0u8; TOP_LEN]]);
         let charstrings_at = 6 + top_index.len() + 2 + gsubrs.len();
 
-        // Format 0 is one identifier per glyph in order, which is the identity mapping.
+        // Format 0 is the format byte and then one identifier per glyph after `.notdef`, in
+        // order and with no count — which is the identity mapping, since the identifier for
+        // glyph *n* is *n*.
         let mut charset = Vec::new();
         match &spec.charset {
             None => {
@@ -3036,6 +3828,497 @@ mod tests {
         assert_eq!(cff.widths(1), (700.0, 800.0));
     }
 
+    /// The SID of a name in the Standard Strings, so a charset test can name a glyph
+    /// without carrying a SID table of its own.
+    fn sid(name: &str) -> u16 {
+        STANDARD_STRINGS
+            .iter()
+            .position(|n| *n == name)
+            .map_or_else(
+                || panic!("{name} is not one of the 391"),
+                |i| u16::try_from(i).unwrap(),
+            )
+    }
+
+    /// The Standard Strings are the specification's own, and a transcription of a 391-entry
+    /// table is a place where one wrong entry maps a character to the wrong glyph with
+    /// nothing else in the codebase to notice.
+    ///
+    /// The table was transcribed and then checked against two independent sources that agree
+    /// on all 391 entries: Ghostscript's `CFFStandardStrings` pseudo-encoding, whose own
+    /// source annotates every name with the SID it holds, and the Adobe Glyph List
+    /// toolchain's `cffStandardStrings`. What is asserted here is what those two comparisons
+    /// are *for* — catching a table that got retyped, duplicated or shifted by a later edit.
+    #[test]
+    fn the_standard_strings_are_the_specifications_own() {
+        assert_eq!(
+            STANDARD_STRINGS.len(),
+            391,
+            "ISO 10581 §5.2 Table D.5 is 391 entries"
+        );
+        assert_eq!(
+            STANDARD_STRINGS[0], ".notdef",
+            "SID 0 is the glyph never drawn"
+        );
+        assert_eq!(
+            STANDARD_STRINGS[390], "Semibold",
+            "the last of them, so a SID of 391 is the font's own and not a Standard String"
+        );
+        assert_eq!(STANDARD_STRINGS[1], "space", "SID 1");
+        assert_eq!(
+            STANDARD_STRINGS[3], "quotedbl",
+            "SID 3, between exclam and numbersign"
+        );
+        assert_eq!(
+            STANDARD_STRINGS[34], "A",
+            "SID 34, which every encoding above names"
+        );
+        assert_eq!(STANDARD_STRINGS[37], "D", "SID 37, four after A");
+        assert_eq!(
+            STANDARD_STRINGS[68], "c",
+            "SID 68, which is 34 lower-case letters on from A"
+        );
+
+        let mut sorted = STANDARD_STRINGS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            STANDARD_STRINGS.len(),
+            "every name appears once: a duplicate would make one SID resolve to two glyphs"
+        );
+
+        // A table that is merely unsorted would still be sorted by accident above, so these
+        // are absolute SIDs in the specification's own order — which is not alphabetical, and
+        // so cannot pass by being sorted.
+        for (name, at) in [
+            ("copyright", 170usize),
+            ("Aacute", 171),
+            ("Acircumflex", 172),
+            ("aacute", 200),
+            ("adieresis", 202),
+            ("exclamsmall", 229),
+            ("Hungarumlautsmall", 230),
+            ("colonmonetary", 300),
+            ("onefitted", 301),
+            ("zerooldstyle", 239),
+            ("Semibold", 390),
+        ] {
+            assert_eq!(
+                STANDARD_STRINGS.get(at).copied(),
+                Some(name),
+                "SID {at} is {name}, which is where the specification puts it"
+            );
+        }
+    }
+
+    /// A charset is a format byte and then entries, with **no count** in any of the three
+    /// formats.
+    ///
+    /// This is not a hypothetical. A first reading of this reader took a `u16` count from the
+    /// first two bytes of every format, so every font in the wild corpus came back as a
+    /// charset with no entries at all and every glyph in every one of them resolved to
+    /// nothing — and the three builders below had been written to match that same mistake, so
+    /// all three passed. The cross-check against another reader over the whole corpus is what
+    /// found it. Hence the shape is asserted here on the exact bytes rather than left implicit
+    /// in three builders that could all be wrong together.
+    ///
+    /// A count is the kind of field this format invites you to invent: all three formats begin
+    /// with a small number that could be one, and a reader that assumes there is one reads a
+    /// real entry as a header. For format 0 the first entry's SID is usually below 256, so it
+    /// reads as a count of zero and the charset comes back empty while the bytes are fine.
+    #[test]
+    fn a_charset_is_a_format_byte_and_then_entries_with_no_count() {
+        // Format 0, two SIDs: `00 0041 0042` — one byte of header, not three.
+        let format_0 = Spec::charset_format_0(&[0x0041, 0x0042]);
+        assert_eq!(format_0, vec![0x00, 0x00, 0x41, 0x00, 0x42]);
+        assert_eq!(
+            format_0.len(),
+            1 + 2 * 2,
+            "format 0 is the format byte and one SID per glyph after .notdef, and the number \
+             of those is the glyph count"
+        );
+
+        // Format 1, one run of `A` and four more: `01 0041 04` — four bytes, not six.
+        let format_1 = Spec::charset_format_1(&[(0x0041, 4)]);
+        assert_eq!(format_1, vec![0x01, 0x00, 0x41, 0x04]);
+        assert_eq!(
+            format_1.len(),
+            1 + 3,
+            "format 1 is the format byte and one run, and no count of runs"
+        );
+
+        // Format 2, one run of `A` and 299 more: `02 0041 012B` — five bytes, not seven.
+        let format_2 = Spec::charset_format_2(&[(0x0041, 299)]);
+        assert_eq!(format_2, vec![0x02, 0x00, 0x41, 0x01, 0x2B]);
+        assert_eq!(
+            format_2.len(),
+            1 + 4,
+            "format 2 is the format byte and a run with a two-byte nLeft, and no count"
+        );
+
+        // And the reader, on bytes built the same way, puts each name where the builder said.
+        // The SIDs here are the ones `A` and `B` really are, which are 34 and 35 and not the
+        // code points the shape assertions above use — a SID and a code point are different
+        // numbers, and using one where the other belongs is a mistake a charset reader can
+        // make quietly.
+        let mut spec = Spec::glyphs(3);
+        spec.charset = Some(Spec::charset_format_0(&[sid("A"), sid("B")]));
+        let bytes = cff1(&spec);
+        let cff = Cff::parse(&bytes, 0).expect("a format 0 charset is readable");
+        assert_eq!(cff.glyph_for_name("A"), Some(1));
+        assert_eq!(cff.glyph_for_name("B"), Some(2));
+        assert_eq!(
+            cff.glyph_for_name("C"),
+            None,
+            "and no name past the glyph count the charset is sized by"
+        );
+    }
+
+    /// Every charset format is read, and each is built from the same glyphs so that reading
+    /// one by accident does not pass another.
+    ///
+    /// Six glyphs: `.notdef`, then five names for the five glyphs after it.
+    ///
+    /// The five are consecutive in the Standard Strings, because a *run* is a first SID and a
+    /// count, so only consecutive SIDs can be one run. Format 0 could name any five; formats 1
+    /// and 2 cannot, and a test built on non-consecutive SIDs would be testing the builder
+    /// rather than the reader.
+    #[test]
+    fn every_charset_format_names_the_same_glyphs() {
+        let names = ["space", "exclam", "quotedbl", "numbersign", "dollar"];
+        let sids: Vec<u16> = names.iter().copied().map(sid).collect();
+        assert!(
+            sids.windows(2).all(|w| w[1] == w[0] + 1),
+            "a run is consecutive SIDs, so these five must be"
+        );
+        let glyphs = names.len() + 1;
+
+        let mut format_0 = Spec::glyphs(glyphs);
+        format_0.charset = Some(Spec::charset_format_0(&sids));
+
+        let mut format_1 = Spec::glyphs(glyphs);
+        format_1.charset = Some(Spec::charset_format_1(&[(sids[0], 4)]));
+
+        let mut format_2 = Spec::glyphs(glyphs);
+        format_2.charset = Some(Spec::charset_format_2(&[(sids[0], 4)]));
+
+        for (format, spec) in [("0", &format_0), ("1", &format_1), ("2", &format_2)] {
+            let bytes = cff1(spec);
+            let cff = Cff::parse(&bytes, 0).unwrap_or_else(|e| panic!("format {format}: {e}"));
+            assert_eq!(
+                cff.num_glyphs(),
+                glyphs,
+                "format {format} still has every glyph"
+            );
+            for (i, name) in names.iter().enumerate() {
+                // Glyph *i* is the *i*-th after `.notdef`.
+                let glyph = u32::try_from(i + 1).unwrap();
+                assert_eq!(
+                    cff.glyph_for_name(name),
+                    Some(glyph),
+                    "format {format} names {name} at glyph {glyph}"
+                );
+            }
+            assert_eq!(
+                cff.glyph_for_name("A"),
+                None,
+                "format {format}: A is not one of the five the charset lists"
+            );
+        }
+    }
+
+    /// Two runs, so that the second run's first glyph is not the first run's first SID plus
+    /// the length of the first. A reader that carries the last SID forward rather than the
+    /// glyph index gets this wrong, and gets it wrong silently.
+    #[test]
+    fn two_runs_name_their_own_glyphs() {
+        // `.notdef`, then `A` and `B`, then `zero` and `one` — so five glyphs and two runs.
+        let mut spec = Spec::glyphs(5);
+        spec.charset = Some(Spec::charset_format_1(&[(sid("A"), 1), (sid("zero"), 1)]));
+
+        let bytes = cff1(&spec);
+        let cff = Cff::parse(&bytes, 0).expect("format 1 is readable");
+        assert_eq!(cff.glyph_for_name("A"), Some(1));
+        assert_eq!(cff.glyph_for_name("B"), Some(2));
+        assert_eq!(
+            cff.glyph_for_name("zero"),
+            Some(3),
+            "the second run starts at glyph 3, wherever the first run ended"
+        );
+        assert_eq!(cff.glyph_for_name("one"), Some(4));
+    }
+
+    /// A run's `nLeft` is a `u8` in format 1 and a `u16` in format 2, and the two are read
+    /// at different widths. A font with a long run is a font that shows it: read as format 1,
+    /// a `nLeft` of 299 becomes 43 and every glyph after the run shifts.
+    #[test]
+    fn a_run_longer_than_a_format_1_run_needs_format_2() {
+        let long = 300u16;
+        let mut spec = Spec::glyphs(long as usize + 1);
+        spec.charset = Some(Spec::charset_format_2(&[(sid("A"), long - 1)]));
+
+        let bytes = cff1(&spec);
+        let cff = Cff::parse(&bytes, 0).expect("format 2 is readable");
+        assert_eq!(cff.num_glyphs(), 301);
+        assert_eq!(
+            cff.glyph_for_name("A"),
+            Some(1),
+            "the run's first glyph, which is glyph 1 because .notdef is not listed"
+        );
+
+        // The last glyph of the run is 299 SIDs along from `A`. That has to stay inside the
+        // Standard Strings for this to be checkable by name at all.
+        let far = STANDARD_STRINGS.iter().position(|n| *n == "A").unwrap() + usize::from(long - 1);
+        assert!(
+            far < STANDARD_STRINGS.len(),
+            "the run must stay inside the Standard Strings for this test to name its far end"
+        );
+        let far_name = STANDARD_STRINGS[far];
+        assert_eq!(
+            cff.glyph_for_name(far_name),
+            Some(u32::from(long)),
+            "the last glyph of a 300-glyph run, {far_name}"
+        );
+
+        // The same font as format 1 truncates the run to its low byte, so the far end of the
+        // run names nothing. That is the difference between the two widths, stated rather than
+        // asserted abstractly.
+        let mut narrow = Spec::glyphs(long as usize + 1);
+        narrow.charset = Some(Spec::charset_format_1(&[(sid("A"), 255)]));
+        let narrow_bytes = cff1(&narrow);
+        let narrow_cff = Cff::parse(&narrow_bytes, 0).expect("format 1 is readable");
+        assert_eq!(
+            narrow_cff.glyph_for_name(far_name),
+            None,
+            "a u8 nLeft cannot reach the far end of a 300-glyph run"
+        );
+    }
+
+    /// `uniXXXX` and `A` are one character, and a font's charset and a PDF's `/Encoding` do
+    /// not always spell it the same way. Both directions are real files, so both are tried.
+    #[test]
+    fn a_unicode_name_and_an_agl_name_resolve_to_the_same_glyph() {
+        // A font whose charset spells its two glyphs `uni0041` and `uni0042` in the String
+        // INDEX, which is how a real file writes them: `uni0041` is not a Standard String, so
+        // it is a font-defined one at SID 391 and above.
+        let mut spec = Spec::glyphs(3);
+        spec.strings = vec!["uni0041".into(), "uni0042".into()];
+        spec.charset = Some(Spec::charset_format_0(&[391, 392]));
+
+        let bytes = cff1(&spec);
+        let cff = Cff::parse(&bytes, 0).expect("a format 0 charset is readable");
+
+        let a = cff.glyph_for_name("uni0041").expect("the name as written");
+        assert_eq!(a, 1);
+        assert_eq!(
+            cff.glyph_for_name("A"),
+            Some(a),
+            "the AGL spelling of the same character is the same glyph"
+        );
+        assert_eq!(
+            cff.glyph_for_name("u0041"),
+            Some(a),
+            "and so is the short spelling"
+        );
+        assert_eq!(cff.glyph_for_name("B"), Some(2));
+        assert_eq!(
+            cff.glyph_for_name("uni0043"),
+            None,
+            "a character this font does not have"
+        );
+
+        // The other way round: a charset that spells it `A`, asked with `uni0041`. This is
+        // the case a `/Differences` array produces.
+        let mut plain = Spec::glyphs(2);
+        plain.charset = Some(Spec::charset_format_0(&[sid("A")]));
+        let plain_bytes = cff1(&plain);
+        let plain_cff = Cff::parse(&plain_bytes, 0).expect("a format 0 charset is readable");
+        assert_eq!(plain_cff.glyph_for_name("A"), Some(1));
+        assert_eq!(
+            plain_cff.glyph_for_name("uni0041"),
+            Some(1),
+            "an encoding that spelled the character as uniXXXX finds the same glyph"
+        );
+        assert_eq!(plain_cff.glyph_for_name("u0041"), Some(1));
+
+        // And an accented name, so the direction is not only ever an ASCII letter: the font
+        // says `adieresis` and the character is U+00E4, whichever way round the two tables
+        // were written.
+        let mut accented = Spec::glyphs(2);
+        accented.charset = Some(Spec::charset_format_0(&[sid("adieresis")]));
+        let accented_bytes = cff1(&accented);
+        let accented_cff = Cff::parse(&accented_bytes, 0).expect("a format 0 charset is readable");
+        assert_eq!(accented_cff.glyph_for_name("adieresis"), Some(1));
+        assert_eq!(
+            accented_cff.glyph_for_name("uni00E4"),
+            Some(1),
+            "the Unicode spelling of the same character"
+        );
+        assert_eq!(
+            accented_cff.glyph_for_name("uni00E8"),
+            None,
+            "and a different one does not"
+        );
+    }
+
+    /// A name the charset does not have is a reason, not a guess.
+    ///
+    /// The temptation is to fall back to "some nearby glyph", and on a subsetted font there
+    /// is always one. Drawing glyph 3 because glyph 47 was not there would put a character
+    /// nobody asked for on the page in place of one they did.
+    #[test]
+    fn a_name_the_charset_does_not_have_resolves_to_nothing() {
+        let mut spec = Spec::glyphs(3);
+        spec.charset = Some(Spec::charset_format_0(&[sid("A"), sid("B")]));
+
+        let bytes = cff1(&spec);
+        let cff = Cff::parse(&bytes, 0).expect("a format 0 charset is readable");
+        assert_eq!(cff.glyph_for_name("A"), Some(1));
+        assert_eq!(
+            cff.glyph_for_name("adieresis"),
+            None,
+            "a glyph the font does not have"
+        );
+        assert_eq!(cff.glyph_for_name("definitelynotaglyphname"), None);
+        assert_eq!(cff.glyph_for_name(""), None, "an empty name is not a glyph");
+    }
+
+    /// A font that writes no charset says glyph *n* has SID *n*, which is the identity
+    /// mapping in both directions — and it is the common case, so it must not cost a table.
+    #[test]
+    fn a_font_with_no_charset_is_the_identity_mapping() {
+        let spec = Spec::glyphs(40);
+        assert!(spec.charset.is_none(), "no charset written out");
+
+        let bytes = cff1(&spec);
+        let cff = Cff::parse(&bytes, 0).expect("a font with no charset still parses");
+        assert_eq!(cff.num_glyphs(), 40);
+        assert_eq!(
+            cff.glyph_for_name("A"),
+            Some(34),
+            "glyph n has SID n, so the name at SID 34 is at glyph 34"
+        );
+        assert_eq!(cff.glyph_for_name("space"), Some(1));
+        assert!(
+            cff.glyph_for_name("Semibold").is_none(),
+            "a name whose SID is past the last glyph names nothing"
+        );
+        assert!(
+            cff.resolves_names(),
+            "no charset is not a refusal: it is the identity mapping"
+        );
+    }
+
+    /// A subset renames its glyphs, and those names are SIDs at 391 and above, which index
+    /// the font's own String INDEX rather than the Standard Strings. A reader that stops at
+    /// 391 resolves the Latin letters and refuses most of a subsetted font.
+    #[test]
+    fn a_subset_glyph_name_comes_from_the_string_index() {
+        // Four glyphs: `.notdef`, one named by a Standard String, and two the font names
+        // itself. A charset lists one SID per glyph *after* `.notdef`, so three SIDs for four
+        // glyphs.
+        let mut spec = Spec::glyphs(4);
+        spec.strings = vec!["g17".into(), "a84".into()];
+        spec.charset = Some(Spec::charset_format_0(&[sid("A"), 391, 392]));
+
+        let bytes = cff1(&spec);
+        let cff = Cff::parse(&bytes, 0).expect("a String INDEX is readable");
+        assert_eq!(cff.num_glyphs(), 4);
+        assert_eq!(cff.glyph_for_name("A"), Some(1), "the Standard String");
+        assert_eq!(
+            cff.glyph_for_name("g17"),
+            Some(2),
+            "the font's own first string, which is SID 391"
+        );
+        assert_eq!(
+            cff.glyph_for_name("a84"),
+            Some(3),
+            "and its second, which is SID 392"
+        );
+        assert_eq!(
+            cff.glyph_for_name("g99"),
+            None,
+            "a string the font does not have"
+        );
+        // A SID past the end of the String INDEX is not the identity and not a Standard
+        // String; it is a name nobody can produce.
+        assert_eq!(cff.glyph_for_name("index"), None);
+    }
+
+    /// A font naming one of the three predefined charsets says every glyph has a standard
+    /// name, which is not the identity and not a table in the file: there is nothing at those
+    /// offsets to read. A code resolves through none of them.
+    #[test]
+    fn a_predefined_charset_resolves_nothing() {
+        // A valid but empty format 0 charset, to show the reader is not refusing the font for
+        // any other reason.
+        let mut spec = Spec::glyphs(3);
+        spec.charset = Some(Spec::charset_format_0(&[]));
+        let empty = cff1(&spec);
+        let cff = Cff::parse(&empty, 0).expect("an empty format 0 charset is a charset");
+        assert!(cff.glyph_for_name("A").is_none());
+        assert!(
+            cff.resolves_names(),
+            "an empty charset is still a readable charset"
+        );
+
+        // Offsets 0, 1 and 2 are the predefined charsets. A file may name one.
+        for predefined in 0..=2u32 {
+            let bytes = cff1(&spec);
+            let patched = patch_charset_offset(&bytes, predefined);
+            let cff = Cff::parse(&patched, 0).expect("a font naming a predefined charset parses");
+            assert_eq!(cff.num_glyphs(), 3, "its glyphs are unaffected");
+            assert!(
+                cff.glyph_for_name("A").is_none(),
+                "predefined charset {predefined} names no glyph this can resolve"
+            );
+            assert!(
+                !cff.resolves_names(),
+                "predefined charset {predefined} is a charset that resolves nothing"
+            );
+        }
+    }
+
+    /// Point the Top DICT's `/charset` operand at a different offset.
+    ///
+    /// The builder writes every operand as a three-byte `28 hi lo` run followed by its key
+    /// byte, and the charset is the last entry, so the run before the key byte 15 is the
+    /// charset's and rewriting it in place leaves every later offset correct. The predefined
+    /// charsets are offsets 0, 1 and 2, which a three-byte operand can say directly.
+    fn patch_charset_offset(bytes: &[u8], at: u32) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        let Some(at_index) = out.windows(4).position(|w| w[0] == 28 && w[3] == 15) else {
+            panic!("no /charset operand in the Top DICT");
+        };
+        out[at_index + 1] = at.to_be_bytes()[1];
+        out[at_index + 2] = at.to_be_bytes()[2];
+        out
+    }
+
+    /// A CID font's charset is an identifier map, so a name means nothing to one and must
+    /// be refused rather than applied.
+    #[test]
+    fn a_cid_font_resolves_no_names() {
+        let glyph = Charstring::new().op(14);
+        let spec = CidSpec {
+            glyphs: vec![glyph.clone().build(), glyph.build()],
+            fds: vec![(0, 500, Vec::new())],
+            charset: None,
+        };
+        let bytes = cff1_cid(&spec);
+        let cff = Cff::parse(&bytes, 0).expect("an identity CID charset is readable");
+        assert!(cff.is_cid_keyed());
+        assert_eq!(cff.glyph_for_name("A"), None, "a name is not an identifier");
+        assert!(
+            !cff.resolves_names(),
+            "a CID font is addressed by identifier, not by name"
+        );
+        // The identity still resolves the code as the glyph number, which is what
+        // `Cff::parse` insisted on when it accepted the font.
+        assert_eq!(cff.num_glyphs(), 2);
+    }
+
     /// A CID font whose charset is not the identity maps identifiers to glyph numbers
     /// through something this does not read, and is refused rather than drawn wrong.
     #[test]
@@ -3052,6 +4335,7 @@ mod tests {
         assert_eq!(cff.num_glyphs(), 2);
 
         spec.charset = Some({
+            // Format 0, one entry, and that entry is CID 7 rather than the glyph number.
             let mut c = vec![0u8];
             c.extend_from_slice(&9u16.to_be_bytes());
             c
