@@ -45,6 +45,7 @@ pub mod compare;
 pub mod coverage;
 pub mod image;
 pub mod page;
+pub mod shading;
 
 pub use compare::{Comparison, SsimOptions, compare, ssim};
 pub use coverage::{Coverage, Edge, FillRule, Rect, bounds, footprint, rasterise};

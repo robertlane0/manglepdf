@@ -8,8 +8,8 @@ Where the work actually is. Updated whenever a milestone moves.
 |---|---|---|
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
-| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths into pixels with analytic coverage. Text, images, shadings and patterns still draw nothing |
-| **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | not started |
+| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths into pixels with analytic coverage. Images and shadings draw; text and patterns still draw nothing |
+| **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint. Mesh shadings, tiling patterns and transparency do not |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
 
@@ -70,6 +70,16 @@ Where the work actually is. Updated whenever a milestone moves.
   DeviceRGB, DeviceCMYK, CalGray, CalRGB, ICCBased (by its `/N`) and Indexed. Lab and
   Separation are refused rather than guessed, because neither can be converted without data
   this does not have.
+
+  **Shadings** paint. All four PDF function kinds are implemented: sampled, exponential,
+  stitching, and the PostScript calculator with its bounded stack. Axial and radial
+  gradients are sampled per pixel by mapping each pixel *back* through the inverse
+  transformation, so a rotated gradient needs no special case, and coverage is derived by
+  differencing the parameter either side of a pixel rather than from a closed form — one
+  code path for both gradient types. A page names a *pattern* and the pattern names a
+  shading, so both shapes are accepted, and the pattern's own `/Matrix` composes inside
+  the mark's transformation rather than replacing it. Types 1, 4, 5, 6 and 7 are reported
+  as notes rather than painted wrongly.
 - **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`.
   This is how "what does ManglePDF think of this file?" is asked without a window.
 - **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one
@@ -81,7 +91,7 @@ Where the work actually is. Updated whenever a milestone moves.
 
 ## Tests
 
-463, none ignored, no warnings. Six kinds matter:
+504, none ignored, no warnings. Six kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -116,9 +126,10 @@ Where the work actually is. Updated whenever a milestone moves.
    placement per byte, but no glyph is painted: deciding which bytes of a string are
    glyphs and how wide each is needs the font and the encoding, and the content layer
    deliberately refuses to guess. Text is the next substantial piece.
-2. **Shadings and patterns draw nothing.** Each is reported as a note against the mark
+2. **Tiling patterns and mesh shadings draw nothing.** A shading names one of types 1, 4, 5,
+   6 or 7, or a pattern needs a tiling loop, and each is reported as a note against the mark
    rather than skipped silently, so a page that used one is visibly incomplete instead of
-   quietly wrong. Images now draw; shadings (F15) and patterns do not.
+   quietly wrong. Images and axial/radial shadings now draw.
 3. **JBIG2 and JPEG 2000 have no decoder.** An image needing one is reported by name rather
    than drawn as a blank rectangle (F17, F18). CCITT does decode, through the filter crate.
 4. **A clip is honoured as its bounding box.** A clip path can be any shape; what the

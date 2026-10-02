@@ -883,3 +883,100 @@ fn an_image_is_drawn_through_the_resources() {
         "and the right half is untouched paper"
     );
 }
+
+/// A 100 by 100 point page with an axial black-to-white shading painted into a rectangle
+/// filling its top half.
+///
+/// The pattern's own matrix scales the shading's unit axis across the rectangle, which is
+/// how a page says "this gradient goes from here to there" without a coordinate system of
+/// its own.
+fn shading_page() -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 6];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] \
+          /Resources << /Pattern << /P0 5 0 R >> >> >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    // Clip to the top half and paint the shading there.
+    let content = b"q 0 50 100 50 re W n /P0 sh Q";
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content);
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    // A pattern stream whose shading runs left to right across the unit square, and whose
+    // matrix stretches that square over the clipped rectangle.
+    at[5] = out.len();
+    out.extend_from_slice(
+        b"5 0 obj\n<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 \
+          /ColorSpace /DeviceGray /Coords [0 0 1 0] /Function << /FunctionType 2 \
+          /Domain [0 1] /C0 [0] /C1 [1] /N 1 /Range [0 1] >> /Extend [false false] >> \
+          /Matrix [100 0 0 50 0 50] >>\nendobj\n",
+    );
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 5\n");
+    for offset in at.iter().take(6).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// An axial shading, painted through a pattern, lands where the pattern's matrix says and
+/// is as dark at one end as it is light at the other.
+#[test]
+fn a_shading_is_painted_through_its_pattern() {
+    let doc = open(shading_page());
+    let all = pages(&doc);
+    let page = all.first().expect("a page");
+    let resources = page
+        .inherited
+        .resources
+        .as_ref()
+        .and_then(|o| doc.resolve_object(o))
+        .and_then(|o| o.as_dict().cloned())
+        .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+        .unwrap_or_default();
+    assert_eq!(resources.patterns.len(), 1, "the page defines one pattern");
+
+    let render = render_page(
+        &doc,
+        page,
+        &resources,
+        RenderOptions {
+            scale: 1.0,
+            ..RenderOptions::default()
+        },
+    );
+    assert!(
+        render.notes.is_empty(),
+        "the shading should paint without complaint: {:?}",
+        render.notes
+    );
+    // The gradient runs left to right across the top half: black at the left edge, white at
+    // the right, and increasing in between. The values are the closed form at each pixel's
+    // centre rather than a snapshot, so the check means the same thing at any resolution.
+    let level = |x: usize| -> u8 { ((x as f64 + 0.5) / 100.0 * 255.0).round() as u8 };
+    for x in [0usize, 10, 25, 50, 75, 99] {
+        let got = render.image.get(x, 25).map(|p| p[0]);
+        assert_eq!(
+            got,
+            Some(level(x)),
+            "at x = {x} the gradient's parameter is {} and the colour follows it",
+            (x as f64 + 0.5) / 100.0
+        );
+    }
+    // Outside the clipped rectangle the gradient does not reach, and the paper is intact.
+    assert!(
+        region_is_fraction(&render.image, 0.25, 0.55, 0.75, 0.95, [255, 255, 255]),
+        "below the rectangle is untouched paper"
+    );
+}

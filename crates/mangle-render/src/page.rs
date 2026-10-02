@@ -22,6 +22,7 @@ use mangle_doc::Page;
 use mangle_syntax::{Document, Object, Rect as PageRect};
 
 use crate::image::{self, Raster};
+use crate::shading::{self, Shading};
 use crate::{
     Device, FillRule, Image, LineCap, LineJoin, Polygon, Rect, StrokeStyle, Viewport,
     transform_path,
@@ -294,6 +295,7 @@ pub fn render_page(
     // second live borrow of them would not compile. The failure reason comes back as the
     // closure's `Err` and is appended by `draw_mark` itself.
     let mut lookup = |name: &str| image_for(name, resources, doc);
+    let mut shade_lookup = |name: &str| shading_for(name, resources, doc);
     for record in &executed.records {
         let to_device = placement.matrix.concat(record.ctm);
         draw_mark(
@@ -303,11 +305,74 @@ pub fn render_page(
             record,
             &mut render.notes,
             &mut lookup,
+            &mut shade_lookup,
         );
         render.marks += 1;
     }
     render.image = device.into_image();
     render
+}
+
+/// Find and read the shading a `sh` names.
+///
+/// A page names a *pattern*, and the pattern names a shading inside it. A pattern whose
+/// `/Shading` is a shading dictionary in its own right is unusual but legal, so both shapes
+/// are accepted here rather than being a second code path for a caller to trip over.
+fn shading_for(
+    name: &str,
+    resources: &Resources,
+    doc: &Document,
+) -> Result<(Shading, Matrix), String> {
+    let Some(object) = resources.patterns.get(name).cloned() else {
+        return Err(format!(
+            "the page names a shading `/{name}` that its resources do not define"
+        ));
+    };
+    let resolved = doc.resolve_object(&object).unwrap_or(object);
+    // The pattern's own transformation maps its space into the page's default space, which
+    // the mark's transformation then carries to the pixels. Both are needed and neither
+    // substitutes for the other.
+    let (shading_object, pattern_matrix) = match &resolved {
+        Object::Stream(s) => (
+            match s.dict.get("Shading") {
+                Some(inner) => doc.resolve_object(inner).unwrap_or_else(|| inner.clone()),
+                // No `/Shading`: the pattern stream is itself one, which is how a
+                // single-use gradient is usually written.
+                None => resolved.clone(),
+            },
+            read_matrix(s.dict.get("Matrix")),
+        ),
+        Object::Dict(d) => match d.get("Shading") {
+            Some(inner) => (
+                doc.resolve_object(inner).unwrap_or_else(|| inner.clone()),
+                read_matrix(d.get("Matrix")),
+            ),
+            None => (resolved.clone(), Matrix::IDENTITY),
+        },
+        _ => {
+            return Err(format!(
+                "`/{name}` is named by `sh` but is neither a dictionary nor a stream"
+            ));
+        }
+    };
+    let resolver = |o: &Object| doc.resolve_object(o);
+    let shading = Shading::parse(&shading_object, &resolver)
+        .ok_or_else(|| format!("the shading `/{name}` is of a kind this does not paint yet"))?;
+    Ok((shading, pattern_matrix))
+}
+
+/// A `/Matrix` array, or the identity when the dictionary has none.
+fn read_matrix(object: Option<&Object>) -> Matrix {
+    let Some(values) = object.and_then(Object::as_array) else {
+        return Matrix::IDENTITY;
+    };
+    // A six-element array is `[a b c d e f]`; anything else leaves the transformation
+    // alone rather than producing a degenerate one that would collapse the page.
+    if values.len() != 6 {
+        return Matrix::IDENTITY;
+    }
+    let at = |i: usize| values.get(i).and_then(Object::as_f64).unwrap_or(0.0);
+    Matrix::new(at(0), at(1), at(2), at(3), at(4), at(5))
 }
 
 /// Find and decode the image a `Do` names.
@@ -336,6 +401,12 @@ fn image_for(name: &str, resources: &Resources, doc: &Document) -> Result<Raster
     })
 }
 
+/// A shading lookup: a name to the shading it names, and the pattern's own transformation.
+///
+/// Passed into `draw_mark` rather than resolved there so that the borrowing stays with
+/// whoever owns the document and the page's resources.
+type ShadingLookup<'a> = &'a mut dyn FnMut(&str) -> Result<(Shading, Matrix), String>;
+
 /// Draw one mark.
 #[allow(clippy::too_many_arguments)]
 fn draw_mark(
@@ -345,6 +416,7 @@ fn draw_mark(
     record: &mangle_content::Record,
     notes: &mut Vec<String>,
     images: &mut dyn FnMut(&str) -> Result<Raster, String>,
+    shadings: ShadingLookup<'_>,
 ) {
     match mark {
         Mark::Path {
@@ -434,9 +506,49 @@ fn draw_mark(
             });
         }
         Mark::ClipChanged(None) => device.reset_clip(),
-        Mark::Shading { .. } => {
-            notes.push("a shading was found but no shading renderer exists yet".into());
-        }
+        // A `sh` with no operand at all names nothing, and the interpreter leaves the name
+        // empty rather than guessing one.
+        Mark::Shading { name, .. } => match name.as_str() {
+            "" => notes.push("a shading with no name was found and not painted".into()),
+            name => match shadings(name) {
+                Ok((shading, pattern_matrix)) => {
+                    // The mark's transformation carries the pattern's space to the pixels
+                    // and the pattern's own matrix sits inside it, so the two compose in
+                    // that order and the gradient is sampled in its own space throughout.
+                    let to_shading = to_device.concat(pattern_matrix);
+                    // A shading paints the *current clip*, which for `sh` is whatever path
+                    // the page set with `W n`. The recorded bounds are that path's box, and
+                    // painting outside it would put a gradient where the page drew nothing.
+                    if let Some(bounds) = record.clip {
+                        let corners = [
+                            to_device.apply(bounds.x0, bounds.y0),
+                            to_device.apply(bounds.x1, bounds.y0),
+                            to_device.apply(bounds.x1, bounds.y1),
+                            to_device.apply(bounds.x0, bounds.y1),
+                        ];
+                        let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+                        let max_x = corners
+                            .iter()
+                            .map(|c| c.0)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+                        let max_y = corners
+                            .iter()
+                            .map(|c| c.1)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        device.clip_to(Rect {
+                            x0: min_x,
+                            y0: min_y,
+                            x1: max_x,
+                            y1: max_y,
+                        });
+                    }
+                    shading::paint(device, &shading, &to_shading, record.fill_alpha);
+                    device.reset_clip();
+                }
+                Err(reason) => notes.push(reason),
+            },
+        },
         Mark::Image { name, .. } => match name.as_deref() {
             Some(name) => match images(name) {
                 Ok(raster) => {

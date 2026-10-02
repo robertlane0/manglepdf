@@ -48,9 +48,8 @@ The spine is where the architecture is decided, so it is built first and deeply.
 
 ## Immediate queue
 
-1. **Shadings** (F15): axial and radial are pure maths and `G3.2` wants analytic
-   expectations for their sample points, so they are checkable by formula. Then patterns,
-   which need a tiling loop.
+1. **Shading patterns** (tiling), since a single axial or radial gradient now paints: the
+   tiling loop is what a page asks for next, and mesh shadings can wait.
 2. **Glyph outlines** (F19–F21): TrueType first via `ttf-parser`, then CFF and Type 1.
    Advances for *existing* text come from `/Widths` and need no font program at all, which
    is what the charter asks for.
@@ -59,4 +58,6 @@ The spine is where the architecture is decided, so it is built first and deeply.
    not going to be built.
 5. **The page tree and the marks into the window**: fill the right-hand region, which is
    the Inspector's first half.
-6. Tier-A fixtures for the remaining catalogue entries, then Tier B with `SOURCES.md`.
+6. **Mesh shadings** (types 4–7) and the shading types 1 and 7 that need a pattern colour,
+   or an explicit scope statement.
+7. Tier-A fixtures for the remaining catalogue entries, then Tier B with `SOURCES.md`.

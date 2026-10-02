@@ -186,6 +186,35 @@ mod tests {
         assert!(r.xobjects.contains_key("Im0"));
     }
 
+    /// A `/Pattern` entry lands in `patterns`, where `sh` looks for it.
+    ///
+    /// `sh` names a pattern rather than a shading, so a page that paints a gradient this
+    /// way has named something the resource table would otherwise not keep.
+    #[test]
+    fn a_pattern_table_is_read_by_name() {
+        let mut pattern = Dict::new();
+        pattern.set("PatternType", Object::Int(2));
+        let mut table = Dict::new();
+        table.set("P0", Object::Ref(mangle_syntax::Ref::new(5, 0)));
+        let mut resources = Dict::new();
+        resources.set("Pattern", Object::Dict(table));
+
+        let r = Resources::from_dict(&resources, &|o| match o {
+            Object::Ref(r) if r.num == 5 => Some(Object::Dict(pattern.clone())),
+            other => Some(other.clone()),
+        });
+        assert_eq!(r.counts().patterns, 1, "the page defines one pattern");
+        let found = r.patterns.get("P0").expect("the pattern `/P0`");
+        assert_eq!(
+            found
+                .as_dict()
+                .and_then(|d| d.get("PatternType"))
+                .and_then(Object::as_i64),
+            Some(2),
+            "and its value is the dictionary it stands for, not the reference"
+        );
+    }
+
     #[test]
     fn an_extgstate_table_is_read_even_when_its_values_are_references() {
         let mut inner = Dict::new();
