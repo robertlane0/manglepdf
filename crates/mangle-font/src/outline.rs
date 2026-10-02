@@ -206,6 +206,46 @@ impl Program {
         let in_range = u32::from(face.number_of_glyphs());
         (code < in_range).then_some(code)
     }
+
+    /// The outline a two-byte character code names, in ems, and the font's units per em.
+    ///
+    /// The composite-font counterpart of [`Self::outline_for_code`], and the difference is
+    /// in the lookup rather than the result. A simple font's code has to be found in a
+    /// subtable and a glyph number read out of it; a CID font's code *is* a glyph identifier
+    /// in a font that was built to be addressed that way, so the (3,0) subtable is the first
+    /// place to look and the code used as the glyph number is the specification's own
+    /// fallback — the same answer `/CIDToGIDMap /Identity` gives, which is what a CID font
+    /// with no `CIDToGIDMap` means.
+    #[must_use]
+    pub fn outline_for_cid(&mut self, cid: u32) -> Option<(Outline, u16)> {
+        let glyph = self.glyph_for_cid(cid)?;
+        self.outline(glyph)
+    }
+
+    /// The glyph number one two-byte character code names.
+    ///
+    /// `(3, 0)` — Windows Symbol — is the only subtable consulted, because a CID font's
+    /// codes are the font author's own and only that subtable can interpret them. It is
+    /// tried first and, when the font carries one, it is the only answer that can be right.
+    ///
+    /// When it carries none, the code is the glyph number. That is not a guess: the
+    /// specification's default `/CIDToGIDMap` is the identity map, so a CID font that names
+    /// no map says its CIDs *are* its glyph numbers, and a subsetted CID font routinely has
+    /// no `cmap` at all. A code that is not a glyph the font has is `None`.
+    #[must_use]
+    pub fn glyph_for_cid(&self, cid: u32) -> Option<u32> {
+        let face = Face::parse(&self.data, 0).ok()?;
+        for subtable in face.tables().cmap?.subtables {
+            if subtable.platform_id == PlatformId::Windows
+                && subtable.encoding_id == 0
+                && let Some(glyph) = subtable.glyph_index(cid)
+            {
+                return Some(u32::from(glyph.0));
+            }
+        }
+        let in_range = u32::from(face.number_of_glyphs());
+        (cid < in_range).then_some(cid)
+    }
 }
 
 /// The three subtables a simple TrueType font is looked up through, in the order they are

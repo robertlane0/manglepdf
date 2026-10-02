@@ -486,7 +486,24 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
     let Object::Dict(font) = resolved else {
         return Err(format!("the font `/{name}` is not a dictionary"));
     };
-    let descriptor = font
+    // A composite (Type 0) font holds no font program of its own. Its `/DescendantFonts`
+    // array names the CIDFont, and *that* is the dictionary with the `/FontDescriptor` and
+    // the `/FontFile2` in it — so a page in a composite font reads exactly the same
+    // descriptor it would for a simple font, one indirection further along.
+    let descendant = if font.get("Subtype").and_then(Object::as_name) == Some(b"Type0") {
+        doc.resolve_object(font.get("DescendantFonts").unwrap_or(&Object::Null))
+            .and_then(|o| o.as_array().map(<[Object]>::to_vec))
+            .and_then(|a| a.first().cloned())
+            .and_then(|o| doc.resolve_object(&o))
+            .and_then(|o| match o {
+                Object::Dict(d) => Some(d),
+                _ => None,
+            })
+    } else {
+        None
+    };
+    let owner = descendant.as_ref().unwrap_or(&font);
+    let descriptor = owner
         .get("FontDescriptor")
         .map(|o| doc.resolve_object(o).unwrap_or_else(|| o.clone()))
         .unwrap_or(Object::Null);
@@ -702,7 +719,8 @@ fn draw_mark(
         },
         Mark::Glyphs {
             font,
-            text,
+            codes,
+            two_byte,
             fill,
             placements,
             ..
@@ -732,18 +750,25 @@ fn draw_mark(
                 return;
             };
             let ink = rgba.to_rgba8(record.fill_alpha);
-            // `text` is the character codes and `placements` is one matrix per code, so
+            // `codes` is the character codes and `placements` is one matrix per code, so
             // the two zip; a run whose code has no placement is not drawn, which is what
-            // a truncated record means rather than a glyph at the origin.
-            for (code, glyph_matrix) in text.iter().zip(placements.iter()) {
+            // a truncated record means rather than a glyph at the origin. The codes are
+            // read from the mark rather than from the string's bytes because a composite
+            // font's codes are two bytes each, and the mark is what says so.
+            for (code, glyph_matrix) in codes.iter().zip(placements.iter()) {
+                // A composite font's code is looked up as a CID — through the (3,0)
+                // subtable, or as a glyph number where the font has no such subtable — and
+                // a simple font's through the subtables a simple font uses. Which one
+                // applies is the mark's claim, not a guess made here.
+                let found = if *two_byte {
+                    program.program.outline_for_cid(*code)
+                } else {
+                    program.program.outline_for_code(*code)
+                };
                 // No outline is a space, or a code the font does not have. Both are the
                 // common case and neither is a failure: a page of prose is mostly spaces
                 // and a report listing one note per space is a report nobody reads.
-                let Some((outline, _)) = program
-                    .program
-                    .outline_for_code(u32::from(*code))
-                    .filter(|(o, _)| !o.is_empty())
-                else {
+                let Some((outline, _)) = found.filter(|(o, _)| !o.is_empty()) else {
                     continue;
                 };
                 // The outline is in ems and the placement matrix carries the font size as

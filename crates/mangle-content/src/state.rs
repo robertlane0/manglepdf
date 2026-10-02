@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use mangle_font::metrics::Declared;
+use mangle_font::metrics::DeclaredWidths;
 
 use mangle_syntax::object::{Dict, Object};
 
@@ -334,7 +334,14 @@ pub struct TextState {
     /// text and a page has thousands of glyphs: re-reading the dictionary for each one
     /// would be quadratic in the length of the page. `None` is a real answer — the font
     /// declares no widths — and the caller falls back rather than guessing.
-    pub widths: Option<Arc<Declared>>,
+    pub widths: Option<Arc<DeclaredWidths>>,
+    /// Whether this font's character codes are two bytes wide, as a composite font's are.
+    ///
+    /// This is not a property of the widths — a composite font may declare none — and it
+    /// cannot be inferred from the code either, because both widths and codes are keyed by
+    /// the same integer and only the font dictionary says how wide that integer is. It is
+    /// `false` for every simple font, which is the case that must not pay for the other.
+    pub composite: bool,
     pub size: f64,
     /// `Tc`: added to every glyph's displacement.
     pub char_spacing: f64,
@@ -355,6 +362,7 @@ impl TextState {
         Self {
             font: None,
             widths: None,
+            composite: false,
             size: 0.0,
             char_spacing: 0.0,
             word_spacing: 0.0,

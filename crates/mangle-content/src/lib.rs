@@ -41,7 +41,7 @@ pub mod ops;
 pub mod state;
 pub mod tokens;
 
-use mangle_font::metrics::Declared;
+use mangle_font::metrics::{CidWidths, Declared, DeclaredWidths};
 
 pub use interp::{FillRule, Mark, PageContent, Record, bbox_of, bounds_of, run, run_with};
 pub use matrix::Matrix;
@@ -66,7 +66,13 @@ pub struct Resources {
     /// has no resolver of its own, so they are followed here by the same resolver that
     /// built the table. A font that declares no widths has no entry here, which is a
     /// finding about the file rather than a width of zero.
-    pub font_widths: std::collections::BTreeMap<String, Declared>,
+    pub font_widths: std::collections::BTreeMap<String, DeclaredWidths>,
+    /// The fonts whose character codes are two bytes wide.
+    ///
+    /// This is a fact about the *encoding*, not about the widths, so it is a separate table:
+    /// a composite font that declares no `/W` at all still has two-byte codes, and a page
+    /// that showed text in it would otherwise have its string split into single bytes.
+    composite_fonts: std::collections::BTreeSet<String>,
     pub xobjects: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
     pub ext_gstates: ExtGStates,
     pub shadings: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
@@ -79,6 +85,7 @@ impl PartialEq for Resources {
     fn eq(&self, other: &Self) -> bool {
         self.fonts == other.fonts
             && self.font_widths == other.font_widths
+            && self.composite_fonts == other.composite_fonts
             && self.xobjects == other.xobjects
             && self.ext_gstates == other.ext_gstates
             && self.shadings == other.shadings
@@ -119,15 +126,30 @@ impl Resources {
         // The widths each font declares, read through the same resolver. A page usually
         // names two or three fonts, and reading them here is once per page rather than
         // once per `Tf`.
-        let font_widths = fonts
-            .iter()
-            .filter_map(|(name, value)| {
-                let dict = value.as_dict()?;
-                Some((name.clone(), Declared::from_font_dict(dict, resolve)?))
-            })
-            .collect();
+        //
+        // A composite font declares no `/Widths` of its own — its widths are in the
+        // descendant font's `/W` — so it is recognised and followed down, and the name is
+        // recorded as a two-byte font whether or not the descendant declared anything.
+        let mut composite_fonts = std::collections::BTreeSet::new();
+        let mut font_widths = std::collections::BTreeMap::new();
+        for (name, value) in &fonts {
+            let Some(dict) = value.as_dict() else {
+                continue;
+            };
+            if is_composite(dict) {
+                composite_fonts.insert(name.clone());
+                if let Some(widths) = descendant_widths(dict, resolve) {
+                    font_widths.insert(name.clone(), DeclaredWidths::Composite(widths));
+                }
+                continue;
+            }
+            if let Some(declared) = Declared::from_font_dict(dict, resolve) {
+                font_widths.insert(name.clone(), DeclaredWidths::Simple(declared));
+            }
+        }
         Self {
             font_widths,
+            composite_fonts,
             fonts,
             xobjects: named(&table("XObject")),
             shadings: named(&table("Shading")),
@@ -165,8 +187,21 @@ impl Resources {
     /// This is what `Tf` reads: a font with no `/Widths` has no answer, and the caller
     /// falls back rather than inventing one.
     #[must_use]
-    pub fn font_widths(&self, name: &str) -> Option<&Declared> {
+    pub fn font_widths(&self, name: &str) -> Option<&DeclaredWidths> {
         self.font_widths.get(name)
+    }
+
+    /// Whether the named font's character codes are two bytes wide.
+    ///
+    /// This is what `Tf` records beside the name, and it is a separate question from the
+    /// widths: a composite font that declares no `/W` still has two-byte codes, and a
+    /// caller that inferred the code width from the presence of a widths array would split
+    /// such a font's strings into single bytes and place every glyph after the first one
+    /// wrongly. An unknown font is single-byte, which is the common case and the one that
+    /// must not pay for the other.
+    #[must_use]
+    pub fn font_is_composite(&self, name: &str) -> bool {
+        self.composite_fonts.contains(name)
     }
 
     /// Every name a content stream could refer to, for the Inspector.
@@ -181,6 +216,41 @@ impl Resources {
             patterns: self.patterns.len(),
         }
     }
+}
+
+/// Whether a font dictionary describes a composite (Type 0) font.
+///
+/// A composite font is the one whose character codes are two bytes. It says so itself:
+/// `/Subtype` is `/Type0`, and the codes are then whatever its `/Encoding` maps — the
+/// predefined `/Identity-H`, one of the other `-H`/`-V` CMap names, or a CMap stream the
+/// file carries. Every one of those is a two-byte code, which is why the subtype alone is
+/// enough to answer the question this function exists for.
+///
+/// A CMap stream is not parsed here, so a file whose CMap declared one-byte code space
+/// ranges would be read as two-byte. That is the safe direction to be wrong in: the codes
+/// are still two bytes in every font a page realistically uses, and a one-byte CMap is
+/// rarer than a font this does not draw at all.
+fn is_composite(dict: &mangle_syntax::object::Dict) -> bool {
+    dict.get("Subtype")
+        .and_then(mangle_syntax::object::Object::as_name)
+        == Some(b"Type0")
+}
+
+/// The widths a composite font's descendant font declares, in its run-length `/W`.
+///
+/// `/DescendantFonts` is an array whose first entry is the CIDFont the codes are looked up
+/// in. A file that names no descendant, or one that does not resolve, declares no widths —
+/// which is a fact about the file rather than a width of zero, and the caller falls back.
+fn descendant_widths(
+    dict: &mangle_syntax::object::Dict,
+    resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+) -> Option<CidWidths> {
+    let array = dict.get("DescendantFonts")?;
+    let array = resolve(array).unwrap_or_else(|| array.clone());
+    let first = array.as_array()?.first()?;
+    let first = resolve(first).unwrap_or_else(|| first.clone());
+    let descendant = first.as_dict()?;
+    CidWidths::from_descendant_dict(descendant, resolve)
 }
 
 /// How many of each thing a page's resources hold.

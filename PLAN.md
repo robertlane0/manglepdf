@@ -28,6 +28,31 @@ The spine is where the architecture is decided, so it is built first and deeply.
 | ADR-0006 | Permitted codecs only for JPEG (DCT) decode/encode; PNG is in-house on top of our own Flate | PNG needs exact control of predictors/bit depths; JPEG is too large to justify rewriting twice |
 | ADR-0007 | Own analytic-coverage scanline rasterizer shared by PDF rendering *and* SVG icon rendering | One rasterizer to get right; dogfoods the renderer (Charter §8.7) |
 
+## Composite fonts (settled)
+
+A `/Type0` font's codes are two bytes, so the byte count and the glyph count stop agreeing.
+Four things changed together, and each is a place where a wrong answer is invisible rather
+than loud:
+
+- **The code width is the font's claim, not an inference.** `Resources` records which
+  resource names are composite (`/Subtype /Type0`), and `Tf` puts that on the text state
+  beside the widths. Inferring it from the presence of a widths array would be wrong in both
+  directions: a composite font may declare no `/W` at all, and a simple font always has one.
+- **The string is split into codes, and everything downstream counts codes** — placements,
+  advances and `TJ` kerns. A trailing odd byte is dropped rather than padded: half a code
+  names no glyph, and a glyph nobody asked for is worse than a character missing from a
+  truncated string.
+- **The width comes from the run-length `/W`.** `CidWidths` keeps the runs as written
+  (`c [w1 w2 …]`, `c_first c_last w`) rather than expanding them, because a range run can
+  cover the whole 16-bit code space and expanding it would cost 65 536 entries to answer a
+  subtraction. `/DW` is 1000 for a code no run covers — the specification's answer, not a
+  fallback invented here. `Declared` is untouched: a Type 1 font is the common case and must
+  not pay for a two-byte path.
+- **The mark carries the codes.** `Mark::Glyphs` has `codes: Vec<u32>` and `two_byte: bool`
+  beside the raw `text`. A mark that said only how many bytes it had would leave every
+  renderer to guess, and guessing one byte per code is the bug. `/ToUnicode` is not read —
+  it is text extraction's, not the drawer's — but the mark now carries what it will need.
+
 ## Milestone map (detail in GOAL §10)
 
 | M | Deliverable | Gate it unlocks |
@@ -49,7 +74,10 @@ The spine is where the architecture is decided, so it is built first and deeply.
 ## Immediate queue
 
 1. **The font kinds** (F19–F21): CFF and Type 1 charstrings, then the standard fourteen,
-   then Type 3, then two-byte codes. TrueType is done and compared against an oracle.
+   then Type 3. TrueType is done and compared against an oracle, and two-byte codes are done
+   with it: a composite font's string is split into two-byte CIDs, the pen advances by each
+   CID's own entry in the descendant's run-length `/W`, and the mark carries the codes and
+   their width so no consumer has to guess (0.99225 SSIM against `mutool`).
 2. **Patterns**: the tiling loop and the colour-space converter, for the painting and
    shading pattern types.
 3. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are

@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod outline;
 
 pub use metrics::{
-    ASCII_START, Declared, STANDARD_14, Widths, ascii_glyphs, by_name, standard_glyph, widths,
+    ASCII_START, CidWidths, Declared, DeclaredWidths, STANDARD_14, Widths, ascii_glyphs, by_name,
+    standard_glyph, widths,
 };
 pub use outline::{Outline, Program, Segment, em_scale, from_true_type};

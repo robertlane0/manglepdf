@@ -909,6 +909,179 @@ impl Declared {
     }
 }
 
+/// The widths a CID font's descendant declares, in the run-length form `/W` uses.
+///
+/// A composite font's widths are not indexed by `/FirstChar`. `/W` is a list of runs, and
+/// each run is one of two shapes:
+///
+/// * `c [w1 w2 …]` — the widths from code `c` upwards, one per code.
+/// * `c_first c_last w` — one width for every code in the inclusive range.
+///
+/// A code that no run covers is `/DW`, which the specification makes 1000. That default
+/// exists precisely because a run need not cover the whole code space, and a file that
+/// relies on it is relying on the specification rather than on damage.
+///
+/// The runs are kept as they were written rather than expanded into one width per code:
+/// a `c_first c_last w` run can cover the entire 16-bit code space, and expanding it would
+/// cost 65 536 entries to answer a question a subtraction answers. The single-byte
+/// [`Declared`] above is left alone for the same reason in reverse — it is already a flat
+/// run, and a Type 1 font is the common case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CidWidths {
+    /// The runs, in the order the file wrote them.
+    runs: Vec<CidRun>,
+    /// `/DW`: the width of a code no run covers.
+    default: u16,
+}
+
+/// One run of a `/W` array.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CidRun {
+    /// `c [w1 w2 …]`: the widths are listed, from `first` upwards.
+    Listed { first: u32, widths: Vec<u16> },
+    /// `c_first c_last w`: one width for the whole inclusive range.
+    Range { first: u32, last: u32, width: u16 },
+}
+
+impl CidWidths {
+    /// Read `/W` and `/DW` out of a descendant font's dictionary.
+    ///
+    /// `None` when the dictionary declares neither, which is a real answer — the font has
+    /// no widths and the caller falls back rather than inventing one. A malformed run is
+    /// skipped rather than aborting the read: a file with one broken entry in `/W` still
+    /// declares the others, and dropping all of them would misplace every glyph on the page
+    /// rather than one.
+    #[must_use]
+    pub fn from_descendant_dict(
+        dict: &mangle_syntax::object::Dict,
+        resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+    ) -> Option<Self> {
+        use mangle_syntax::object::Object;
+        let direct = |key: &str| -> Option<Object> {
+            let found = dict.get(key)?;
+            Some(resolve(found).unwrap_or_else(|| found.clone()))
+        };
+        let array = direct("W").and_then(|w| w.as_array().map(<[Object]>::to_vec));
+        let default = dict
+            .get("DW")
+            .and_then(Object::as_f64)
+            .and_then(width_number)
+            .unwrap_or(DEFAULT_CID_WIDTH);
+        let Some(array) = array else {
+            // A `/DW` with no `/W` is a complete declaration: every code is that width.
+            return dict.get("DW").is_some().then_some(Self {
+                runs: Vec::new(),
+                default,
+            });
+        };
+        let mut runs = Vec::new();
+        let mut at = 0usize;
+        while at < array.len() {
+            // Every run starts with the code it covers, so a non-number here is not a run.
+            let Some(first) = array.get(at).and_then(Object::as_i64) else {
+                break;
+            };
+            let Ok(first) = u32::try_from(first) else {
+                break;
+            };
+            match array.get(at + 1) {
+                // The listed form: the widths follow as an array, and they run from `first`
+                // upwards. A truncated list is kept as it is; a code past its end is then
+                // outside the run and takes `/DW`, which is the specification's answer for
+                // a code the run does not reach.
+                Some(Object::Array(widths)) => {
+                    runs.push(CidRun::Listed {
+                        first,
+                        widths: widths
+                            .iter()
+                            .map(|w| w.as_f64().and_then(width_number).unwrap_or(0))
+                            .collect(),
+                    });
+                    at += 2;
+                }
+                // The ranged form: a last code and one width for everything between. A
+                // `last` below `first` is nonsense; the run is dropped and `/DW` answers,
+                // which is better than a run that would swallow codes below its own start.
+                Some(Object::Int(last)) => {
+                    let Some(width) = array.get(at + 2).and_then(Object::as_f64) else {
+                        break;
+                    };
+                    if let Ok(last) = u32::try_from(*last)
+                        && last >= first
+                    {
+                        runs.push(CidRun::Range {
+                            first,
+                            last,
+                            width: width_number(width).unwrap_or(0),
+                        });
+                    }
+                    at += 3;
+                }
+                // Anything else where a run's second element belongs is damage; stopping
+                // keeps the runs already read and drops nothing that was readable.
+                _ => break,
+            }
+        }
+        Some(Self { runs, default })
+    }
+
+    /// The width of one code: the run that covers it, or `/DW`.
+    ///
+    /// A `u16` rather than an `Option`, because a CID font always has an answer — `/DW`
+    /// exists to be the answer — and returning `None` would push a decision this type has
+    /// already made back onto every caller.
+    #[must_use]
+    pub fn width_of(&self, code: u32) -> u16 {
+        for run in &self.runs {
+            match *run {
+                CidRun::Listed { first, ref widths } => {
+                    if let Some(offset) = code.checked_sub(first)
+                        && let Some(w) = widths.get(offset as usize)
+                    {
+                        return *w;
+                    }
+                }
+                CidRun::Range { first, last, width } => {
+                    if code >= first && code <= last {
+                        return width;
+                    }
+                }
+            }
+        }
+        self.default
+    }
+}
+
+/// The width `/DW` means when the descendant font does not say: one em.
+pub const DEFAULT_CID_WIDTH: u16 = 1000;
+
+/// The widths a font declares, in whichever of the two forms the format has.
+///
+/// A simple font declares a flat run indexed from `/FirstChar`; a composite font's
+/// descendant declares a run-length `/W`. The two are not variants of one array — the
+/// index means something different in each — but a caller that has a code wants a width
+/// from either, and this is where that difference stops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclaredWidths {
+    /// A simple font's `/Widths`.
+    Simple(Declared),
+    /// A composite font's descendant `/W`.
+    Composite(CidWidths),
+}
+
+impl DeclaredWidths {
+    /// The width of one character code, or `None` when the font says nothing about it.
+    ///
+    /// A composite font has no such answer to give: `/DW` is one, so it always has one.
+    #[must_use]
+    pub fn width_of(&self, code: u32) -> Option<u16> {
+        match self {
+            Self::Simple(d) => d.width_of(code),
+            Self::Composite(w) => Some(w.width_of(code)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -1070,6 +1243,144 @@ mod tests {
         let d = Declared::from_font_dict(&font, &|_| None).expect("a run");
         assert_eq!(d.first, 0);
         assert_eq!(d.width_of(1), Some(20));
+    }
+
+    #[test]
+    fn a_cid_widths_listed_run_reads_from_its_first_code_upwards() {
+        use mangle_syntax::object::{Dict, Object};
+        let mut descendant = Dict::new();
+        descendant.set(
+            "W",
+            Object::Array(vec![
+                Object::Int(3),
+                Object::Array(vec![
+                    Object::Int(300),
+                    Object::Int(400),
+                    Object::Int(500),
+                    Object::Int(600),
+                ]),
+            ]),
+        );
+        let d = CidWidths::from_descendant_dict(&descendant, &|o| Some(o.clone())).expect("/W");
+        for (code, want) in [(3u32, 300u16), (4, 400), (5, 500), (6, 600)] {
+            assert_eq!(d.width_of(code), want, "code {code} of the listed run");
+        }
+        assert_eq!(
+            d.width_of(7),
+            1000,
+            "past the end of the list is /DW, not the last width again"
+        );
+        assert_eq!(d.width_of(2), 1000, "below the run is /DW too");
+    }
+
+    #[test]
+    fn a_cid_widths_range_run_covers_every_code_in_it() {
+        use mangle_syntax::object::{Dict, Object};
+        let mut descendant = Dict::new();
+        descendant.set(
+            "W",
+            Object::Array(vec![Object::Int(10), Object::Int(14), Object::Int(250)]),
+        );
+        let d = CidWidths::from_descendant_dict(&descendant, &|o| Some(o.clone())).expect("/W");
+        for code in 10..=14 {
+            assert_eq!(d.width_of(code), 250, "code {code} of the range");
+        }
+        // The boundary is the point: the last code in is in, the first after is out, and a
+        // run that swallowed its neighbour would place the following glyph by a width the
+        // file never declared.
+        assert_eq!(d.width_of(14), 250, "the last code of the range");
+        assert_eq!(d.width_of(15), 1000, "and the first one past it is /DW");
+        assert_eq!(d.width_of(9), 1000, "as is the one before it");
+    }
+
+    #[test]
+    fn two_cid_runs_meet_at_a_boundary_and_neither_takes_the_others_codes() {
+        use mangle_syntax::object::{Dict, Object};
+        let mut descendant = Dict::new();
+        descendant.set(
+            "W",
+            Object::Array(vec![
+                // A listed run for 1..=2 and a range for 3..=5, so the boundary falls
+                // between the last listed code and the first ranged one.
+                Object::Int(1),
+                Object::Array(vec![Object::Int(111), Object::Int(222)]),
+                Object::Int(3),
+                Object::Int(5),
+                Object::Int(333),
+            ]),
+        );
+        descendant.set("DW", Object::Int(999));
+        let d = CidWidths::from_descendant_dict(&descendant, &|o| Some(o.clone())).expect("/W");
+        for (code, want) in [
+            (1u32, 111u16),
+            (2, 222),
+            (3, 333),
+            (4, 333),
+            (5, 333),
+            (6, 999),
+            (0, 999),
+        ] {
+            assert_eq!(d.width_of(code), want, "code {code} across the boundary");
+        }
+    }
+
+    #[test]
+    fn a_cid_font_with_only_a_default_width_declares_that_for_every_code() {
+        use mangle_syntax::object::{Dict, Object};
+        let mut descendant = Dict::new();
+        descendant.set("DW", Object::Int(700));
+        let d = CidWidths::from_descendant_dict(&descendant, &|o| Some(o.clone())).expect("/DW");
+        for code in [0u32, 1, 32, 0xFFFF] {
+            assert_eq!(d.width_of(code), 700, "code {code} takes /DW");
+        }
+    }
+
+    #[test]
+    fn a_cid_font_declaring_neither_widths_nor_a_default_declares_nothing() {
+        use mangle_syntax::object::Dict;
+        let descendant = Dict::new();
+        assert!(CidWidths::from_descendant_dict(&descendant, &|o| Some(o.clone())).is_none());
+    }
+
+    #[test]
+    fn a_broken_cid_run_does_not_take_the_readable_ones_with_it() {
+        use mangle_syntax::object::{Dict, Object};
+        let mut descendant = Dict::new();
+        // A good run, then a name where the next run's first code belongs. The read stops
+        // there and the run before it still answers.
+        descendant.set(
+            "W",
+            Object::Array(vec![
+                Object::Int(1),
+                Object::Array(vec![Object::Int(640)]),
+                Object::name("not a code"),
+                Object::Int(9),
+                Object::Int(700),
+            ]),
+        );
+        let d = CidWidths::from_descendant_dict(&descendant, &|o| Some(o.clone())).expect("/W");
+        assert_eq!(d.width_of(1), 640, "the run before the damage still reads");
+        assert_eq!(d.width_of(9), 1000, "and the damaged one is /DW");
+    }
+
+    #[test]
+    fn a_cid_range_run_whose_last_code_precedes_its_first_is_dropped() {
+        use mangle_syntax::object::{Dict, Object};
+        let mut descendant = Dict::new();
+        descendant.set(
+            "W",
+            Object::Array(vec![
+                Object::Int(20),
+                Object::Int(10),
+                Object::Int(500),
+                Object::Int(30),
+                Object::Int(31),
+                Object::Int(600),
+            ]),
+        );
+        let d = CidWidths::from_descendant_dict(&descendant, &|o| Some(o.clone())).expect("/W");
+        assert_eq!(d.width_of(15), 1000, "a backwards run covers nothing");
+        assert_eq!(d.width_of(30), 600, "and the run after it still reads");
     }
 
     #[test]

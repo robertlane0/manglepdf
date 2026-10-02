@@ -41,6 +41,27 @@ pub enum Mark {
         size: f64,
         /// The raw string, before any encoding is applied.
         text: Vec<u8>,
+        /// The character codes, one per glyph, as the font's encoding names them.
+        ///
+        /// This is what a renderer looks a glyph up by, and it is a separate list from
+        /// `text` because a composite font's codes are two bytes each: four bytes of string
+        /// are two glyphs. Carrying the codes means no consumer has to know the font's
+        /// encoding to pair a glyph with its code, which is the only way to be right about
+        /// it — a mark that said only how many bytes it had would leave every consumer to
+        /// guess, and guessing one byte per code is the bug.
+        ///
+        /// `/ToUnicode` is a separate concern from drawing and is not read here. It is what
+        /// text extraction will need, and this mark now carries what it will need to use it:
+        /// the codes as the font's encoding names them, the font they were shown in, and the
+        /// span of the bytes they came from.
+        codes: Vec<u32>,
+        /// Whether each code in `codes` is two bytes wide.
+        ///
+        /// The font dictionary's own claim, recorded rather than re-derived. A consumer
+        /// needs it to know which `cmap` to read the code through: a composite font's codes
+        /// are looked up in the (3,0) subtable, a simple font's through the subtables a
+        /// simple font uses.
+        two_byte: bool,
         /// The fill colour the text was shown in, which is the non-stroking colour that
         /// was current rather than a property of the glyphs.
         ///
@@ -559,6 +580,10 @@ impl Context<'_> {
                     // text, and a page has thousands of glyphs.
                     self.state.text.widths =
                         self.resources.font_widths(&name).cloned().map(Arc::new);
+                    // Whether the codes are two bytes is the font dictionary's own claim,
+                    // read beside the name that selected it, because it decides how the
+                    // *next* `Tj` is split into codes and nothing else in the state says.
+                    self.state.text.composite = self.resources.font_is_composite(&name);
                     self.state.text.font = Some(name);
                 }
                 // The size is the second operand, not the second number: the first
@@ -800,11 +825,20 @@ impl Context<'_> {
         self.path_start = None;
     }
 
-    /// Record a text-showing operator. Each byte is treated as one glyph, which is
-    /// wrong for every multi-byte encoding and right for none of them — but it is the
-    /// honest unit here, because deciding which bytes are glyphs needs the font and
-    /// encoding, which is the font layer's job and not this one's.
+    /// Record a text-showing operator.
+    ///
+    /// A shown string is a run of *character codes*, and how many bytes make one code is
+    /// the current font's own claim: a simple font's codes are one byte each, a composite
+    /// font's are two. The string is split accordingly, and everything after this point —
+    /// the placements, the advances, the kerns — counts codes rather than bytes, because
+    /// counting bytes is what puts every glyph after the first in the wrong place on a
+    /// page set in a composite font.
+    ///
+    /// The raw bytes are still carried in the mark beside the codes, because they are what
+    /// an edit rewrites: the codes are what the page means, the bytes are what the file
+    /// says.
     fn record_text(&mut self, op: Operation, operands: &[&Object], _newline_first: bool) {
+        let two_byte = self.state.text.composite;
         // The operand tokens, not the values, so a string's own bytes can be recorded.
         let strings: Vec<&ContentToken> = (0..operands.len())
             .filter_map(|i| op.operands.get(i))
@@ -812,17 +846,26 @@ impl Context<'_> {
             .collect();
         let mut text: Vec<u8> = Vec::new();
         let mut text_spans: Vec<Range<usize>> = Vec::new();
+        // The character codes, one per glyph. This is what the placements and the advances
+        // are keyed by, and for a composite font it holds half as many entries as `text`
+        // has bytes.
+        let mut codes: Vec<u32> = Vec::new();
         // A `TJ` kern is paired with the glyphs of the string it *follows*, so it is
         // collected per glyph rather than as one number per glyph: the strings in a `TJ`
         // are of whatever lengths the file likes, and a kern displaces what comes after it
         // rather than the glyph at the same index. One kern per glyph would put a kern in
         // the wrong place for every string that is not exactly one character long.
         let mut kern_after: Vec<f64> = Vec::new();
-        // Push a string's glyphs, leaving room for each one's own following kern.
-        let push = |bytes: &[u8], text: &mut Vec<u8>, kern_after: &mut Vec<f64>| {
-            text.extend_from_slice(bytes);
-            kern_after.resize(kern_after.len() + bytes.len(), 0.0);
-        };
+        // Push a string's glyphs, leaving room for each one's own following kern. The
+        // kerns are counted in codes, so this is where the two widths part company: a
+        // two-byte string of four bytes is two glyphs and gets two kerns.
+        let push =
+            |bytes: &[u8], text: &mut Vec<u8>, codes: &mut Vec<u32>, kern_after: &mut Vec<f64>| {
+                text.extend_from_slice(bytes);
+                let added = codes_of(bytes, two_byte);
+                kern_after.resize(kern_after.len() + added.len(), 0.0);
+                codes.extend(added);
+            };
         // A kern applies to the last glyph pushed, which is the one it follows.
         let kern = |value: f64, kern_after: &mut Vec<f64>| {
             if let Some(last) = kern_after.last_mut() {
@@ -831,11 +874,11 @@ impl Context<'_> {
         };
         for operand in operands {
             match operand {
-                Object::String(s) => push(s, &mut text, &mut kern_after),
+                Object::String(s) => push(s, &mut text, &mut codes, &mut kern_after),
                 Object::Array(a) => {
                     for item in a {
                         match item {
-                            Object::String(s) => push(s, &mut text, &mut kern_after),
+                            Object::String(s) => push(s, &mut text, &mut codes, &mut kern_after),
                             other => {
                                 if let Some(v) = other.as_f64() {
                                     kern(v, &mut kern_after);
@@ -868,7 +911,7 @@ impl Context<'_> {
                 text_spans.push(token.span.clone());
             }
         }
-        if text.is_empty() {
+        if codes.is_empty() {
             return;
         }
         // Walk the *text matrix*, not the page. The cursor is in text space, whose units are
@@ -877,11 +920,11 @@ impl Context<'_> {
         // per glyph from the position it lands at. Stepping an already-scaled base by an
         // unscaled advance is how the placements and the advance come to disagree by a
         // factor of the size.
-        let mut placements = Vec::with_capacity(text.len());
+        let mut placements = Vec::with_capacity(codes.len());
         let mut cursor = self.state.text_matrix;
-        for (index, code) in text.iter().enumerate() {
+        for (index, code) in codes.iter().enumerate() {
             placements.push(self.state.text_rendering_matrix_for(&cursor));
-            cursor = cursor.concat(Matrix::translate(self.glyph_advance(u32::from(*code)), 0.0));
+            cursor = cursor.concat(Matrix::translate(self.glyph_advance(*code), 0.0));
             // A `TJ` number *follows* the string it displaces, so it moves what comes after
             // it: the kern at `index` applies to the next glyph, not to this one. It is a
             // displacement of the pen in thousandths of an em of unscaled text space and it
@@ -899,6 +942,10 @@ impl Context<'_> {
                 font: self.state.text.font.clone(),
                 size: self.state.text.size,
                 text,
+                // The character codes, one per glyph: half as many entries as `text` has
+                // bytes for a composite font, which is the whole point of carrying them.
+                codes,
+                two_byte,
                 fill: self.state.fill.clone(),
                 text_spans,
                 placements,
@@ -942,12 +989,20 @@ impl Context<'_> {
     ///
     /// Word spacing applies to the one code the specification names, and to nothing else: a
     /// file that puts a wide space in its own text gets the glyph's width twice over if this
-    /// is applied to every code that happens to be a space.
+    /// is applied to every code that happens to be a space. It is a *single-byte* code, so a
+    /// composite font's two-byte code 32 — which is a different thing entirely — does not
+    /// get it, and a font whose space is CID 3 gets nothing.
     ///
     /// A code the font says nothing about falls back to the conventional 500-unit average,
     /// which is what the specification's default `/MissingWidth` amounts to for layout
     /// purposes. Nothing here divides by the size, so a missing or zero size costs nothing:
     /// it makes the glyph's own term zero, which is what a zero-sized glyph is.
+    ///
+    /// The code is the full character code, so for a composite font it is the two bytes read
+    /// as one number — 0x0041 is a CID, not two codes 0 and 65. The width comes from the
+    /// descendant font's run-length `/W` in that case, which is why the lookup goes through
+    /// the declared-widths enum rather than through a `/Widths` array indexed from
+    /// `/FirstChar`.
     fn glyph_advance(&self, code: u32) -> f64 {
         let text = &self.state.text;
         let declared = text
@@ -955,7 +1010,7 @@ impl Context<'_> {
             .as_ref()
             .and_then(|w| w.width_of(code))
             .unwrap_or(DEFAULT_WIDTH);
-        let spacing = if code == WORD_SPACE {
+        let spacing = if !text.composite && code == WORD_SPACE {
             text.word_spacing
         } else {
             0.0
@@ -963,6 +1018,31 @@ impl Context<'_> {
         (f64::from(declared) / 1000.0 * text.size + text.char_spacing + spacing)
             * text.horizontal_scale
             / 100.0
+    }
+}
+
+/// The character codes in one shown string, as the current font's encoding names them.
+///
+/// A simple font's code is one byte. A composite font's is two, big-endian, so the string
+/// is read in pairs — the first byte is the high half of the CID, which is the order the
+/// specification writes them in and the order every `Identity-H` string is written in.
+///
+/// A trailing odd byte is dropped rather than completed: it is half a code, and a code made
+/// of half of one names no glyph in any font. Padding it with zero would place a glyph
+/// nobody asked for, and a viewer that drew one would be inventing content, which is worse
+/// than a character missing from a truncated string.
+fn codes_of(bytes: &[u8], two_byte: bool) -> Vec<u32> {
+    if two_byte {
+        bytes
+            .chunks_exact(2)
+            .filter_map(|pair| {
+                let high = pair.first()?;
+                let low = pair.get(1)?;
+                Some(u32::from(u16::from_be_bytes([*high, *low])))
+            })
+            .collect()
+    } else {
+        bytes.iter().map(|b| u32::from(*b)).collect()
     }
 }
 
@@ -1041,6 +1121,73 @@ mod tests {
     /// with a single figure for all of them.
     fn distinct_widths() -> Vec<i64> {
         (0..95).map(|i| 200 + i * 7).collect()
+    }
+
+    /// Resources with one composite font named `F1`: `/Type0`, `/Identity-H`, and a
+    /// descendant whose `/W` is `w`.
+    ///
+    /// `/DescendantFonts` holds the descendant dictionary directly rather than behind a
+    /// reference, which is the only difference from what a real file writes and keeps the
+    /// helper's resolver trivial.
+    fn composite_resources(w: Vec<Obj>, dw: i64) -> Resources {
+        let mut descendant = Dict::new();
+        descendant.set("Type", Obj::name("Font"));
+        descendant.set("Subtype", Obj::name("CIDFontType2"));
+        descendant.set("W", Obj::Array(w));
+        descendant.set("DW", Obj::Int(dw));
+        let mut font = Dict::new();
+        font.set("Type", Obj::name("Font"));
+        font.set("Subtype", Obj::name("Type0"));
+        font.set("BaseFont", Obj::name("Embedded"));
+        font.set("Encoding", Obj::name("Identity-H"));
+        font.set("DescendantFonts", Obj::Array(vec![Obj::Dict(descendant)]));
+        let mut table = Dict::new();
+        table.set("F1", Obj::Dict(font));
+        let mut resources = Dict::new();
+        resources.set("Font", Obj::Dict(table));
+        Resources::from_dict(&resources, &|o| Some(o.clone()))
+    }
+
+    /// A composite font whose descendant declares no `/W` at all, only `/DW`.
+    fn composite_default_only(dw: i64) -> Resources {
+        let mut descendant = Dict::new();
+        descendant.set("Subtype", Obj::name("CIDFontType2"));
+        descendant.set("DW", Obj::Int(dw));
+        let mut font = Dict::new();
+        font.set("Type", Obj::name("Font"));
+        font.set("Subtype", Obj::name("Type0"));
+        font.set("Encoding", Obj::name("Identity-H"));
+        font.set("DescendantFonts", Obj::Array(vec![Obj::Dict(descendant)]));
+        let mut table = Dict::new();
+        table.set("F1", Obj::Dict(font));
+        let mut resources = Dict::new();
+        resources.set("Font", Obj::Dict(table));
+        Resources::from_dict(&resources, &|o| Some(o.clone()))
+    }
+
+    /// The glyph codes of the first text mark, in order.
+    fn shown_codes(data: &[u8], resources: &Resources) -> Vec<u32> {
+        let out = run_with(&ContentStream::parse(data), resources);
+        out.records
+            .iter()
+            .filter_map(|r| match &r.mark {
+                Mark::Glyphs { codes, .. } => Some(codes.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// The placement count of the first text mark.
+    fn placement_count(data: &[u8], resources: &Resources) -> usize {
+        let out = run_with(&ContentStream::parse(data), resources);
+        out.records
+            .iter()
+            .find_map(|r| match &r.mark {
+                Mark::Glyphs { placements, .. } => Some(placements.len()),
+                _ => None,
+            })
+            .expect("a text mark")
     }
 
     /// The same figure for every code, so that what moves a run is the spacing and
@@ -1794,6 +1941,233 @@ mod tests {
         assert!(
             near(x, 10.0) && near(y, 20.0),
             "the first glyph is where `Td` put it"
+        );
+    }
+
+    #[test]
+    fn a_composite_font_places_one_glyph_per_two_byte_code() {
+        // Four bytes, two codes, two glyphs. The count is the point: reading one glyph per
+        // byte is what puts every glyph after the first in the wrong place on a page set
+        // in a composite font, and it does it without any visible error to notice.
+        let resources = composite_resources(
+            vec![
+                Obj::Int(0x0041),
+                Obj::Array(vec![Obj::Int(500), Obj::Int(600)]),
+            ],
+            1000,
+        );
+        let stream = b"BT /F1 10 Tf 0 0 Td <00410042> Tj ET";
+        assert_eq!(
+            placement_count(stream, &resources),
+            2,
+            "two two-byte codes are two glyphs"
+        );
+        assert_eq!(
+            shown_codes(stream, &resources),
+            vec![0x0041, 0x0042],
+            "each code is the pair of bytes read as one number, high byte first"
+        );
+    }
+
+    #[test]
+    fn a_composite_glyph_advances_by_its_own_entry_in_the_run_length_widths() {
+        // Two codes of different declared widths. The pen must move by their sum, which is
+        // only true if each glyph was looked up by its own code: a single figure for the
+        // run, or one lookup per byte, would land somewhere else entirely.
+        let resources = composite_resources(
+            vec![
+                Obj::Int(0x0041),
+                Obj::Array(vec![Obj::Int(500), Obj::Int(600)]),
+            ],
+            1000,
+        );
+        let size = 10.0;
+        let stream = b"BT /F1 10 Tf 0 0 Td <00410042> Tj ET";
+        let xs = glyph_x(stream, &resources);
+        assert_eq!(xs.len(), 2, "two glyphs");
+        // The gap between two placements is the advance of the glyph *before* the second
+        // one, so this is code 0x0041's own 500 and not a single figure for the pair.
+        assert!(
+            near(advance(xs[0], xs[1], size), 0.5 * size),
+            "the second glyph starts one 500/1000 em after the first: {} against {}",
+            advance(xs[0], xs[1], size),
+            0.5 * size
+        );
+        let end = final_x(stream, &resources);
+        let want = (0.5 + 0.6) * size;
+        assert!(
+            near(end, want),
+            "and the pen ends at the sum of the two widths: {end} against {want}"
+        );
+    }
+
+    #[test]
+    fn a_composite_font_reads_both_shapes_of_run_length_widths() {
+        // One listed run and one ranged run, in the same `/W`, with the two forms on either
+        // side of the boundary between them.
+        let resources = composite_resources(
+            vec![
+                // 0x0010..=0x0011 listed, 400 and 500.
+                Obj::Int(0x0010),
+                Obj::Array(vec![Obj::Int(400), Obj::Int(500)]),
+                // 0x0020..=0x0022 ranged, all 700.
+                Obj::Int(0x0020),
+                Obj::Int(0x0022),
+                Obj::Int(700),
+            ],
+            1000,
+        );
+        let size = 10.0;
+        // Five codes: two from the listed run and three from the ranged one, so the
+        // boundary between the two forms falls between the second and the third glyph.
+        let stream = b"BT /F1 10 Tf 0 0 Td <00100011002000210022> Tj ET";
+        let xs = glyph_x(stream, &resources);
+        assert_eq!(xs.len(), 5, "five two-byte codes are five glyphs");
+        let gaps = [
+            advance(xs[0], xs[1], size),
+            advance(xs[1], xs[2], size),
+            advance(xs[2], xs[3], size),
+            advance(xs[3], xs[4], size),
+        ];
+        for (i, (got, want)) in gaps.iter().zip([0.4, 0.5, 0.7, 0.7]).enumerate() {
+            assert!(
+                near(*got, want * size),
+                "gap {i} is the width of the code before it: {got} against {}",
+                want * size
+            );
+        }
+        // A code past every run takes `/DW`, which is the specification's answer rather than
+        // a fallback invented here.
+        let past = final_x(b"BT /F1 10 Tf 0 0 Td <0099> Tj ET", &resources);
+        assert!(
+            near(past, size),
+            "a code no run covers advances by one em, which is /DW: {past}"
+        );
+    }
+
+    #[test]
+    fn a_composite_font_with_only_a_default_width_advances_every_glyph_by_it() {
+        // No `/W` at all, only `/DW`. The codes are still two bytes — the code width comes
+        // from the font dictionary and not from the widths, which is exactly the case that
+        // breaks if a caller infers one from the other.
+        let resources = composite_default_only(750);
+        let stream = b"BT /F1 10 Tf 0 0 Td <00410042> Tj ET";
+        let xs = glyph_x(stream, &resources);
+        assert_eq!(xs.len(), 2, "still two glyphs, with no /W to say otherwise");
+        assert!(
+            near(advance(xs[0], xs[1], 10.0), 0.75 * 10.0),
+            "each by /DW: {}",
+            advance(xs[0], xs[1], 10.0)
+        );
+    }
+
+    #[test]
+    fn a_truncated_two_byte_string_drops_its_last_byte_rather_than_inventing_a_glyph() {
+        // Three bytes: one whole code and half of another. The half is not a code, so it
+        // names no glyph, and padding it out would put a character on the page that the
+        // file never asked for. A literal string is the way to get an odd byte count: a
+        // hex string with an odd number of digits is padded to a whole byte by the
+        // specification, so `<0041004>` is four bytes and two codes, not three.
+        let resources = composite_resources(
+            vec![
+                Obj::Int(0x0041),
+                Obj::Array(vec![Obj::Int(500), Obj::Int(600)]),
+            ],
+            1000,
+        );
+        let stream = b"BT /F1 10 Tf 0 0 Td (ABC) Tj ET";
+        assert_eq!(
+            placement_count(stream, &resources),
+            1,
+            "one whole code is one glyph, and the stray byte is not a second"
+        );
+        assert_eq!(
+            shown_codes(stream, &resources),
+            vec![0x4142],
+            "the two whole bytes are one code, read high byte first"
+        );
+        // A string of a single byte is the same case with nothing whole in it: no glyph,
+        // and no panic.
+        let lone = b"BT /F1 10 Tf 0 0 Td (A) Tj ET";
+        let out = run_with(&ContentStream::parse(lone), &resources);
+        assert!(
+            !out.records
+                .iter()
+                .any(|r| matches!(r.mark, Mark::Glyphs { .. })),
+            "half a code is not a glyph, so there is no mark at all"
+        );
+        // The bytes themselves are still carried, because an edit rewrites the bytes and a
+        // dropped one would be a dropped character as far as the file is concerned.
+        let whole = b"BT /F1 10 Tf 0 0 Td (ABC) Tj ET";
+        let out = run_with(&ContentStream::parse(whole), &resources);
+        let Some(Mark::Glyphs { text, .. }) = out.records.first().map(|r| &r.mark) else {
+            panic!("a text mark");
+        };
+        assert_eq!(text, b"ABC", "all three bytes, and one glyph");
+    }
+
+    #[test]
+    fn a_single_byte_font_is_unchanged_by_any_of_this() {
+        // The common case, pinned against the width computed from the same dictionary: a
+        // Type 1 font declares `/FirstChar` and a flat `/Widths`, and each code's advance
+        // is its own entry. If the two-byte path had leaked into this one, the gap between
+        // the first two glyphs would be the width of the first code twice over.
+        let declared = distinct_widths();
+        let resources = font_resources(32, &declared);
+        let width_of = |code: u8| {
+            let offset = usize::try_from(i64::from(code) - 32).expect("in the declared run");
+            declared.get(offset).copied().expect("a declared width")
+        };
+        let size = 12.0;
+        let stream = b"BT /F1 12 Tf 0 0 Td (AB) Tj ET";
+        let xs = glyph_x(stream, &resources);
+        assert_eq!(xs.len(), 2, "one glyph per byte, as it always was");
+        assert_eq!(
+            shown_codes(stream, &resources),
+            vec![65, 66],
+            "and the codes are the bytes"
+        );
+        let want = width_of(b'A') as f64 / 1000.0 * size;
+        assert!(
+            near(advance(xs[0], xs[1], size), want),
+            "the second glyph starts one A-width after the first: {} against {want}",
+            advance(xs[0], xs[1], size)
+        );
+        let total = want + width_of(b'B') as f64 / 1000.0 * size;
+        assert!(
+            near(final_x(stream, &resources), total),
+            "and the pen ends at the sum of both widths: {} against {total}",
+            final_x(stream, &resources)
+        );
+    }
+
+    #[test]
+    fn word_spacing_does_not_apply_to_a_two_byte_code() {
+        // The specification's word spacing is for the *single-byte* code 32. A composite
+        // font's code 32 is 0x0020, a different thing, and adding word spacing to it would
+        // widen a space the file never asked to be wide.
+        let simple = even_resources(500);
+        // Every code is a half-em glyph, 0x0020 included, so the only thing that could widen
+        // the middle one is the word spacing.
+        let composite = composite_resources(
+            vec![Obj::Int(0x0000), Obj::Int(0xFFFF), Obj::Int(500)],
+            1000,
+        );
+        let show = |data: &[u8], resources: &Resources| {
+            let stream = [b"BT /F1 10 Tf 8 Tw ".as_slice(), data, b" ET"].concat();
+            final_x(&stream, resources)
+        };
+        // Three glyphs of half an em each, plus the word spacing on the middle one.
+        assert!(
+            near(show(b"0 0 Td (A A) Tj", &simple), 0.5 * 10.0 * 3.0 + 8.0),
+            "a simple font's space gets the word spacing"
+        );
+        assert!(
+            near(
+                show(b"0 0 Td <004100200041> Tj", &composite),
+                0.5 * 10.0 * 3.0
+            ),
+            "a composite font's 0x0020 does not"
         );
     }
 

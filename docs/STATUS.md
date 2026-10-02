@@ -127,7 +127,7 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Tests
 
-593, none ignored, no warnings. Ten kinds matter:
+609, none ignored, no warnings. Ten kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -200,6 +200,12 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   renderer is absent so that it cannot pass by having nothing to compare against. This is
   what found a `TJ` kern displacing the wrong glyph, kerns ignoring a horizontal scale, and
   the font size being applied twice.
+- **Composite fonts, against `mutool` too** — a `/Type0` font with `/Identity-H` and an
+  embedded `/CIDFontType2` is rendered and compared at 0.99225 SSIM. The fixture is
+  deliberately asymmetric: three different CIDs, three different declared widths, and a
+  `/W` array that mixes the listed and the ranged form. A symmetric fixture would score well
+  against a renderer that drew the *wrong* glyphs, because the error would be a mirror image
+  of itself.
 - **Widths against two other renderers** — the standard fonts' metrics are checked by
   measuring where a real renderer puts each glyph, not by reading the table back. One
   transcription error was found this way: `fraction` in Helvetica had the width of the URW
@@ -213,11 +219,27 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
    edge. The cap exists because each path costs a full coverage rasterisation, and the
    honest fix is to composite the paths in a shared sweep rather than to raise the number.
 2. **Only embedded TrueType outlines draw.** A glyph is filled from a `/FontFile2` program
-   and compared against `mutool` at 0.962 SSIM. Four kinds are still missing: the standard
+   and compared against `mutool` at 0.962 SSIM. Three kinds are still missing: the standard
    fourteen, which have no program at all; CFF and Type 1, which need a charstring
-   interpreter rather than a table walk; Type 3, whose glyphs are content streams; and
-   composite fonts (Type 0 and Identity-H), whose character codes are two bytes rather than
-   one. A page using one is reported rather than drawn blank.
+   interpreter rather than a table walk; and Type 3, whose glyphs are content streams. A page
+   using one is reported rather than drawn blank. Composite (Type 0) fonts now draw too, and
+   are counted as done below rather than here.
+3. **Composite fonts read two-byte codes, and the mark says so.** A `/Type0` font's
+   character codes are two bytes, so a string is split into codes rather than bytes and the
+   pen advances by the width of each code. Two things had to change together for that to be
+   right rather than merely different. The width lookup reads the descendant font's
+   run-length `/W` — `c [w1 w2 …]` and `c_first c_last w`, with `/DW` (1000) for a code no
+   run covers — because that array is indexed by code and not by position from a
+   `/FirstChar`, which is what a simple font's `/Widths` is. And a `Mark::Glyphs` now carries
+   the character codes and whether they are two bytes, so a renderer is told the width of a
+   code instead of inferring it from a byte count: the codes are the same numbers in both
+   cases, and only the font dictionary says how wide they are. The renderer looks a composite
+   code up through the font's (3,0) subtable, falling back to the code as a glyph number,
+   which is what a CID font with no `/CIDToGIDMap` means. A simple font takes none of this
+   path: its codes are one byte, its widths are a flat run, and the only cost is one branch
+   the common case never takes. `/ToUnicode` is not read — it belongs to text extraction,
+   not to drawing — but the mark now carries what extraction will need: the codes, the font
+   they were shown in, and the span of the bytes they came from.
 4. **The font size is applied once, in one place, and the model is tested against another
    renderer.** The text matrix is measured in ems and carries no font size; the size enters
    when a glyph is drawn. The model is pinned by a differential test over 400 cases against

@@ -27,6 +27,7 @@
 )]
 #![allow(clippy::many_single_char_names)]
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -1780,6 +1781,302 @@ fn our_glyphs_agree_with_mutools() {
     let metrics = &comparison.metrics;
     eprintln!(
         "text page: {} — our ink {}, theirs {}",
+        metrics.summary(),
+        total_ink(&ours),
+        their_ink
+    );
+    assert!(
+        metrics.meets_fidelity_bar(0.95),
+        "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",
+        metrics.ssim,
+        metrics.summary()
+    );
+}
+
+// ── Composite fonts: two-byte codes ───────────────────────────────────────────
+
+/// The three widths the composite fixture declares, in thousandths of an em.
+///
+/// Deliberately all different, and deliberately not the font's own advances: this face is
+/// monospaced, so a fixture that used them would have three equal advances and could not
+/// tell a renderer that read `/W` from one that used a single figure for the run. Both
+/// renderers read `/W`, so a difference between them is a difference in how they read it.
+///
+/// Each is wider than the face's own 602/1000 em, so one glyph's ink cannot reach into the
+/// next glyph's cell and the three can be told apart by where they are.
+const COMPOSITE_WIDTHS: [u32; 3] = [700, 950, 800];
+
+/// The CIDs the composite fixture shows: three different glyphs.
+const COMPOSITE_CIDS: [u32; 3] = [12, 151, 103];
+
+/// A page set in a composite (Type 0) font, with `/Identity-H` and an embedded program.
+///
+/// Everything a composite font needs and nothing else: the `/Type0` dictionary that says
+/// the codes are two bytes, a descendant `/CIDFontType2` that carries the `/W` widths and
+/// the `/FontDescriptor`, and the whole program in a `/FontFile2`.
+///
+/// The codes are CIDs, and the font is used as its own `/CIDToGIDMap` — the specification's
+/// default, and what a CID font with no map means — so CID *n* is glyph *n*.
+///
+/// The `/W` array is written in its run-length form and mixes both of that form's shapes: a
+/// listed run for the codes in use, and a range run above them, so the boundary between the
+/// two is on the page and both are read.
+fn composite_page(font: &[u8], cids: &[u32], size: f64) -> Vec<u8> {
+    let first = cids.first().copied().unwrap_or(0);
+    let listed: Vec<String> = cids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| COMPOSITE_WIDTHS.get(i).copied().unwrap_or(500).to_string())
+        .collect();
+    // The range run starts one code above the last one in use, so the listed run's last
+    // code is the last code the listed run answers for.
+    let after = u32::from(u16::try_from(first + cids.len() as u32).unwrap_or(1));
+    let w = format!("[ {first} [ {} ] {after} 65535 1000 ]", listed.join(" "));
+    // The shown string, two bytes per code, high byte first.
+    let mut shown = String::new();
+    for cid in cids {
+        let _ = write!(shown, "{cid:04X}");
+    }
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 9];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 400 100] \
+          /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    at[4] = out.len();
+    let content = format!("BT 0 0 0 rg /F1 {size} Tf 18 60 Td <{shown}> Tj ET");
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content.as_bytes());
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+
+    at[5] = out.len();
+    out.extend_from_slice(
+        b"5 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Embedded /Encoding \
+          /Identity-H /DescendantFonts [6 0 R] >>\nendobj\n",
+    );
+    at[6] = out.len();
+    out.extend_from_slice(
+        format!(
+            "6 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Embedded \
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+             /DW 1000 /W {w} /CIDToGIDMap /Identity /FontDescriptor 7 0 R >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    at[7] = out.len();
+    out.extend_from_slice(
+        b"7 0 obj\n<< /Type /FontDescriptor /FontName /Embedded /Flags 4 /FontBBox \
+          [0 -200 1000 800] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 \
+          /StemV 80 /MissingWidth 500 /FontFile2 8 0 R >>\nendobj\n",
+    );
+    at[8] = out.len();
+    out.extend_from_slice(
+        format!(
+            "8 0 obj\n<< /Length {} /Length1 {} >>\nstream\n",
+            font.len(),
+            font.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(font);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 8\n");
+    for offset in at.iter().take(9).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// The composite page, rendered, or the reason there is none.
+fn render_composite_page(
+    cids: &[u32],
+    size: f64,
+    scale: f64,
+) -> Result<mangle_render::PageRender, String> {
+    let font = true_type_font()?;
+    let doc = open(composite_page(&font, cids, size));
+    let all = pages(&doc);
+    let page = all.first().expect("a page");
+    let resources = page
+        .inherited
+        .resources
+        .as_ref()
+        .and_then(|o| doc.resolve_object(o))
+        .and_then(|o| o.as_dict().cloned())
+        .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+        .unwrap_or_default();
+    Ok(render_page(
+        &doc,
+        page,
+        &resources,
+        RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        },
+    ))
+}
+
+/// How much ink is in a band of the page, given in page fractions of x.
+///
+/// The band is the whole height, because the claim is about where the glyphs are
+/// horizontally and a band that also said something about their height would be testing
+/// two things at once.
+fn ink_in_columns(image: &mangle_render::Image, fx0: f64, fx1: f64) -> u64 {
+    let (x0, _, x1, _) = region(image, fx0, 0.0, fx1, 1.0);
+    (0..image.height)
+        .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+        .map(|(x, y)| u64::from(darkness(image, x, y)))
+        .sum()
+}
+
+/// Two codes in a composite font are two glyphs, at the positions their own widths say.
+///
+/// The count is the assertion that matters. A renderer that treated the four bytes of a
+/// string as four one-byte codes would draw four glyphs — or fewer, if the stray high bytes
+/// name nothing in the font — and the ink and the positions would both be wrong.
+///
+/// The positions are checked against the widths the fixture declared rather than against
+/// the font's own advances, so a renderer that used one figure for the whole run, or that
+/// read the widths one byte at a time, puts the second glyph somewhere else and fails here.
+#[test]
+fn a_composite_font_draws_one_glyph_per_two_byte_code_at_its_own_width() {
+    if let Err(reason) = true_type_font() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let size = 36.0;
+    let scale = 2.0;
+    let cids = COMPOSITE_CIDS;
+    let render = match render_composite_page(&cids, size, scale) {
+        Ok(render) => render,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    assert!(
+        render.notes.is_empty(),
+        "an embedded composite font should draw without complaint: {:?}",
+        render.notes
+    );
+
+    // The pen starts 18 points in and each glyph is its own declared width, in ems of the
+    // 36 point size. The page is 400 points wide, so the fractions below are where the
+    // pen must be — and the three widths are all different, so a renderer that placed the
+    // glyphs evenly would put the third in the wrong place.
+    let page = 400.0;
+    let start = 18.0;
+    let mut at = start;
+    let mut bands = Vec::new();
+    for (i, w) in COMPOSITE_WIDTHS.iter().enumerate() {
+        let left = at;
+        let right = at + f64::from(*w) / 1000.0 * size;
+        let ink = ink_in_columns(&render.image, left / page + 0.01, right / page - 0.01);
+        assert!(
+            ink > 0,
+            "glyph {i} has ink between x {left} and {right}, its own declared width"
+        );
+        bands.push((left / page, right / page));
+        at = right;
+    }
+    // Three glyphs and no more: the ink beyond the last one's advance is paper. A renderer
+    // that split the bytes would have put a fourth glyph out here, and one that advanced by
+    // the first width for every glyph would have drawn them all on top of each other.
+    let past = ink_in_columns(&render.image, at / page + 0.02, 0.95);
+    assert_eq!(
+        past, 0,
+        "nothing is drawn past the last glyph's own advance, which ends at {at}"
+    );
+    // The gap between two glyphs' bands is the difference between one advance and the
+    // next, and it is not the same for either pair — which is what a run of equal advances
+    // would produce.
+    let gap = |(a, b): (f64, f64), (c, _): (f64, f64)| c - b - (b - a);
+    assert!(
+        (gap(bands[0], bands[1]) - gap(bands[1], bands[2])).abs() > 0.01,
+        "the two gaps differ, so an evenly-spaced run would not pass: {bands:?}"
+    );
+}
+
+/// A composite-font page compared with `mutool`.
+///
+/// The fixture is deliberately **asymmetric**: three CIDs of different shapes at three
+/// different positions on a page that is 400 by 100, and the `/W` array mixes the listed
+/// and ranged forms. A symmetric fixture — the same glyph repeated, centred, evenly spaced —
+/// would score well against a renderer that drew the *wrong* glyphs, because the error
+/// would be a mirror image of itself. Asymmetry is what makes the score mean something: a
+/// glyph drawn at its neighbour's position, or a code split into two bytes, moves ink to
+/// where there is none, and SSIM notices.
+#[test]
+fn our_composite_glyphs_agree_with_mutools() {
+    if mutool().is_none() {
+        eprintln!("skipped: mutool is not installed");
+        return;
+    }
+    let font = match true_type_font() {
+        Ok(font) => font,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    // Three different glyphs, so the page has no symmetry a wrong answer could match.
+    let cids = COMPOSITE_CIDS;
+    let dir = std::env::temp_dir().join("mangle-render-oracle");
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let pdf = dir.join("composite.pdf");
+    std::fs::write(&pdf, composite_page(&font, &cids, 36.0)).expect("a file to render");
+
+    let scale = 150.0 / 72.0;
+    let ours = render_composite_page(&cids, 36.0, scale).expect("a font");
+    assert!(
+        ours.notes.is_empty(),
+        "an embedded composite font should draw without complaint: {:?}",
+        ours.notes
+    );
+    let theirs_path = dir.join("composite.pam");
+    let Some(data) = mutool_render(&pdf, scale, &theirs_path) else {
+        eprintln!("skipped: mutool could not render the page");
+        return;
+    };
+    let Some((w, h, depth, body)) = read_pam(&data) else {
+        eprintln!("skipped: could not read mutool's output");
+        return;
+    };
+    let theirs = flatten_onto_paper(&pam_to_image(w, h, depth, body));
+
+    let mut their_ink = 0u64;
+    for y in 0..theirs.height {
+        for x in 0..theirs.width {
+            their_ink += u64::from(darkness(&theirs, x, y));
+        }
+    }
+    assert!(
+        their_ink > 0,
+        "mutool drew no text, so there is nothing here to compare against"
+    );
+
+    let comparison = compare(&ours.image, &theirs, &SsimOptions::default());
+    assert!(
+        comparison.is_valid(),
+        "the comparison did not happen: {:?}",
+        comparison.refused
+    );
+    let metrics = &comparison.metrics;
+    eprintln!(
+        "composite page: {} — our ink {}, theirs {}",
         metrics.summary(),
         total_ink(&ours),
         their_ink
