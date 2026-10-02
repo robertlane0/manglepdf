@@ -512,16 +512,24 @@ fn count_labeled(line: &str, label: &str) -> Option<usize> {
 }
 
 /// The test names libtest reported with one status, e.g. `ignored`.
+///
+/// libtest writes `test NAME ... OUTCOME`, and an ignored test's OUTCOME carries
+/// the `#[ignore = "..."]` reason after a comma, as in
+/// `... ignored, two hours over the whole corpus`. So only the status word before
+/// the first comma is compared: matching the whole tail would make every real
+/// ignored test read as unnamed. The name comes from the first ` ... `, so a
+/// reason containing the separator cannot shift it.
 fn test_lines(stdout: &str, status: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in stdout.lines() {
         let Some(rest) = line.trim().strip_prefix("test ") else {
             continue;
         };
-        let Some((name, outcome)) = rest.rsplit_once(" ... ") else {
+        let Some((name, outcome)) = rest.split_once(" ... ") else {
             continue;
         };
-        if outcome.trim() == status && !out.iter().any(|n| n == name) {
+        let reported = outcome.split(',').next().unwrap_or_default().trim();
+        if reported == status && !out.iter().any(|n| n == name) {
             out.push(name.to_string());
         }
     }
@@ -841,6 +849,23 @@ test tests::a_balanced_tree_parses ... ok
 test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
 ";
 
+    /// The same run as `ONE_IGNORED`, but with the reason a real `#[ignore]` carries.
+    const ONE_IGNORED_WITH_REASON: &str = "\
+running 3 tests
+test the_harness_finds_its_corpus ... ok
+test the_wild_corpus_is_measured_and_reported ... ignored, two hours over the whole corpus; run it deliberately with --ignored
+test tests::a_balanced_tree_parses ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+";
+
+    /// What `cargo test -- --list` prints: no `... ` and no outcome.
+    const LISTED: &str = "\
+the_wild_corpus_is_measured_and_reported: test
+tests::a_balanced_tree_parses: test
+tests::an_unbalanced_tree_is_rejected: test
+";
+
     #[test]
     fn every_test_passed_passes_the_gate() {
         let v = judge_test_run(ALL_PASSED);
@@ -937,5 +962,60 @@ test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
         );
         assert_eq!(test_lines(&out, "ok").len(), 2);
         assert_eq!(test_lines(&out, "FAILED"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_ignored_test_with_a_reason_is_still_reported_by_name() {
+        assert_eq!(
+            test_lines(ONE_IGNORED_WITH_REASON, "ignored"),
+            vec!["the_wild_corpus_is_measured_and_reported"]
+        );
+        let v = judge_test_run(ONE_IGNORED_WITH_REASON);
+        assert!(v.findings.is_empty(), "{:?}", v.findings);
+        assert_eq!(v.counts.ignored, 1);
+        let note = v
+            .notes
+            .iter()
+            .find(|n| n.contains("were not run"))
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(
+            note.contains("the_wild_corpus_is_measured_and_reported"),
+            "an ignored test carrying a reason must be named, not reported as none: {note}"
+        );
+        assert!(
+            !note.contains("none"),
+            "the reason must not read as a missing name: {note}"
+        );
+    }
+
+    #[test]
+    fn a_reason_containing_the_separator_does_not_shift_the_name() {
+        let out = "test a_deliberate_deferral ... ignored, runs ... slowly, on purpose\n";
+        assert_eq!(test_lines(out, "ignored"), vec!["a_deliberate_deferral"]);
+    }
+
+    #[test]
+    fn a_reason_naming_another_status_does_not_match_it() {
+        let out = "test a_deliberate_deferral ... ignored, deferred because ignored, see below\n";
+        assert_eq!(test_lines(out, "ignored"), vec!["a_deliberate_deferral"]);
+        assert_eq!(test_lines(out, "ok"), Vec::<String>::new());
+        assert_eq!(test_lines(out, "FAILED"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_line_the_gate_cannot_read_yields_no_name() {
+        // A bare `test NAME` with no outcome, and the `--list` form the gate used
+        // to shell out for: neither says what happened, so neither is evidence.
+        let out = format!("test a_name_with_no_outcome\n{LISTED}");
+        for status in ["ok", "FAILED", "ignored"] {
+            assert_eq!(test_lines(&out, status), Vec::<String>::new(), "{status}");
+        }
+        // A run that only listed its tests reported no result line, so it is judged
+        // unreadable rather than clean.
+        let v = judge_test_run(LISTED);
+        assert_eq!(v.findings.len(), 1, "{:?}", v.findings);
+        let finding = v.findings.first().map(String::as_str).unwrap_or_default();
+        assert!(finding.contains("no `test result:` line"), "{finding}");
     }
 }
