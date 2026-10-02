@@ -1326,11 +1326,15 @@ mod tests {
 
     #[test]
     fn a_font_with_no_widths_advances_by_the_old_half_em() {
-        // The pinned fallback: with nothing declared a glyph is half an em wide, which is
-        // what this layer has always done. The expectation is written as the rule rather
-        // than as a copied constant, so it says which behaviour is being held.
+        // The pinned fallback: with nothing declared and no table to consult, a glyph is half
+        // an em wide, which is what this layer has always done. The expectation is written as
+        // the rule rather than as a copied constant, so it says which behaviour is being held.
+        //
+        // The name is deliberately *not* a standard font. One of those now answers from its
+        // built-in table — see `a_standard_font_with_no_widths_uses_the_built_in_table` — and a
+        // test of the fallback that named Helvetica would be testing the other path.
         let mut font = Dict::new();
-        font.set("BaseFont", Obj::name("Helvetica"));
+        font.set("BaseFont", Obj::name("NoSuchFont"));
         let mut table = Dict::new();
         table.set("F1", Obj::Dict(font));
         let mut resources_dict = Dict::new();
@@ -1338,7 +1342,7 @@ mod tests {
         let resources = Resources::from_dict(&resources_dict, &|o| Some(o.clone()));
         assert!(
             resources.font_widths("F1").is_none(),
-            "this font declares nothing, which is the case under test"
+            "this font declares nothing and is not a standard one, which is the case under test"
         );
         let size = 24.0;
         let half = size * 0.5;
@@ -1350,6 +1354,66 @@ mod tests {
         assert!(
             near(advance(xs[1], xs[2], size), half),
             "and so is the one between them"
+        );
+    }
+
+    #[test]
+    fn a_standard_font_with_no_widths_uses_the_built_in_table() {
+        // The standard fourteen have no `/Widths` by definition, so a document that names one
+        // without embedding it is not a file with a gap in it. Falling back to one average
+        // advance would put every character after the first in the wrong place on most of the
+        // LaTeX and office output in the wild.
+        let mut font = Dict::new();
+        font.set("BaseFont", Obj::name("Times-Roman"));
+        let mut table = Dict::new();
+        table.set("F1", Obj::Dict(font));
+        let mut resources_dict = Dict::new();
+        resources_dict.set("Font", Obj::Dict(table));
+        let resources = Resources::from_dict(&resources_dict, &|o| Some(o.clone()));
+        assert!(
+            resources.font_widths("F1").is_some(),
+            "a standard font must answer for itself even with no /Widths"
+        );
+
+        let size = 24.0;
+        // Three glyphs, so both widths are measured: a gap is the advance of the glyph
+        // *before* it. `W` is 944 and `i` is 278 in Times-Roman, so the two differ by more
+        // than a factor of three, which one fallback width cannot produce.
+        let xs = glyph_x(b"BT /F1 24 Tf 0 0 Td (WiW) Tj ET", &resources);
+        assert_eq!(xs.len(), 3);
+        let wide = advance(xs[0], xs[1], size);
+        let narrow = advance(xs[1], xs[2], size);
+        assert!(
+            near(wide, 944.0 / 1000.0 * size),
+            "the wide glyph advances by its own width: {wide}"
+        );
+        assert!(
+            near(narrow, 278.0 / 1000.0 * size),
+            "and the narrow one by a different one: {narrow}"
+        );
+    }
+
+    #[test]
+    fn a_declared_width_array_still_wins_over_the_built_in_table() {
+        // The fallback is for a font that declares nothing. A file that declares a width has
+        // said what the width is, and second-guessing it with a table for a font of the same
+        // name is how a document's own layout gets overridden.
+        // `W` is 944 in the built-in Times-Roman table and 500 in the array, so the two
+        // disagree about a code both of them cover.
+        let mut font = Dict::new();
+        font.set("BaseFont", Obj::name("Times-Roman"));
+        font.set("FirstChar", Obj::Int(87));
+        font.set("Widths", Obj::Array(vec![Obj::Int(500)]));
+        let mut table = Dict::new();
+        table.set("F1", Obj::Dict(font));
+        let mut resources_dict = Dict::new();
+        resources_dict.set("Font", Obj::Dict(table));
+        let resources = Resources::from_dict(&resources_dict, &|o| Some(o.clone()));
+        let widths = resources.font_widths("F1").expect("declared widths");
+        assert_eq!(
+            widths.width_of(87),
+            Some(500),
+            "the array is the file's answer and the built-in table must not replace it"
         );
     }
 

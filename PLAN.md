@@ -163,6 +163,62 @@ not a permutation of each other and the page is asymmetric, so it catches ignori
 stopping at the end of the base, and transposing two codes; renaming `/Differences` in the
 file and re-scoring drops it to 0.895, which is how the test is known to see what it is for.
 
+## Standard-14 substitution (settled)
+
+The standard fourteen are defined by their *metrics* rather than by any one program, so a
+document that names one without embedding it — which is most of the LaTeX and office output
+in the wild, because those producers assume the reader has the font — is naming a font, not
+naming nothing. Refusing it leaves a hole in the page where the text was. Twelve of the
+fourteen now draw from bundled metric-compatible faces: Liberation Sans for Helvetica, Serif
+for Times, Mono for Courier, unmodified and under the OFL.
+
+- **It was two fixes, and the width one was larger.** The outlines are obvious — look the name
+  up in a table and fill from the face. But `Resources::from_dict` only recorded a width run
+  when `/Widths` was present, and the standard fourteen have none by definition, so an
+  unembedded standard-14 font advanced *every* glyph by the 500-unit default. Drawing the
+  glyphs without fixing the widths would have put every character after the first in the
+  wrong column, which scores worse against the oracle than not drawing at all. The run is the
+  built-in table indexed by **code**, read through the font's own `/Encoding` — a `/WinAnsi`
+  font, a `/MacRoman` one and one with a `/Differences` array each get their own answers,
+  because the width of 0x92 is a question about the document and not about Helvetica.
+- **One name parser, not two.** `mangle_font::substitute` calls the same `split_name` and
+  `style_words` the width tables use, so a subset prefix (`ABCDEF+Helvetica-Bold`) and the
+  older comma spelling (`Helvetica-Bold,Italic`) resolve for the outline and the width
+  together and cannot disagree with each other.
+- **The substitution is reported, never silent.** The page carries a note naming the face
+  that stands in, because the outlines on the paper are that face's and not the original's,
+  and that is the one fact about the picture a user cannot read off it.
+- **A composite font gets no stand-in.** Its codes are CIDs the document chose itself, so a
+  simple face is not a substitute however well the widths happen to agree.
+
+Five things this is *not*, recorded so nobody reads a higher SSIM as more than it is:
+
+1. **`fi` and `fl` are absent from Liberation Sans.** They would have to be composed from
+   `f`+`i` and `f`+`l` condensed to fit 500 units, against an `f` of 278 — an invented
+   ligature rather than the font's own glyph, and the kind of plausible wrong shape this
+   project refuses everywhere else.
+2. **`macron` is the wrong macron.** The U+00AF glyph in Liberation is the *spacing* bar, not
+   the AFM accent that sits over a base character. A name that resolves to a spacing bar
+   where the metrics files say accent is a silently wrong glyph.
+3. **`periodcentered` is drawn wider than Adobe's**, so a bullet or a middot in a list comes
+   out fatter than the oracle's. The width is right, which is what keeps the line where the
+   producer put it.
+4. **`Symbol` and `ZapfDingbats` have no substitute and stay refused.** Liberation carries no
+   symbol or dingbat face, and inventing a stand-in for a symbol font would put the wrong
+   glyphs on the page. They are reported by name.
+5. **This does not close every blank page in the corpus.** A good deal of the wild corpus
+   names `TimesNewRomanPSMT`, `CourierNewPSMT` and `HelveticaNeueLTStd-*` — office and
+   desktop-publishing faces, not standard-fourteen names — and `metrics.rs` deliberately
+   refuses them, because answering them from the Times table would put the wrong widths on
+   the page. Measured against `mutool`, `pdfbox__data-000001` goes **0.93127 → 0.94703** with
+   ink **448 654 → 477 471** against an oracle of 483 043, and `gov__arxiv-1206.5537`
+   **0.87844 → 0.88414**. Both moved, neither is close to 0.99, and the rest of the gap is
+   not only fonts.
+
+**The cost is deliberate and on the record:** `include_bytes!` puts 4.4 MB of faces into
+every binary that links `mangle-font`, with no way to leave them out. That is the price of a
+renderer that never has to ask the machine for a font.
+
 ## Milestone map (detail in GOAL §10)
 
 | M | Deliverable | Gate it unlocks |
@@ -183,8 +239,13 @@ file and re-scoring drops it to 0.895, which is how the test is known to see wha
 
 ## Immediate queue
 
-1. **The font kinds** (F19–F21): the standard fourteen next, then Type 3. Type 1 is done
-   and compared against an oracle at 0.982 SSIM. TrueType is done and compared against an oracle, and two-byte codes are done with
+1. **The font kinds** (F19–F21): **the standard fourteen are done** for a document that does
+   not embed them — twelve of the fourteen now draw from bundled metric-compatible faces, with
+   their widths from the built-in tables rather than from the 500-unit default, and the page
+   says which face is standing in. `Symbol` and `ZapfDingbats` stay refused: Liberation has no
+   equivalent and inventing one would put the wrong glyphs on the page. **Type 3 is next.**
+   Type 1 is done and compared against an oracle at 0.982 SSIM. TrueType is done and
+   compared against an oracle, and two-byte codes are done with
    it: a composite font's string is split into two-byte CIDs, the pen advances by each CID's
    own entry in the descendant's run-length `/W`, and the mark carries the codes and their
    width so no consumer has to guess (0.99225 SSIM against `mutool`). CFF is done too, and
@@ -245,10 +306,12 @@ findings dominate, in this order:
 it fixed, 103 of 542 pages draw and 439 are still blank — 422 of those because of a font, 17
 for other reasons. The dominant one is a `Type1` font whose `/FontFile3` is a bare CFF: a
 character code reaches a glyph through the charset, and the charset is not read, so the font
-is refused rather than guessed at. **Next: read the CFF charset (ISO 10581 §5.2 — three
-formats and the Standard Strings list), then build in the standard fourteen.** Until then no
-render number in this project says anything about fidelity, and the arXiv page's SSIM sits at
-0.7915 whether or not its content decodes.
+is refused rather than guessed at. **Both font clusters are now done** — the CFF charset is
+read (ISO 10581 §5.2, three formats and the Standard Strings list) and the standard fourteen
+draw from bundled metric-compatible faces. Until they were, no render number in this project
+said anything about fidelity and the arXiv page's SSIM sat at 0.7915 whether or not its
+content decoded; it is now 0.88414, and **a full re-run of the corpus is wanted** to
+re-baseline the median. It takes two hours, so it is run deliberately rather than in a loop.
 6. Tier B with `SOURCES.md`: a real-world corpus, which is the only way to find the encoding
    problems a hand-written fixture cannot express. **Done** — see above.
 
@@ -262,7 +325,9 @@ outlines through the same filler a path uses, the text matrix and the font size 
 double-count (a `TJ` kern also displaces the glyph that follows it, not the one at the same
 index), and the standard-14 width tables are verified rather than trusted — every one of the
 1043 widths was measured against two independent renderers and Adobe's own metrics, so
-nobody should re-derive them from a local URW clone.
+nobody should re-derive them from a local URW clone. A font that declares no `/Widths` now
+answers from those tables through its own `/Encoding` rather than from one average advance —
+see "Standard-14 substitution".
 
 The clip work is otherwise finished: a clip stays in force until a `W` changes it or a `Q`
 restores it, so a mark's rendering depends only on its own record. What is left is the cap —

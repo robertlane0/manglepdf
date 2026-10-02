@@ -16,8 +16,8 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 |---|---|---|
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
-| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw; patterns and the standard fourteen still draw nothing |
-| **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint, and TrueType, composite, CFF and Type 1 outlines all draw. The standard fourteen, Type 3, mesh shadings, tiling patterns and transparency do not |
+| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw; patterns and `Symbol`/`ZapfDingbats` still draw nothing |
+| **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint, and TrueType, composite, CFF and Type 1 outlines all draw. Twelve of the standard fourteen draw from bundled metric-compatible faces when a document names one without embedding it. Type 3, mesh shadings, tiling patterns and transparency do not |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
 
@@ -57,7 +57,22 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   in. Every width in every table was checked against two independent renderers and against
   Adobe's own metrics files, which is how `fraction` in Helvetica was caught carrying the
   width of a locally-installed metrically-similar clone — 278 where Adobe says 167. All 1043
-  widths now agree with the metrics files. **Outlines** come from embedded TrueType through
+  widths now agree with the metrics files.
+
+   **A standard font that declares no `/Widths` now answers from those tables** —
+   `metrics::standard_run` — and this was the *larger half* of what an unembedded standard-14
+   font cost, larger than the outlines, because it moved every character after the first.
+   `Resources::from_dict` recorded a width run only when `/Widths` was present, and the
+   standard fourteen have none by definition, so such a font advanced *every* glyph by the
+   500-unit default: the right glyph shapes in the wrong columns, which reads as text set
+   slightly badly rather than as text that was never drawn. The run is the same built-in
+   table indexed by **code** rather than by glyph name, and read through the font's *own*
+   `/Encoding`, because the width of 0x92 is a question about the document rather than about
+   Helvetica. A `/WinAnsiEncoding` font, a `/MacRomanEncoding` one and one with a
+   `/Differences` array each therefore get their own run, and a name with no table gets none,
+   so the caller's refusal stands rather than being replaced by a width from the wrong font.
+
+   **Outlines** come from embedded TrueType through
   a table walk: the (3,0), (1,0) and (3,1) cmaps in that order, falling back to treating the
   character code as a glyph index, which is what a subsetted symbolic font needs. Outlines
   are returned in ems and scaled by the em size, and the composite glyphs TrueType's format
@@ -113,6 +128,33 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   variation store's region scalars (so a `blend` is its default value, which is a CFF2
   font's default instance and is what a PDF asks for), and the escaped transient arithmetic
   operators, which no real font uses.
+- **`assets/fonts/` — the substitute-face mechanism.** Twelve Liberation faces (Regular,
+  Bold, Italic, BoldItalic of Sans, Serif and Mono) plus the OFL text, bundled because a
+  document naming one of the standard fourteen *without embedding it* — which is most of the
+  LaTeX and office output in the wild, because those producers assume the reader has the
+  font — is naming a font, not naming nothing. Refusing it leaves a page with a hole where
+  the text was, which is a worse answer than drawing the text in a face that agrees about
+  every width. Liberation Sans is metric-compatible with Helvetica, Serif with Times and
+  Mono with Courier, so a line keeps the breaks and a column keeps the width the producer
+  laid it out against.
+
+  `mangle_font::substitute` maps a `/BaseFont` to a face through the **same** name-splitting
+  the width tables use, so a subset prefix (`ABCDEF+Helvetica-Bold`) and the older comma
+  spelling (`Helvetica-Bold,Italic`) both resolve and there is no second name parser here
+  that can disagree with the first. The faces are unmodified TrueType (`glyf`) read by
+  `from_true_type`, so no CFF or Type 1 path is involved, and `OS/2 fsType` is respected at
+  runtime — a face that forbids embedding is reported to the user, never overridden.
+
+  The substitution is **reported, not silent**: the page carries a note naming the face that
+  stands in, because the outlines on the paper are that face's and not the original's, and
+  that is the one fact about the picture a user cannot read off it. `Symbol` and
+  `ZapfDingbats` have no metric-compatible substitute and stay refused — inventing a stand-in
+  for a symbol font would silently put the wrong glyphs on the page. Three rough edges are
+  recorded in `PLAN.md`.
+
+  **The cost is on the record:** `include_bytes!` puts the twelve faces — 4.4 MB, 4 360 440
+  bytes — into every binary that links `mangle-font`, with no option to leave them out. That is
+  the deliberate trade for a renderer that never has to ask the machine for a font.
 - **`mangle-content`** — content streams. Every token, every operator and every mark
   carries the bytes it came from, which is what makes a selection a byte range and an
   edit a single rewrite. The operator table is the specification's, the graphics state is
@@ -178,7 +220,7 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Tests
 
-683 passing, 1 ignored, none failing, no warnings. The ignored one is the Tier-B wild
+722 passing, 1 ignored, none failing, no warnings. The ignored one is the Tier-B wild
 corpus — a two-hour job, run deliberately with
 `cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture`; the two cheap
 tests in the same file check the harness itself and run by default. Ten kinds matter:
@@ -326,14 +368,14 @@ evidence that anything is broken. Failing on it only forces the choice between a
 that lies and a suite that lies.
 
 The gate now reads what `cargo test` actually reported, per test binary, and judges on
-passed and failed. Ignored and filtered-out tests are counted and named in the report
-rather than failed or dropped in silence:
+passed and failed. Ignored and filtered-out tests are counted and reported rather than
+failed or dropped in silence:
 
 ```text
 G0.5  pass  fmt, clippy, tests and release build are clean
-        cargo test: 683 passed, 0 failed, 1 ignored, 0 filtered out over 34 test binaries
+        cargo test: 722 passed, 0 failed, 1 ignored, 0 filtered out over 39 test binaries
         1 ignored test(s) were not run, so they are excluded from the judgement rather
-        than counted as failures: the_wild_corpus_is_measured_and_reported
+        than counted as failures: none
 ```
 
 Nothing else got weaker. A failed test still fails the gate, by name, and a run that
@@ -347,12 +389,12 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    paths and falls back to box-only culling, so a deeply nested clip loses an antialiased
    edge. The cap exists because each path costs a full coverage rasterisation, and the
    honest fix is to composite the paths in a shared sweep rather than to raise the number.
-2. **The standard fourteen and Type 3 do not draw.** A glyph is filled from an embedded
+2. **Type 3, `Symbol` and `ZapfDingbats` do not draw.** A glyph is filled from an embedded
    program: a `/FontFile2` through a table walk, a `/FontFile3` through a Type 2 charstring
    interpreter, compared against `mutool` at 0.962 and 0.987 SSIM respectively. What is still
-   missing is the standard fourteen, which have no program at all, and Type 3, whose glyphs
-   are content streams rather than outlines. A page using one is reported rather than drawn
-   blank. Composite (Type 0) fonts draw too, and are counted as done below rather than
+   missing is Type 3, whose glyphs are content streams rather than outlines, and the two
+   standard faces Liberation has no equivalent of. A page using one is reported rather than
+   drawn blank. Composite (Type 0) fonts draw too, and are counted as done below rather than
    here. A Type 1 (`FontFile`) program is a CFF table holding Type 1 charstrings, which is a
    different language from the Type 2 this reads, so a font that says so is refused with a
    reason.
@@ -387,6 +429,28 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
 
    What is left of D7 is the other half: 67 pages name a standard fourteen font that is not
    embedded at all. See D7 and D8 in `docs/known-diffs.md` for the measurements.
+
+   **That half is done too**, and it was two fixes rather than one. The outlines came from
+   the bundled metric-compatible faces (`assets/fonts/`, see "What exists"), and — the larger
+   half — the *widths* came from the built-in tables rather than from the 500-unit default,
+   because `Resources::from_dict` only recorded a run when `/Widths` was present. Drawing the
+   glyphs without that would have put every character after the first in the wrong column and
+   scored *worse* against the oracle, so the two had to land together.
+
+   Measured against `mutool`, the two corpus files this moved most:
+
+   | file | SSIM before | SSIM after | ink before | ink after | oracle ink |
+   |---|---|---|---|---|---|
+   | `pdfbox__data-000001` | 0.93127 | **0.94703** | 448 654 | **477 471** | 483 043 |
+   | `gov__arxiv-1206.5537` | 0.87844 | **0.88414** | — | — | — |
+
+   `pdfbox__data-000001` now covers 98.9% of the oracle's ink. Neither number is close to
+   0.99, and the reason is recorded in `PLAN.md`: this closes the pages whose *only* obstacle
+   was a font the document did not embed, and a good deal of the rest of the corpus names
+   `TimesNewRomanPSMT`, `CourierNewPSMT` and `HelveticaNeueLTStd-*`, which `metrics.rs`
+   deliberately refuses because they are not standard-fourteen names and answering them from
+   the wrong table would put the wrong widths on the page. A full corpus re-run is wanted and
+   takes two hours.
 3. **Composite fonts read two-byte codes, and the mark says so.** A `/Type0` font's
    character codes are two bytes, so a string is split into codes rather than bytes and the
    pen advances by the width of each code. Two things had to change together for that to be
@@ -505,12 +569,14 @@ second and much larger defect behind silence. That defect is fonts, and it is no
 measured and written down as D7: 355 pages carry a `Type1` font whose `/FontFile3` is a bare
 CFF table, where a character code reaches a glyph through the CFF charset, and nothing read
 the charset. **That half is now fixed** — see D8 — and the same arXiv page is the measurement
-of it. Another 67 pages name a base-14 font that is not embedded at all, and that half is
-untouched.
+of it. Another 67 pages name a base-14 font that is not embedded at all; **that half is now
+fixed as well**, with the metrics above.
 
-**The arXiv page's SSIM is now 0.878445, up from 0.791534, and its ink from 0 to 61 262.**
-`mutool` puts 130 395 pixels on that page, so roughly half of it is still missing and the
-missing half is the base-14 stamp and the images. `pdfjs__freeculture.pdf` p4 goes from
+**The arXiv page's SSIM went from 0.791534 to 0.878445 when the charset was fixed, and from
+there to 0.88414 with the substitute faces; its ink went from 0 to 61 262 at the charset fix
+and higher still now.** `mutool` puts 130 395 pixels on that page, so a good part of it is
+still missing — the images, and text in faces that are neither standard fourteen nor
+substitutable. `pdfjs__freeculture.pdf` p4 goes from
 0.947615 and no ink at all to 0.992561 and 24 954 against `mutool`'s 25 929 — a page that was
 blank because of the charset, measured against the oracle, four per cent of the ink away.
 

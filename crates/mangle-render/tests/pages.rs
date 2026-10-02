@@ -3337,6 +3337,209 @@ fn the_differences_array_and_not_the_fonts_own_encoding_choose_the_glyph() {
     );
 }
 
+// ── Substitution: a standard font the document did not embed ─────────────────────
+
+/// A page naming a Standard-14 font with no `/FontDescriptor` and no `/Widths`, laid out so
+/// that every glyph's position is known from the built-in metrics alone.
+///
+/// `base` is the `/BaseFont`; `size` the type size in points. Nothing else about the font is
+/// declared, which is what the case is: the standard fourteen have no descriptor by
+/// definition, and a producer that names one without embedding it is describing a font, not
+/// omitting one.
+///
+/// The text is `iiii` and the glyphs are drawn from x = `origin_x` in steps of the advance of
+/// `i`. That is what makes this a test of *width* as well as of outlines: a renderer with no
+/// widths for the font falls back to one average advance, and every glyph after the first
+/// lands in the wrong column — which is where the column assertions below catch it.
+fn unembedded_standard_page(base: &str, text: &str, size: f64, origin_x: f64) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 6];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 100] >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> \
+          /Contents 4 0 R >>\nendobj\n",
+    );
+    let content = format!("BT /F1 {size} Tf 1 0 0 1 {origin_x} 30 Tm ({text}) Tj ET");
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content.as_bytes());
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    // No `/FontDescriptor`, no `/Widths`, no `/FirstChar`: the shape a document that names a
+    // standard font without embedding it actually has.
+    at[5] = out.len();
+    out.extend_from_slice(
+        format!("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /{base} >>\nendobj\n")
+            .as_bytes(),
+    );
+
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 5\n");
+    for offset in at.iter().take(6).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size 6 /Root 1 0 R /ID [<0102> <0304>] >>\nstartxref\n{xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// The advance of a glyph in a standard font, in thousandths of an em.
+fn standard_advance(base: &str, glyph: &str) -> f64 {
+    let table = mangle_font::metrics::widths(base).expect("a standard font's widths");
+    f64::from(
+        table
+            .width_of(glyph)
+            .unwrap_or_else(|| panic!("{base} should have a width for {glyph}")),
+    )
+}
+
+/// A standard font the document did not embed still puts ink on the page.
+///
+/// Before a substitute existed this page rendered blank and said the font was not embedded,
+/// which is what every producer of such a file assumes a reader will not do. The glyphs come
+/// from a bundled metric-compatible face rather than the document's own, so what is asserted
+/// is ink where the glyphs are and a notice saying which face it is — not that the outlines
+/// are the original's, which they are not and cannot be.
+#[test]
+fn a_standard_font_the_document_did_not_embed_is_drawn_from_a_substitute() {
+    let scale = 4.0;
+    for (base, size) in [("Helvetica", 48.0), ("Times-Roman", 48.0)] {
+        // Four narrow glyphs, each `i` wide, so the columns are far apart and a wrong advance
+        // cannot land one glyph in the next column by luck.
+        let render = render(unembedded_standard_page(base, "iiii", size, 20.0), scale);
+        let note = render
+            .notes
+            .iter()
+            .find(|note| note.contains("stands in for"));
+        assert!(
+            note.is_some(),
+            "{base} was not embedded, so a substitute must say so: {:?}",
+            render.notes
+        );
+        assert!(
+            !render
+                .notes
+                .iter()
+                .any(|note| note.contains("no `/FontDescriptor`")),
+            "{base} must not also be reported as a font that cannot be read at all: {:?}",
+            render.notes
+        );
+
+        let advance = standard_advance(base, "i") / 1000.0 * size * scale;
+        // `origin` is where the text matrix put the run; `region` takes page proportions, so
+        // the band is the glyph's own column of a 200-point-wide page.
+        let origin = 20.0;
+        // `advance` is already in pixels — it carries the scale — so only the origin, which is
+        // in points, is multiplied by it.
+        let origin_px = origin * scale;
+        for (index, column) in [0.0, 1.0, 2.0, 3.0].into_iter().enumerate() {
+            let x0 = origin_px + advance * column;
+            let fx0 = (x0 / render.image.width as f64).clamp(0.0, 1.0);
+            let fx1 = ((x0 + advance) / render.image.width as f64).clamp(0.0, 1.0);
+            assert!(
+                ink_in_columns(&render.image, fx0, fx1) > 0,
+                "glyph {index} of {base} should have ink in its own column at x {x0}px, and \
+                 that column is blank: advance {advance}px"
+            );
+        }
+    }
+}
+
+/// The substitute's advances are the standard font's, or the text would not stay where the
+/// producer laid it out.
+///
+/// The first test uses one glyph repeated, so it cannot tell a correct advance from a plausible
+/// one. This one alternates `W` and `i`, which differ by a factor of four in both families, and
+/// asserts that the *last* glyph is where the standard advances put it. A renderer with one
+/// average advance for every code — what a font with no `/Widths` and no built-in table gets —
+/// accumulates the difference over three glyphs and puts it somewhere else entirely.
+#[test]
+fn a_substituted_font_advances_each_glyph_by_its_own_standard_width() {
+    let scale = 4.0;
+    let size = 48.0;
+    for base in ["Helvetica", "Times-Roman"] {
+        let render = render(unembedded_standard_page(base, "WiWi", size, 10.0), scale);
+        let narrow = standard_advance(base, "i") / 1000.0 * size * scale;
+        let wide = standard_advance(base, "W") / 1000.0 * size * scale;
+        assert!(
+            wide > narrow * 2.0,
+            "the fixture is only a test if W is much wider than i in {base}: {wide} vs {narrow}"
+        );
+        // Where each glyph belongs: the origin, then each previous glyph's own width.
+        let origin_px = 10.0 * scale;
+        let positions = [
+            origin_px,
+            origin_px + wide,
+            origin_px + wide + narrow,
+            origin_px + wide + narrow + wide,
+        ];
+        // One average advance for every code is what a font with neither a `/Widths` array nor
+        // a built-in table gets, and it is a quarter of the width here, so by the fourth glyph
+        // the two predictions are more than a glyph apart.
+        let average = 500.0 / 1000.0 * size * scale;
+        assert!(
+            positions[3] - (origin_px + average * 3.0) > narrow,
+            "the fixture is only a test if the last glyph's real and average-advance positions \
+             are more than a glyph apart in {base}"
+        );
+        // The last glyph is the narrow one, so it is the one whose position the accumulated
+        // difference decides, and it is the last thing on the page — so nothing else can put ink
+        // in its band.
+        let last_i = positions[3];
+        let page_width = render.image.width as f64;
+        let (fx0, fx1) = (
+            (last_i - narrow * 0.4) / page_width,
+            (last_i + narrow * 0.4) / page_width,
+        );
+        assert!(
+            ink_in_columns(&render.image, fx0.clamp(0.0, 1.0), fx1.clamp(0.0, 1.0)) > 0,
+            "the last `i` of {base} should be at x {last_i}px, after a wide `W`, a narrow `i` and \
+             another wide `W`, and there is no ink there"
+        );
+    }
+}
+
+/// A name with no metric-compatible stand-in is still reported rather than invented.
+///
+/// `Symbol` and `ZapfDingbats` are standard fonts with no Liberation equivalent, and a page
+/// naming one must still get the refusal: substituting a Latin face for a dingbat font would
+/// put entirely wrong glyphs on the page and call it a font. The same is true of a name that
+/// is not standard at all.
+#[test]
+fn a_standard_font_with_no_substitute_is_still_reported() {
+    for base in ["Symbol", "ZapfDingbats", "NoSuchFont"] {
+        let render = render(unembedded_standard_page(base, "iiii", 48.0, 20.0), 4.0);
+        let said = render
+            .notes
+            .iter()
+            .any(|note| note.contains("no `/FontDescriptor`") || note.contains("not embedded"));
+        assert!(
+            said,
+            "{base} has no substitute, so the refusal must stand: {:?}",
+            render.notes
+        );
+        assert!(
+            !render
+                .notes
+                .iter()
+                .any(|note| note.contains("stands in for")),
+            "{base} must not be silently drawn in someone else's face: {:?}",
+            render.notes
+        );
+    }
+}
+
 /// The codes the `/Encoding` gives names, as `(code, name)`.
 fn encoding_names(font: &mangle_syntax::object::Dict) -> Vec<(u32, String)> {
     let encoding =

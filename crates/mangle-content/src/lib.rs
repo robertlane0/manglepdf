@@ -145,6 +145,31 @@ impl Resources {
             }
             if let Some(declared) = Declared::from_font_dict(dict, resolve) {
                 font_widths.insert(name.clone(), DeclaredWidths::Simple(declared));
+                continue;
+            }
+            // No `/Widths`. For a document that names one of the standard fourteen without
+            // embedding it this is not a gap in the file but the ordinary case — those fonts
+            // have no `/Widths` by definition, and the widths are the ones the standard says
+            // they are. Leaving the entry out makes the interpreter fall back to one average
+            // advance for every glyph, which puts every character after the first in the
+            // wrong place; reading the built-in table keeps the line breaks the producer
+            // laid out against.
+            let base = dict
+                .get("BaseFont")
+                .and_then(resolve)
+                .or_else(|| dict.get("BaseFont").cloned())
+                .and_then(|o| o.as_name().map(|n| String::from_utf8_lossy(n).into_owned()));
+            let Some(base) = base else {
+                continue;
+            };
+            let encoding = mangle_font::Encoding::from_font_dict(
+                dict,
+                mangle_font::EncodingBase::Standard,
+                resolve,
+            )
+            .unwrap_or_else(|| mangle_font::Encoding::new(mangle_font::EncodingBase::Standard));
+            if let Some(declared) = mangle_font::metrics::standard_run(&base, &encoding) {
+                font_widths.insert(name.clone(), DeclaredWidths::Simple(declared));
             }
         }
         Self {

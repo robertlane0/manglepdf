@@ -21,7 +21,7 @@ use mangle_content::{
     ContentStream, FillRule as ContentRule, Mark, Matrix, PathSegment, Resources, run_with,
 };
 use mangle_doc::Page;
-use mangle_syntax::{Document, Object, Rect as PageRect, stream::decode_stream};
+use mangle_syntax::{Document, Object, Rect as PageRect, object::Dict, stream::decode_stream};
 
 use crate::image::{self, Raster};
 use crate::shading::{self, Shading};
@@ -503,6 +503,13 @@ pub struct FontProgram {
     /// the codes where the three base encodings disagree — 0xA0 to 0xFF — are exactly the ones
     /// a document is most likely to remap.
     encoding: mangle_font::Encoding,
+    /// The notice to carry when this program is not the document's own font, or `None`.
+    ///
+    /// A substituted face draws the right glyphs in someone else's outlines, and the user
+    /// is entitled to know that: the project does not substitute silently. Carried on the
+    /// program rather than pushed from `font_for` because a note is about the page being
+    /// drawn, and `font_for` does not know whether the page drew anything with it.
+    substituted: Option<String>,
 }
 
 impl std::fmt::Debug for FontProgram {
@@ -512,6 +519,7 @@ impl std::fmt::Debug for FontProgram {
             .field("units_per_em", &self.units_per_em)
             .field("encoding", &self.encoding.base().name())
             .field("differences", &self.encoding.differences().len())
+            .field("substituted", &self.substituted.is_some())
             .finish()
     }
 }
@@ -572,19 +580,36 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
         .get("FontDescriptor")
         .map(|o| doc.resolve_object(o).unwrap_or_else(|| o.clone()))
         .unwrap_or(Object::Null);
-    let Object::Dict(descriptor) = descriptor else {
-        return Err(format!(
-            "the font `/{name}` has no `/FontDescriptor`, so there is nothing to read a \
-             font program from"
-        ));
+    // No embedded program of any kind is not a failure on its own: it is what the standard
+    // fourteen are, and a metric-compatible face may stand in. So both of the reasons that
+    // used to end the search here are asked of `substitute_for` first, and each of them is
+    // what is still said when there is nothing to substitute. The distinction between "not
+    // embedded" and "embedded in a form this does not read" is preserved rather than
+    // flattened, because they are different findings and one of them is worth chasing.
+    let key = match &descriptor {
+        Object::Dict(descriptor) => ["FontFile3", "FontFile2", "FontFile"]
+            .into_iter()
+            .find(|key| descriptor.get(key).is_some()),
+        _ => None,
     };
-    let key = ["FontFile3", "FontFile2", "FontFile"]
-        .into_iter()
-        .find(|key| descriptor.get(key).is_some());
     let Some(key) = key else {
-        return Err(format!(
-            "the font `/{name}` is not embedded, so it has no outlines of its own to draw"
-        ));
+        // `Ok(None)` is "nothing to stand in", which leaves the reason below. `Err` is a
+        // fault in the bundle rather than in the document, so it says so and is not folded
+        // into the document's own finding.
+        match substitute_for(name, &font, composite, doc) {
+            Ok(Some(program)) => return Ok(program),
+            Err(why) => return Err(why),
+            Ok(None) => {}
+        }
+        return Err(match &descriptor {
+            Object::Dict(_) => format!(
+                "the font `/{name}` is not embedded, so it has no outlines of its own to draw"
+            ),
+            _ => format!(
+                "the font `/{name}` has no `/FontDescriptor`, so there is nothing to read a \
+                 font program from"
+            ),
+        });
     };
     let file = doc
         .resolve_object(descriptor.get(key).unwrap_or(&Object::Null))
@@ -606,30 +631,92 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
     if let Some(reason) = program.code_refusal() {
         return Err(format!("the `/{key}` of `/{name}` {reason}"));
     }
-    // The `/Encoding` is on the *font* dictionary, not the descendant's, and a composite
-    // font's is a CMap rather than any of the four shapes an encoding takes — so it is only
-    // read for a simple font, where the code really is a character code. A composite font's
-    // code is a CID and `/Differences` does not apply to it, which is why that font keeps the
-    // path it had rather than having an encoding forced onto a number that is not one.
-    //
-    // The default base is the standard encoding: a simple font that names no `/Encoding` is
-    // addressed through its own built-in encoding where it carries one, and through the
-    // standard encoding where it does not, which is what `Type1::glyph_for_code` already does.
-    // Reading it here as well means a font that *does* declare one gets it, and one that does
-    // not is unaffected.
-    let encoding = if composite {
-        mangle_font::Encoding::new(mangle_font::EncodingBase::Standard)
-    } else {
-        mangle_font::Encoding::from_font_dict(&font, mangle_font::EncodingBase::Standard, &|o| {
-            doc.resolve_object(o).or_else(|| Some(o.clone()))
-        })
-        .unwrap_or_else(|| mangle_font::Encoding::new(mangle_font::EncodingBase::Standard))
-    };
+    // The `/Encoding` is the font dictionary's own, so it is read the same way whichever way
+    // the outlines were found — see `encoding_for`.
     Ok(FontProgram {
         program,
         units_per_em,
-        encoding,
+        encoding: encoding_for(&font, composite, doc),
+        substituted: None,
     })
+}
+
+/// The `/Encoding` a font's character codes are addressed through.
+///
+/// The `/Encoding` is on the *font* dictionary, not the descendant's, and a composite
+/// font's is a CMap rather than any of the four shapes an encoding takes — so it is only
+/// read for a simple font, where the code really is a character code. A composite font's
+/// code is a CID and `/Differences` does not apply to it, which is why that font keeps the
+/// path it had rather than having an encoding forced onto a number that is not one.
+///
+/// The default base is the standard encoding: a simple font that names no `/Encoding` is
+/// addressed through its own built-in encoding where it carries one, and through the
+/// standard encoding where it does not, which is what `Type1::glyph_for_code` already does.
+/// Reading it here as well means a font that *does* declare one gets it, and one that does
+/// not is unaffected.
+fn encoding_for(font: &Dict, composite: bool, doc: &Document) -> mangle_font::Encoding {
+    if composite {
+        return mangle_font::Encoding::new(mangle_font::EncodingBase::Standard);
+    }
+    mangle_font::Encoding::from_font_dict(font, mangle_font::EncodingBase::Standard, &|o| {
+        doc.resolve_object(o).or_else(|| Some(o.clone()))
+    })
+    .unwrap_or_else(|| mangle_font::Encoding::new(mangle_font::EncodingBase::Standard))
+}
+
+/// A metric-compatible face for a font the document did not embed.
+///
+/// `Ok(None)` is "the name has no stand-in", which is an ordinary answer and says nothing
+/// about the document. `Err` is a fault in the bundle, which is not: those are kept apart
+/// so a broken bundled face is never reported as a document's missing font.
+///
+/// **This is not a fallback of last resort; it is what a reader does.** The standard
+/// fourteen are defined by their metrics rather than by any one program, so a document that
+/// names one without embedding it — which is most of the LaTeX and office output in the
+/// wild, because those producers assume the reader has the font — is naming a font, not
+/// naming nothing. Refusing it draws a page with a hole where the text was, and that is a
+/// worse answer than drawing the text in a face that agrees about every width.
+///
+/// The name goes to [`mangle_font::substitute`] whole, which is where the subset prefix
+/// (`ABCDEF+`), the style suffix and the older comma spelling are already dealt with, so
+/// there is no second name parser here that can disagree with the first. A name with no
+/// metric-compatible stand-in — `Symbol`, `ZapfDingbats`, anything non-standard — answers
+/// `None`, and the refusal is then free to say so.
+///
+/// The substitution is reported rather than made quietly: `substituted` carries the notice
+/// so the page can name the face standing in, which is the one fact about this that a user
+/// cannot read off the picture.
+fn substitute_for(
+    name: &str,
+    font: &Dict,
+    composite: bool,
+    doc: &Document,
+) -> Result<Option<FontProgram>, String> {
+    // A composite font's codes are CIDs the document chose itself, so a simple face is not a
+    // stand-in for one however well the widths happen to agree.
+    if composite {
+        return Ok(None);
+    }
+    let Some(base) = font.get("BaseFont").and_then(Object::as_name) else {
+        return Ok(None);
+    };
+    let base = String::from_utf8_lossy(base).into_owned();
+    let Some(bytes) = mangle_font::substitute(&base) else {
+        return Ok(None);
+    };
+    let mut program = mangle_font::Program::new(bytes.to_vec());
+    let units_per_em = program
+        .inspect()
+        .map_err(|why| format!("the face that stands in for `{base}` {why}"))?;
+    Ok(Some(FontProgram {
+        program,
+        units_per_em,
+        encoding: encoding_for(font, composite, doc),
+        substituted: Some(format!(
+            "the font `/{name}` is not embedded, so a metric-compatible face stands in for \
+             `/{base}`: the glyphs are that face's, not the original's"
+        )),
+    }))
 }
 
 /// A font lookup: a font resource name to the outlines it names.
@@ -838,6 +925,14 @@ fn draw_mark(
                     return;
                 }
             };
+            // The same once-per-page rule for the notice that a face is standing in: it is
+            // a fact about the font, so saying it again per run says the same thing more
+            // loudly.
+            if let Some(reason) = program.substituted.clone()
+                && !notes.contains(&reason)
+            {
+                notes.push(reason);
+            }
             let Some(rgba) = fill.to_rgba(None) else {
                 notes.push(format!(
                     "the colour text is painted in {} could not be converted, so no text \

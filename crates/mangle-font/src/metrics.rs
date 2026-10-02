@@ -142,7 +142,7 @@ pub fn widths(name: &str) -> Option<&'static Widths> {
 /// plus, and a trailing `MT` or `PS`, which is how a PostScript font spells the same face.
 /// The family ends at the first hyphen or comma, so both the modern `Helvetica-BoldItalic`
 /// and the older `Helvetica-Bold,Italic` come out as `Helvetica` and `BoldItalic`.
-fn split_name(name: &str) -> Option<(&str, String)> {
+pub(crate) fn split_name(name: &str) -> Option<(&str, String)> {
     // A subset tag is exactly six characters; anything else before a plus is part of the
     // name, and a name with no plus has no tag at all.
     let name = match name.as_bytes().get(6) {
@@ -167,7 +167,7 @@ fn strip_face_suffix(name: &str) -> &str {
 }
 
 /// Read a style suffix as a pair of flags, or `None` when it is not one this file knows.
-fn style_words(style: &str) -> Option<(bool, bool)> {
+pub(crate) fn style_words(style: &str) -> Option<(bool, bool)> {
     let mut rest = style.to_ascii_lowercase();
     let mut bold = false;
     let mut italic = false;
@@ -848,6 +848,55 @@ pub struct Declared {
     /// What to use for a code outside the run, or `None` when the file said nothing.
     pub missing: Option<u16>,
 }
+
+/// A flat run covering every code a simple font can carry, or `None`.
+///
+/// A document that names one of the standard fourteen without embedding it declares no
+/// `/Widths`, and a layout that then falls back to one average advance for every glyph
+/// puts every character after the first in the wrong place. This is the other answer: the
+/// built-in table, indexed by code rather than by glyph name, so it is the same shape a
+/// `/Widths` array is and the caller cannot tell the two apart.
+///
+/// **The codes are read through the font's own `/Encoding`.** The tables are keyed by glyph
+/// name and it is the encoding that says what a code is called, so a `/WinAnsiEncoding`
+/// font, a `/MacRomanEncoding` one and one with a `/Differences` array each get their own
+/// answers rather than the standard encoding's. That is the whole reason this takes an
+/// encoding: the width of code 0x92 is a question about the document, not about Helvetica.
+///
+/// `first` is zero and the run spans every single-byte code, because `/FirstChar` is a
+/// property of a `/Widths` array this file is standing in for rather than one it read.
+/// `missing` is `None`, which leaves a code outside the run to the caller's own default —
+/// there are none, and saying so is more honest than naming a width for them.
+///
+/// A name with no table — `Symbol`, `ZapfDingbats`, `Helvetica-Narrow`, anything
+/// non-standard — is `None`, so the caller's refusal stands rather than being replaced by a
+/// width from the wrong font.
+#[must_use]
+pub fn standard_run(name: &str, encoding: &crate::encoding::Encoding) -> Option<Declared> {
+    let table = widths(name)?;
+    let widths = (0..=u8::MAX)
+        .map(|code| {
+            encoding
+                .glyph_for(u32::from(code))
+                .and_then(|glyph| table.width_of(glyph))
+                .unwrap_or(DEFAULT_STANDARD_WIDTH)
+        })
+        .collect();
+    Some(Declared {
+        first: 0,
+        widths,
+        missing: None,
+    })
+}
+
+/// The advance a code gets when neither the file nor the built-in tables say.
+///
+/// Half an em, which is the conventional average the specification's own default
+/// `/MissingWidth` amounts to for layout purposes. It is only ever used for a code the
+/// encoding does not assign or the table has no glyph for — a control character, or a name
+/// from a `/Differences` array that is not in the Adobe Glyph List — so it is a
+/// last-resort figure and not a measurement.
+const DEFAULT_STANDARD_WIDTH: u16 = 500;
 
 impl Declared {
     /// Read `/FirstChar`, `/Widths` and the descriptor's `/MissingWidth` out of a font
