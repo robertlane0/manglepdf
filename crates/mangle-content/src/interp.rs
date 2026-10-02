@@ -221,6 +221,15 @@ pub struct PageContent {
 /// times; the product needs a page, not a memory exhaustion.
 pub const MAX_RECORDS: usize = 200_000;
 
+/// The width used for a code the font says nothing about, in the font's own units.
+///
+/// The specification's default `/MissingWidth` behaviour amounts to half an em, and a
+/// stated approximation is better than a guess that is not.
+const DEFAULT_WIDTH: u16 = 500;
+
+/// The one character code that word spacing applies to.
+const WORD_SPACE: u32 = 32;
+
 /// Run a content stream with no resources.
 ///
 /// Everything works except `gs`, whose dictionaries are named in the page's resources
@@ -753,26 +762,49 @@ impl Context<'_> {
             .collect();
         let mut text: Vec<u8> = Vec::new();
         let mut text_spans: Vec<Range<usize>> = Vec::new();
-        let mut kerns: Vec<f64> = Vec::new();
+        // A `TJ` kern is paired with the glyphs of the string it *follows*, so it is
+        // collected per glyph rather than as one number per glyph: the strings in a `TJ`
+        // are of whatever lengths the file likes, and a kern displaces what comes after it
+        // rather than the glyph at the same index. One kern per glyph would put a kern in
+        // the wrong place for every string that is not exactly one character long.
+        let mut kern_after: Vec<f64> = Vec::new();
+        // Push a string's glyphs, leaving room for each one's own following kern.
+        let push = |bytes: &[u8], text: &mut Vec<u8>, kern_after: &mut Vec<f64>| {
+            text.extend_from_slice(bytes);
+            kern_after.resize(kern_after.len() + bytes.len(), 0.0);
+        };
+        // A kern applies to the last glyph pushed, which is the one it follows.
+        let kern = |value: f64, kern_after: &mut Vec<f64>| {
+            if let Some(last) = kern_after.last_mut() {
+                *last = value;
+            }
+        };
         for operand in operands {
             match operand {
-                Object::String(s) => text.extend_from_slice(s),
+                Object::String(s) => push(s, &mut text, &mut kern_after),
                 Object::Array(a) => {
                     for item in a {
                         match item {
-                            Object::String(s) => text.extend_from_slice(s),
-                            other => kerns.push(other.as_f64().unwrap_or(0.0)),
+                            Object::String(s) => push(s, &mut text, &mut kern_after),
+                            other => {
+                                if let Some(v) = other.as_f64() {
+                                    kern(v, &mut kern_after);
+                                }
+                            }
                         }
                     }
                 }
                 other => {
                     // A number where a string belongs is damage; record what we can.
                     if let Some(v) = other.as_f64() {
-                        kerns.push(v);
+                        kern(v, &mut kern_after);
                     }
                 }
             }
         }
+        // A string with no glyph cannot carry a kern, and one left over applies to the
+        // glyph before it, which is what the specification's own order says.
+        let kerns = kern_after;
         // A string operand's own bytes; an array's are the array's span, which is the
         // tightest range that contains every string inside it.
         for token in &strings {
@@ -789,22 +821,28 @@ impl Context<'_> {
         if text.is_empty() {
             return;
         }
-        let base = self.state.text_rendering_matrix();
-        // Place every glyph at its own advance, applying the kerns between the strings.
+        // Walk the *text matrix*, not the page. The cursor is in text space, whose units are
+        // the pen's own: the text matrix is not scaled by the font size, so the size has to
+        // be applied to each glyph's width instead, and the rendering matrix is composed
+        // per glyph from the position it lands at. Stepping an already-scaled base by an
+        // unscaled advance is how the placements and the advance come to disagree by a
+        // factor of the size.
         let mut placements = Vec::with_capacity(text.len());
-        let mut cursor = base;
-        let mut total = 0.0;
+        let mut cursor = self.state.text_matrix;
         for (index, code) in text.iter().enumerate() {
+            placements.push(self.state.text_rendering_matrix_for(&cursor));
+            cursor = cursor.concat(Matrix::translate(self.glyph_advance(u32::from(*code)), 0.0));
+            // A `TJ` number *follows* the string it displaces, so it moves what comes after
+            // it: the kern at `index` applies to the next glyph, not to this one. It is a
+            // displacement of the pen in thousandths of an em of unscaled text space and it
+            // is subtracted, so a positive number pulls the following glyph closer, which
+            // is the sign the specification means. It scales with the size and the
+            // horizontal scale exactly as the glyph's own advance does.
             if let Some(kern) = kerns.get(index) {
-                // A `TJ` number is in thousandths of an em, and positive moves the next
-                // glyph *closer*, which is the sign the specification means.
-                let kern = *kern / 1000.0 * self.state.text.size;
+                let kern = *kern / 1000.0 * self.state.text.size * self.state.text.horizontal_scale
+                    / 100.0;
                 cursor = cursor.concat(Matrix::translate(-kern, 0.0));
             }
-            placements.push(cursor);
-            let advance = self.glyph_advance(u32::from(*code));
-            total += advance;
-            cursor = cursor.concat(Matrix::translate(advance, 0.0));
         }
         let record = Record {
             mark: Mark::Glyphs {
@@ -831,43 +869,51 @@ impl Context<'_> {
         }
         // The text matrix moves past what was shown, which is what makes a second `Tj`
         // continue rather than overlap, and by the sum of the glyphs' own advances rather
-        // than one figure for all of them. The *line* matrix does not move: a `Td` after
-        // this starts a new line from where the last one began, not from the end of the
-        // text on it.
-        self.state.text_matrix = self.state.text_matrix.concat(Matrix::translate(total, 0.0));
+        // than one figure for all of them. It is left where the cursor walked it, which is
+        // the same place the placements were composed from. The *line* matrix does not
+        // move: a `Td` after this starts a new line from where the last one began, not from
+        // the end of the text on it.
+        self.state.text_matrix = cursor;
     }
 
-    /// How far one glyph moves the pen, in text space.
+    /// How far one glyph moves the pen, in text-space units.
     ///
-    /// The specification's own formula: the glyph's width, which `/Widths` gives in
-    /// thousandths of an em, times the size, plus the two spacing terms, all scaled by
-    /// `Tz`. Word spacing applies to the space and to nothing else, which is what a
-    /// simple font's one-byte code 32 is.
+    /// The specification's own formula, `tx = ((w0 − Tj/1000)·Tfs + Tc + Tw)·Th`: the
+    /// glyph's declared width, which `/Widths` gives in thousandths of an em, times the
+    /// size, plus the two spacing terms, all scaled by the horizontal scale. The size
+    /// belongs here rather than in the text matrix because the text matrix's translation is
+    /// *not* scaled by the size — a `Td` means the same distance at every font size — so
+    /// the size has to be applied to the glyph's own width to land in the same units the
+    /// pen is already walking in.
     ///
-    /// A code the font says nothing about falls back to the conventional 500-unit
-    /// average, which is what the specification's default `/MissingWidth` amounts to for
-    /// layout purposes. A font that declares no widths at all therefore advances exactly
-    /// as it always has, which is a stated fallback rather than an accident.
+    /// Character and word spacing are stated in unscaled text-space units and are added as
+    /// they stand, which is what makes them the one term here with no size in it.
+    ///
+    /// Word spacing applies to the one code the specification names, and to nothing else: a
+    /// file that puts a wide space in its own text gets the glyph's width twice over if this
+    /// is applied to every code that happens to be a space.
+    ///
+    /// A code the font says nothing about falls back to the conventional 500-unit average,
+    /// which is what the specification's default `/MissingWidth` amounts to for layout
+    /// purposes. Nothing here divides by the size, so a missing or zero size costs nothing:
+    /// it makes the glyph's own term zero, which is what a zero-sized glyph is.
     fn glyph_advance(&self, code: u32) -> f64 {
         let text = &self.state.text;
-        let scale = text.horizontal_scale / 100.0;
-        let w0 = text
+        let declared = text
             .widths
             .as_ref()
-            .and_then(|widths| widths.width_of(code))
+            .and_then(|w| w.width_of(code))
             .unwrap_or(DEFAULT_WIDTH);
-        let spacing = if code == u32::from(b' ') {
+        let spacing = if code == WORD_SPACE {
             text.word_spacing
         } else {
             0.0
         };
-        (f64::from(w0) / 1000.0 * text.size + text.char_spacing + spacing) * scale
+        (f64::from(declared) / 1000.0 * text.size + text.char_spacing + spacing)
+            * text.horizontal_scale
+            / 100.0
     }
 }
-
-/// The width a glyph is given when nothing else says: half an em, the average of a
-/// lower-case letter.
-const DEFAULT_WIDTH: u16 = 500;
 
 fn intent_name(v: i64) -> String {
     match v {
@@ -946,6 +992,12 @@ mod tests {
         (0..95).map(|i| 200 + i * 7).collect()
     }
 
+    /// The same figure for every code, so that what moves a run is the spacing and
+    /// nothing else.
+    fn even_resources(width: i64) -> Resources {
+        font_resources(32, &vec![width; 95])
+    }
+
     /// The x of every glyph's placement, in order, across every show in the stream.
     fn glyph_x(data: &[u8], resources: &Resources) -> Vec<f64> {
         let out = run_with(&ContentStream::parse(data), resources);
@@ -959,13 +1011,13 @@ mod tests {
         xs
     }
 
-    /// The advance between two consecutive glyphs.
+    /// The advance between two consecutive glyphs, in text-space units.
     ///
-    /// A placement is the text rendering matrix, which already carries the font size, so
-    /// the distance between two of them is the advance that was applied times that size.
-    /// Dividing it out here rather than in each test says once what the numbers mean.
-    fn advance(from: f64, to: f64, size: f64) -> f64 {
-        (to - from) / size
+    /// A placement is the text rendering matrix composed from the text matrix at that
+    /// glyph, and the text matrix is unscaled by the font size, so the distance between two
+    /// placements *is* the advance that was applied to it. Nothing needs dividing out.
+    fn advance(from: f64, to: f64, _size: f64) -> f64 {
+        to - from
     }
 
     /// The x the text matrix was left at, which is where a following show continues.
@@ -974,6 +1026,20 @@ mod tests {
             .state
             .text_matrix
             .e
+    }
+
+    /// One show of `text` at `size`, after the text-state operators in `setup`.
+    fn show_at(size: &str, setup: &str, text: &str) -> Vec<u8> {
+        [
+            b"BT /F1 ".as_slice(),
+            size.as_bytes(),
+            b" Tf ".as_slice(),
+            setup.as_bytes(),
+            b" 0 0 Td (".as_slice(),
+            text.as_bytes(),
+            b") Tj ET".as_slice(),
+        ]
+        .concat()
     }
 
     #[test]
@@ -1154,10 +1220,233 @@ mod tests {
             plain[1]
         );
         assert!(
-            near(spaced[2] - plain[2], 20.0 * 10.0),
-            "the glyph after the space moved by the word spacing, scaled by the size: {} against {}",
+            near(spaced[2] - plain[2], 20.0),
+            "the glyph after the space moved by the word spacing, which is in unscaled \
+             text-space units: {} against {}",
             spaced[2],
             plain[2]
+        );
+    }
+
+    #[test]
+    fn a_glyph_of_half_an_em_advances_by_half_an_em_at_every_size() {
+        // The text matrix is *not* scaled by the font size, so the size has to be applied
+        // to the glyph's own width for the pen to move the right distance: a glyph of width
+        // 500 advances half an em at every size, and half an em of ten points is five.
+        // Every number below is what two independent renderers produce for the same file.
+        let resources = even_resources(500);
+        let gap = |size: &str| {
+            let xs = glyph_x(&show_at(size, "", "AA"), &resources);
+            assert_eq!(xs.len(), 2, "one placement per glyph");
+            xs[1] - xs[0]
+        };
+        for (size, want) in [("1", 0.5), ("10", 5.0), ("24", 12.0), ("100", 50.0)] {
+            assert!(
+                near(gap(size), want),
+                "half an em at a size of {size} is {want}: {}",
+                gap(size)
+            );
+        }
+        // The text matrix is left where the pen walked, which is the same place the
+        // placements were composed from. Two glyphs is two half ems.
+        assert!(
+            near(final_x(&show_at("10", "", "AA"), &resources), 10.0),
+            "the pen ends a whole em along at a size of ten"
+        );
+    }
+
+    #[test]
+    fn the_font_size_scales_the_glyph_and_not_the_position() {
+        // The two halves of the model, told apart. The *placement* grows with the size,
+        // because the font scale is in the rendering matrix. A `Td`, which sets the text
+        // matrix, does not: `Td 10 0` puts the text ten units along at every size. This is
+        // the asymmetry that makes the composition order matter, and it is what a `Td` in a
+        // real file means.
+        let resources = even_resources(500);
+        let origin = |size: &str| glyph_x(&show_at(size, "", "A"), &resources)[0];
+        assert!(
+            near(origin("1"), 0.0),
+            "at the origin, whichever size it is"
+        );
+        let placed = |size: &str| {
+            let stream = [
+                b"BT /F1 ".as_slice(),
+                size.as_bytes(),
+                b" Tf 10 0 Td (A) Tj ET".as_slice(),
+            ]
+            .concat();
+            glyph_x(&stream, &resources)[0]
+        };
+        for size in ["1", "10", "100"] {
+            assert!(
+                near(placed(size), 10.0),
+                "`Td 10 0` is ten units along at a size of {size}: {}",
+                placed(size)
+            );
+        }
+    }
+
+    #[test]
+    fn character_spacing_is_added_unscaled() {
+        // `Tc` is stated in unscaled text-space units and is added as it stands, which is
+        // why it is the one term in the advance with no size in it. The glyph's own width
+        // carries the size; the spacing does not.
+        let resources = even_resources(500);
+        let gap = |size: &str, setup: &str| {
+            let xs = glyph_x(&show_at(size, setup, "AA"), &resources);
+            xs[1] - xs[0]
+        };
+        for (size, want) in [("1000", 500.0 + 100.0), ("100", 50.0 + 100.0)] {
+            assert!(
+                near(gap(size, "100 Tc"), want),
+                "a width of 500 at a size of {size} plus 100 of character spacing: {}",
+                gap(size, "100 Tc")
+            );
+            assert!(
+                near(gap(size, ""), want - 100.0),
+                "and the same width without it, so the 100 is what moved the glyph"
+            );
+        }
+    }
+
+    #[test]
+    fn the_horizontal_scale_scales_the_whole_advance() {
+        // `Tz` multiplies the finished advance, spacing included, rather than each term:
+        // the specification's formula is one factor over the sum.
+        let resources = even_resources(500);
+        let gap = |setup: &str| {
+            let xs = glyph_x(&show_at("24", setup, "AA"), &resources);
+            xs[1] - xs[0]
+        };
+        assert!(near(gap(""), 12.0), "half an em at 24pt: {}", gap(""));
+        assert!(
+            near(gap("50 Tz"), 6.0),
+            "and half of it at 50%: {}",
+            gap("50 Tz")
+        );
+        assert!(
+            near(gap("200 Tz"), 24.0),
+            "and twice it at 200%: {}",
+            gap("200 Tz")
+        );
+        assert!(
+            near(gap("50 Tz 100 Tc"), 6.0 + 50.0),
+            "with the character spacing scaled too: {}",
+            gap("50 Tz 100 Tc")
+        );
+    }
+
+    #[test]
+    fn word_spacing_applies_to_code_32_and_to_nothing_else() {
+        // Two runs of the same three glyphs, one of `A B` and one of `AB `. The codes are
+        // the same three and the widths are equal, so the only thing that can tell them
+        // apart is the word spacing, and it is worth exactly the word spacing.
+        let resources = even_resources(500);
+        let end = |text: &str, setup: &str| final_x(&show_at("10", setup, text), &resources);
+        let longer = |text: &str| end(text, "20 Tw") - end(text, "0 Tw");
+        assert!(
+            near(longer("A B"), 20.0),
+            "the run with the space in it is a word spacing longer: {}",
+            end("A B", "20 Tw")
+        );
+        // A run with no code 32 in it gets no such term, however it is spaced out. `A B`
+        // and `ABA` are three glyphs of the same declared width, so the two differ by the
+        // word spacing and by nothing else.
+        assert!(
+            near(longer("ABA"), 0.0),
+            "a run with no code 32 is unaffected: {}",
+            end("ABA", "20 Tw")
+        );
+        assert!(
+            !near(longer("A B"), longer("ABA")),
+            "so the term is the word spacing and not the space's own width"
+        );
+    }
+
+    #[test]
+    fn a_tj_kern_is_in_thousandths_of_an_em() {
+        // A `TJ` number is a displacement of the pen in thousandths of an em of unscaled
+        // text space, so it scales with the size and subtracts. `-500` at 24 points is half
+        // an em of 12 units, and the second `A` lands at 24 rather than 12.
+        let resources = even_resources(500);
+        let stream = |size: &str| {
+            [
+                b"BT /F1 ".as_slice(),
+                size.as_bytes(),
+                b" Tf 0 0 Td [(A) -500 (A)] TJ ET".as_slice(),
+            ]
+            .concat()
+        };
+        let second = |size: &str| glyph_x(&stream(size), &resources)[1];
+        assert!(
+            near(second("24"), 24.0),
+            "a width of 12 plus half an em of 12: {}",
+            second("24")
+        );
+        assert!(
+            near(second("100"), 100.0),
+            "and fifty plus fifty at a size of 100: {}",
+            second("100")
+        );
+        // And the sign is the whole content of the rule: positive pulls the glyph closer.
+        let positive = [b"BT /F1 24 Tf 0 0 Td [(A) 500 (A)] TJ ET".as_slice()].concat();
+        assert!(
+            glyph_x(&positive, &resources)[1] < second("24"),
+            "a positive number pulls the following glyph closer"
+        );
+    }
+
+    #[test]
+    fn a_zero_font_size_produces_no_infinities() {
+        // Nothing in the advance divides by the size, so a missing or zero size costs
+        // nothing and must not put an infinity into a matrix a renderer will read.
+        let resources = even_resources(500);
+        let stream = show_at("0", "100 Tc 100 Tw", "AB");
+        let out = run_with(&ContentStream::parse(&stream), &resources);
+        let Mark::Glyphs { placements, .. } = &out.records.first().expect("a mark").mark else {
+            panic!("expected glyphs");
+        };
+        assert_eq!(placements.len(), 2);
+        for placement in placements {
+            for v in placement.to_array() {
+                assert!(v.is_finite(), "a finite placement, not {v}");
+            }
+        }
+        let x = final_x(&stream, &resources);
+        assert!(x.is_finite(), "and a finite text matrix, not {x}");
+        assert!(
+            near(x, 200.0),
+            "zero glyphs of width at a size of zero, plus the two spacing terms: {x}"
+        );
+    }
+
+    #[test]
+    fn a_second_show_continues_from_the_where_the_first_ended() {
+        // The pen carries across `Tj` operators, which is the whole point of advancing the
+        // text matrix rather than recomputing from the line matrix.
+        let resources = even_resources(500);
+        let first = show_at("24", "", "AB");
+        // The run is 24 units wide, so the next show begins there — not where the last
+        // glyph was *placed*, which is only 12, since the pen has moved on since.
+        let run = final_x(&first, &resources);
+        assert!(near(run, 24.0), "two half-em glyphs at a size of 24: {run}");
+        let continued = glyph_x(b"BT /F1 24 Tf 0 0 Td (AB) Tj (CD) Tj ET", &resources);
+        assert_eq!(continued.len(), 4, "two shows of two glyphs");
+        assert!(
+            near(continued[2], run),
+            "the second show starts where the first ended: {} against {run}",
+            continued[2]
+        );
+        // And the line matrix does not move, so a `Td` starts a new line from the beginning
+        // of this one rather than from the end of the text on it.
+        let new_line = glyph_x(
+            b"BT /F1 24 Tf 0 0 Td (AB) Tj 0 -50 Td (CD) Tj ET",
+            &resources,
+        );
+        assert!(
+            near(new_line[2], 0.0),
+            "a `Td` is relative to the line matrix: {}",
+            new_line[2]
         );
     }
 

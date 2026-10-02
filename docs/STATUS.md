@@ -142,12 +142,11 @@ Where the work actually is. Updated whenever a milestone moves.
    The renderer needs the real clip region, and the renderer is where it belongs: the
    interpreter's job is to say *what* was clipped, not to rasterise it.
 2. **Glyphs do not draw.** Advances are real — every width in the built-in tables was
-   checked against two independent renderers and against Adobe's own metrics — but a
-   `Mark::Glyphs` is still skipped, so a page of text is a page with nothing on it. The
-   remaining work is the outlines: TrueType, then CFF and Type 1. One thing must be settled
-   first, though: the text rendering matrix already scales by the font size, while the
-   advance is added unscaled, so the placements and the advance disagree by a factor of the
-   size. Nothing shows it yet because nothing draws.
+   checked against two independent renderers and against Adobe's own metrics — and the
+   placements now agree with `mutool` on every combination of size, `Tz`, `Tc`, `Tw`,
+   rise and `TJ` kerning, so the text model is settled. A `Mark::Glyphs` is still skipped
+   though, so a page of text is a page with nothing on it. What remains is the outlines:
+   TrueType, then CFF and Type 1.
 3. **JBIG2 and JPEG 2000 have no decoder.** An image needing one is reported by name rather
    than drawn as a blank rectangle, because a page with a conspicuous hole is a bug report
    and a page with a missing photograph is a wrong answer. CCITT does decode, through the

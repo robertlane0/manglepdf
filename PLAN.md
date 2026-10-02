@@ -48,9 +48,9 @@ The spine is where the architecture is decided, so it is built first and deeply.
 
 ## Immediate queue
 
-1. **Settle the text scale and then draw glyph outlines** (F19–F21). The placements and the
-   advance currently disagree by a factor of the font size, and until that is resolved
-   nothing can be drawn correctly. Then TrueType outlines, then CFF and Type 1.
+1. **Draw glyph outlines** (F19–F21). The text model is settled and checked against an
+   independent renderer: the text matrix is unscaled, the advance carries the size, and the
+   two compose in that order. Then TrueType outlines, then CFF and Type 1.
 2. **A real clip region** rather than the clip path's bounding box. The renderer is where it
    belongs: the interpreter's job is to say what was clipped.
 3. **Patterns**: the tiling loop and the colour-space converter, for the painting and
@@ -62,7 +62,8 @@ The spine is where the architecture is decided, so it is built first and deeply.
 6. Tier-A fixtures for the remaining catalogue entries, then Tier B with `SOURCES.md`.
 
 Settled and no longer queued: images decode and draw, axial and radial shadings paint, the
-clip bounds are transformed by exactly one matrix, and the standard-14 width tables are
-verified rather than trusted — every one of the 1043 widths was measured against two
-independent renderers and Adobe's own metrics, so nobody should re-derive them from a local
-URW clone.
+clip bounds are transformed by exactly one matrix, the text matrix and the font size no
+longer double-count (a `TJ` kern also displaces the glyph that follows it, not the one at
+the same index), and the standard-14 width tables are verified rather than trusted — every
+one of the 1043 widths was measured against two independent renderers and Adobe's own
+metrics, so nobody should re-derive them from a local URW clone.

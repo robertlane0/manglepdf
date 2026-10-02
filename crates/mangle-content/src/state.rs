@@ -651,6 +651,19 @@ impl GraphicsState {
         self.move_text(0.0, -leading);
     }
 
+    /// The font's scale: the size, the horizontal scale and the rise.
+    ///
+    /// `[Tfs*Th 0 0 Tfs 0 Ts]`, the innermost of the three factors in the text rendering
+    /// matrix. The size enters the model here, acting on the glyph outline; the text matrix
+    /// itself stays unscaled, which is why a glyph's own width is multiplied by the size
+    /// when the pen advances rather than the text matrix being scaled as a whole.
+    #[must_use]
+    pub fn text_font_scale(&self) -> Matrix {
+        let size = self.text.size;
+        let th = self.text.horizontal_scale / 100.0;
+        Matrix::new(size * th, 0.0, 0.0, size, 0.0, self.text.rise)
+    }
+
     /// The text rendering matrix: the transformation, the text matrix, and the size and
     /// rise. This is the matrix a glyph is drawn through.
     ///
@@ -658,11 +671,22 @@ impl GraphicsState {
     /// two shows in a row continue while a `Td` starts a new line from the line matrix.
     #[must_use]
     pub fn text_rendering_matrix(&self) -> Matrix {
-        let size = self.text.size;
-        let rise = self.text.rise;
-        self.ctm
-            .concat(self.text_matrix)
-            .concat(Matrix::new(size, 0.0, 0.0, size, 0.0, rise))
+        self.text_rendering_matrix_for(&self.text_matrix)
+    }
+
+    /// The text rendering matrix for a text matrix other than the current one, which is
+    /// what a glyph part way through a run needs: its position is not where the state
+    /// says it is.
+    ///
+    /// `[Tfs*Th 0 0 Tfs 0 Ts] × Tm × CTM`. `concat` applies its right-hand argument first,
+    /// so this reads back to front: the font scale is innermost, acting on the glyph's
+    /// em-space outline, then the text matrix places it, then the CTM. The font scale being
+    /// innermost is the point: it stretches the *glyph*, never the pen's position, so a `Td`
+    /// means the same distance whatever the font size is, while the glyph still comes out
+    /// the right size on the page.
+    #[must_use]
+    pub fn text_rendering_matrix_for(&self, text_matrix: &Matrix) -> Matrix {
+        self.ctm.concat(*text_matrix).concat(self.text_font_scale())
     }
 
     /// `cm`.
