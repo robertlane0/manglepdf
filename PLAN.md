@@ -48,9 +48,8 @@ The spine is where the architecture is decided, so it is built first and deeply.
 
 ## Immediate queue
 
-1. **Draw glyph outlines** (F19–F21). The text model is settled and checked against an
-   independent renderer: the text matrix is unscaled, the advance carries the size, and the
-   two compose in that order. Then TrueType outlines, then CFF and Type 1.
+1. **The font kinds** (F19–F21): CFF and Type 1 charstrings, then the standard fourteen,
+   then Type 3, then two-byte codes. TrueType is done and compared against an oracle.
 2. **A real clip region** rather than the clip path's bounding box. The renderer is where it
    belongs: the interpreter's job is to say what was clipped.
 3. **Patterns**: the tiling loop and the colour-space converter, for the painting and
@@ -59,11 +58,21 @@ The spine is where the architecture is decided, so it is built first and deeply.
    not going to be built.
 5. **Fill the Inspector's right-hand region** from the object model, which is the window work
    that has not been started.
-6. Tier-A fixtures for the remaining catalogue entries, then Tier B with `SOURCES.md`.
+6. **Break the symmetry of the fixtures.** Every Tier-A fixture so far is symmetric about the
+   page centre, which is why four separate arithmetic errors passed the oracle comparisons.
+   Off-centre and asymmetric pages are a fixture requirement now, not a nicety.
+7. Tier B with `SOURCES.md`: a real-world corpus, which is the only way to find the encoding
+   problems a hand-written fixture cannot express.
 
 Settled and no longer queued: images decode and draw, axial and radial shadings paint, the
-clip bounds are transformed by exactly one matrix, the text matrix and the font size no
-longer double-count (a `TJ` kern also displaces the glyph that follows it, not the one at
-the same index), and the standard-14 width tables are verified rather than trusted — every
-one of the 1043 widths was measured against two independent renderers and Adobe's own
-metrics, so nobody should re-derive them from a local URW clone.
+clip bounds are transformed by exactly one matrix, glyphs fill from embedded TrueType
+outlines through the same filler a path uses, the text matrix and the font size no longer
+double-count (a `TJ` kern also displaces the glyph that follows it, not the one at the same
+index), and the standard-14 width tables are verified rather than trusted — every one of the
+1043 widths was measured against two independent renderers and Adobe's own metrics, so
+nobody should re-derive them from a local URW clone.
+
+One loose end on the write side: `StreamCompression::Flate` is defined but not wired into
+`encode_stream`, so a stream chosen for writing is not compressed. What the compressor now
+emits is a zlib stream, which `/FlateDecode` names and three other programs can read, so the
+work left is the call site rather than the format.

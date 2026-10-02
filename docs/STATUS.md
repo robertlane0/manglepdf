@@ -2,6 +2,14 @@
 
 Where the work actually is. Updated whenever a milestone moves.
 
+A word about the tests here, because it is the pattern rather than any single finding. Four
+of the real defects this project has had were invisible to its own suite and were found by
+comparing against something outside: a page rendered at scale squared, a clip transformed
+twice, a test helper missing an absolute value, and a compression format that only this
+project could read. Each was masked by the same thing — fixtures written to be simple, and
+therefore symmetric. A symmetric page renders correctly even when it is rendered wrongly, so
+the shape of a fixture decides how much of a renderer's arithmetic it actually exercises.
+
 ## Milestones
 
 | M | Deliverable | State |
@@ -42,6 +50,18 @@ Where the work actually is. Updated whenever a milestone moves.
   a deletion and carries `/ID` forward.
 - **`mangle-doc`** — the page tree with attribute inheritance, name trees, outlines and
   destinations, page labels, optional-content groups, attachments and metadata.
+- **`mangle-font`** — font programs, encodings, metrics, and the outlines a glyph is filled
+  from.
+  **Metrics** are real: `/Widths` indexed from `/FirstChar`, the descriptor's
+  `/MissingWidth` for a code the run does not reach, and the fourteen standard fonts built
+  in. Every width in every table was checked against two independent renderers and against
+  Adobe's own metrics files, which is how `fraction` in Helvetica was caught carrying the
+  width of a locally-installed metrically-similar clone — 278 where Adobe says 167. All 1043
+  widths now agree with the metrics files. **Outlines** come from embedded TrueType through
+  a table walk: the (3,0), (1,0) and (3,1) cmaps in that order, falling back to treating the
+  character code as a glyph index, which is what a subsetted symbolic font needs. Outlines
+  are returned in ems and scaled by the em size, and the composite glyphs TrueType's format
+  is full of come out whole.
 - **`mangle-content`** — content streams. Every token, every operator and every mark
   carries the bytes it came from, which is what makes a selection a byte range and an
   edit a single rewrite. The operator table is the specification's, the graphics state is
@@ -99,7 +119,7 @@ Where the work actually is. Updated whenever a milestone moves.
 
 ## Tests
 
-534, none ignored, no warnings. Eight kinds matter:
+577, none ignored, no warnings. Ten kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -107,6 +127,11 @@ Where the work actually is. Updated whenever a milestone moves.
 - **Oracle** — `qpdf` reads what we write. It caught a wrong `/Size`, a cross-reference
   that padded sparse numbering, and a fixture that was wrong rather than damaged. When
   `qpdf` is absent these tests skip and say so; `cargo test` never needs it.
+- **What we write, read by something else** — a file this project produces, with its content
+  stream compressed, opened by `mutool draw`, `qpdf --check` and `pdfinfo`. This found that
+  the compressor emitted raw DEFLATE where `/FlateDecode` names zlib, so a file we wrote
+  could not be read by any other program. It turned out to be bidirectional: the decompressor
+  had no zlib handling either, so a real-world PDF would not have decoded here either.
 - **Corpus** — every Tier-A fixture is opened and checked against its manifest: the
   hash, the page count, whether a repair happened, whether a save reports a dangling
   reference, and that the secrets in `F33` really are in the file.
@@ -130,6 +155,11 @@ Where the work actually is. Updated whenever a milestone moves.
   flattened onto one background first, because `mutool` writes an unpainted page as
   transparent and this renderer writes white paper, and comparing raw buffers would compare
   conventions rather than renderers. Skipped cleanly when `mutool` is absent.
+- **The text model against another renderer** — 400 cases through `mutool draw -F trace`,
+  compared glyph position by glyph position, failing loudly rather than skipping when the
+  renderer is absent so that it cannot pass by having nothing to compare against. This is
+  what found a `TJ` kern displacing the wrong glyph, kerns ignoring a horizontal scale, and
+  the font size being applied twice.
 - **Widths against two other renderers** — the standard fonts' metrics are checked by
   measuring where a real renderer puts each glyph, not by reading the table back. One
   transcription error was found this way: `fraction` in Helvetica had the width of the URW
@@ -143,29 +173,34 @@ Where the work actually is. Updated whenever a milestone moves.
    should rather than slightly less. A diagonal clip and a circular one are both boxes now.
    The renderer needs the real clip region, and the renderer is where it belongs: the
    interpreter's job is to say *what* was clipped, not to rasterise it.
-2. **CFF and Type 1 glyphs do not draw.** Embedded TrueType does: `mangle-font` reads the
-   `/FontFile2`, walks the glyph — composites come out whole, because `ttf-parser` follows
-   the component list — and the renderer fills the outline through the same filler a path
-   uses, with the glyph's own text rendering matrix. A page of text in an embedded
-   TrueType font scores 0.962 against `mutool` at 150 DPI, so this is compared rather than
-   assumed. What remains: the outlines of a `/FontFile3` (CFF, and OpenType with `CFF `),
-   the standard fourteen, and Type 0 with Identity-H, whose two-byte codes the interpreter
-   does not yet split.
-3. **JBIG2 and JPEG 2000 have no decoder.** An image needing one is reported by name rather
+2. **Only embedded TrueType outlines draw.** A glyph is filled from a `/FontFile2` program
+   and compared against `mutool` at 0.962 SSIM. Four kinds are still missing: the standard
+   fourteen, which have no program at all; CFF and Type 1, which need a charstring
+   interpreter rather than a table walk; Type 3, whose glyphs are content streams; and
+   composite fonts (Type 0 and Identity-H), whose character codes are two bytes rather than
+   one. A page using one is reported rather than drawn blank.
+3. **The font size is applied once, in one place, and the model is tested against another
+   renderer.** The text matrix is measured in ems and carries no font size; the size enters
+   when a glyph is drawn. The model is pinned by a differential test over 400 cases against
+   `mutool draw -F trace`, which is how the last three text bugs were found and how the
+   first attempt at this model was shown to be wrong: the specification's `Tc` and `Tw` are
+   added raw, not divided by the size, and getting that backwards matched 29 of 400 cases
+   where the implemented model matches all 400.
+4. **JBIG2 and JPEG 2000 have no decoder.** An image needing one is reported by name rather
    than drawn as a blank rectangle, because a page with a conspicuous hole is a bug report
    and a page with a missing photograph is a wrong answer. CCITT does decode, through the
    filter crate.
-4. **Tiling patterns and mesh shadings draw nothing.** A shading names one of types 1, 4, 5,
+5. **Tiling patterns and mesh shadings draw nothing.** A shading names one of types 1, 4, 5,
    6 or 7, or a pattern needs a tiling loop, and each is reported as a note against the mark
    rather than skipped silently, so a page that used one is visibly incomplete instead of
    quietly wrong. Images and axial/radial shadings now draw.
-5. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
+6. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the marks the content layer produces.
-6. **An object that came out of an object stream cannot keep its original bytes**,
+7. **An object that came out of an object stream cannot keep its original bytes**,
    because it had none: it was compressed with everything else in its container. A full
    save writes it as a direct object, which every reader accepts but which is a
    re-serialisation rather than a copy.
-7. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
+8. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
 
 ## Known limitations in the finished layers
 

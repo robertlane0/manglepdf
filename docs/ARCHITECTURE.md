@@ -57,7 +57,25 @@ The same discipline explains the clip, and its history. Clip bounds are recorded
 interpreter with the CTM already applied, so the renderer applies only the page placement.
 This is worth writing down because the two spaces coincide under an identity CTM, which is
 every fixture in the repository, so a missing or duplicated transform is invisible exactly
-where a test is most likely to be written.
+where a test is most likely to be written; a page under a scaled CTM is now a regression
+test of its own.
+
+## The text model
+
+Text is the one place where two different scales are legitimately in play at once, and
+almost every bug in a text renderer comes from applying one of them twice or not at all.
+
+The text matrix is measured in ems and carries no font size. That sounds like a detail and
+is not: it is what lets a glyph be half a unit wide and still come out ten points wide on
+the page, because the size arrives afterwards, when the glyph is drawn. Character spacing
+and word spacing are the exception the specification makes — it states both in *unscaled*
+text-space units — and they are therefore added as they stand, while the glyph's own width
+carries the size. Treating them the same as the width, or the same as each other, is the bug.
+
+The model here is pinned against `mutool` over several hundred cases rather than against a
+reading of the specification, and that is deliberate. The first attempt at getting this right
+was derived from the specification by someone confident, and it matched twenty-nine cases
+out of four hundred. Where an independent implementation can be asked, it should be asked.
 
 ## Losslessness
 
