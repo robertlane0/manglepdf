@@ -75,6 +75,56 @@ wrong glyph rather than an error:
   a Top DICT declaring `CharstringType 1` both build one glyph from two others *by name* and
   are refused for the same reason.
 
+## Type 1 charstrings (settled)
+
+A Type 1 font is a PostScript program that happens to be stored in two encrypted halves, so
+reading a glyph means three things in order: find `eexec`, undo the outer cipher, undo a
+second inner cipher over the charstrings. Each layer is `p = c XOR (r >> 8)` with
+`r = ((c + r) * 52845 + 22719) mod 65536` — and the recurrence is fed the **ciphertext**
+byte, which is the one place the algorithm can be read two ways and the wrong reading still
+produces printable output. The seeds are what separate the layers: 55665 for `eexec`, whose
+first four plaintext bytes are a salt to discard, and 4330 for the charstrings, advanced
+`lenIV - 4` times, which is why the usual `lenIV` of 4 — and a font that mentions none —
+needs no advance at all.
+
+Five things are worth recording, because the wrong version of any of them produces a
+*plausible* wrong glyph rather than an error:
+
+- **`hvcurveto` and `vhcurveto` take four operands whose fourth is the endpoint's x for
+  one and its y for the other** (`dy1 dx2 dy2 dx3` and `dx1 dx2 dy2 dy3`). Reading the fourth
+  and fifth the wrong way round swaps them, which turns every round letter into a shape that
+  closes and does not match. Cost 0.15 of SSIM on a page of ordinary text before it was found.
+- **`hsbw`'s first operand says where the outline sits relative to the pen**, and the
+  charstring's coordinates do not include it. Leaving it out puts every glyph a whole
+  sidebearing to the left of where it belongs.
+- **There is no subroutine-number bias.** Adding CFF's lands on a different, in-range
+  subroutine and runs the wrong program.
+- **A hint mask's length is a property of the code it is written in**: a subroutine's mask
+  covers the stems *that subroutine* declared, so it is empty unless it declares stems of its
+  own. Reading it from the caller's running total skips bytes that belong to the subroutine's
+  operators, which turns the standard hint-replacement subroutine into a prefix of nonsense.
+- **The absolute-`dy` convention is not applied, and that is measured rather than assumed.**
+  The specification records that the last `dy` of the first `rrcurveto` after a mover is an
+  absolute y. Every one of the 28 Type 1 faces installed here was converted from a CFF
+  outline and is written to the *other* convention, and applying the rule moves the endpoint
+  of the first curve in 18 of the 94 printable ASCII glyphs of `NimbusSans-Regular`. The same
+  face is installed as OpenType/CFF and can be compared glyph by glyph: 18 mismatches with the
+  convention applied, 2 without, and `mutool` — the oracle the acceptance criteria name —
+  agrees with the reading without it.
+
+**Refused, each with a reason rather than a wrong shape:** a PostScript `OtherSubrs`
+procedure with no conventional number (the four that have one — the flex at 0, 1 and 2, and
+hint replacement at 3 — are implemented); Multiple Master `callothersubr` 14–28; `seac`;
+operator 15, which is reserved and undocumented; and a PFB container, whose segment headers
+are not stripped. **Hint replacement is refused and nothing else is**: it asks for the stem
+hints to be recomputed for a rasterizer's pixel grid, this renderer computes exact analytic
+coverage and has no grid, so the hint is dropped and the glyph's geometry is untouched.
+
+A page's own `/Encoding` with `/Differences` is *not* consulted — the font's own `/Encoding`
+is, which is what makes a Type 1 program able to resolve a character code at all where a bare
+CFF cannot. Reading `/Differences` here and nowhere else would make this the only place a
+page's encoding is honoured for any font type.
+
 ## Milestone map (detail in GOAL §10)
 
 | M | Deliverable | Gate it unlocks |
@@ -95,8 +145,8 @@ wrong glyph rather than an error:
 
 ## Immediate queue
 
-1. **The font kinds** (F19–F21): Type 1 charstrings next, then the standard fourteen, then
-   Type 3. TrueType is done and compared against an oracle, and two-byte codes are done with
+1. **The font kinds** (F19–F21): the standard fourteen next, then Type 3. Type 1 is done
+   and compared against an oracle at 0.982 SSIM. TrueType is done and compared against an oracle, and two-byte codes are done with
    it: a composite font's string is split into two-byte CIDs, the pen advances by each CID's
    own entry in the descendant's run-length `/W`, and the mark carries the codes and their
    width so no consumer has to guess (0.99225 SSIM against `mutool`). CFF is done too, and

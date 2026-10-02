@@ -471,14 +471,19 @@ impl std::fmt::Debug for FontProgram {
 /// font program is compressed exactly as an image is and a second filter chain would be a
 /// second set of bugs.
 ///
-/// **Two keys, and the difference between them is the whole of the font's geometry.** A
+/// **Three keys, and the difference between them is the whole of the font's geometry.** A
 /// `/FontFile2` is a TrueType program; a `/FontFile3` is a CFF one, whose glyphs are Type 2
-/// charstrings that have to be executed rather than points that can be walked. The
-/// descriptor names the key, and the key is named in the reason when there is none, because
-/// "this font is not embedded" and "this font is embedded in a form this does not read" are
-/// different findings.
+/// charstrings that have to be executed rather than points that can be walked; and a
+/// `/FontFile` is Type 1, which is neither — a PostScript program encrypted twice, with a
+/// third charstring dialect inside the second layer. The descriptor names the key, and the
+/// key is named in the reason when there is none, because "this font is not embedded" and
+/// "this font is embedded in a form this does not read" are different findings.
 ///
-/// A font with neither is not a failure. The standard fourteen have none by definition, and a
+/// The three are tried in that order — 3, then 2, then 1 — which is the order the keys were
+/// added to the format and the only order that matters: a descriptor names at most one of
+/// them, so the first that is present is the one.
+///
+/// A font with none is not a failure. The standard fourteen have none by definition, and a
 /// document that names one without embedding it is a document whose glyphs come from
 /// somewhere else — a substitution, or a font of its own that this does not draw. Either way
 /// the reason belongs in the report, and the page is still worth showing.
@@ -519,7 +524,7 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
              font program from"
         ));
     };
-    let key = ["FontFile2", "FontFile3"]
+    let key = ["FontFile3", "FontFile2", "FontFile"]
         .into_iter()
         .find(|key| descriptor.get(key).is_some());
     let Some(key) = key else {

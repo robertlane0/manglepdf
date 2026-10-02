@@ -20,10 +20,12 @@
 pub mod cff;
 pub mod metrics;
 pub mod outline;
+pub mod type1;
 
 pub use cff::{Cff, MAX_DEPTH as CFF_MAX_DEPTH, MAX_STACK as CFF_MAX_STACK};
 pub use metrics::{
     ASCII_START, CidWidths, Declared, DeclaredWidths, STANDARD_14, Widths, ascii_glyphs, by_name,
     standard_glyph, widths,
 };
-pub use outline::{Outline, Program, Segment, em_scale, from_cff, from_true_type};
+pub use outline::{Outline, Program, Segment, em_scale, from_cff, from_true_type, from_type1};
+pub use type1::{MAX_DEPTH as TYPE1_MAX_DEPTH, MAX_STACK as TYPE1_MAX_STACK, Type1};

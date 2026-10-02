@@ -17,7 +17,7 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
 | **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw; patterns and the standard fourteen still draw nothing |
-| **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint, and TrueType, composite and CFF outlines all draw. Type 1 charstrings, the standard fourteen, Type 3, mesh shadings, tiling patterns and transparency do not |
+| **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint, and TrueType, composite, CFF and Type 1 outlines all draw. The standard fourteen, Type 3, mesh shadings, tiling patterns and transparency do not |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
 
@@ -163,7 +163,7 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Tests
 
-637, none ignored, no warnings. Ten kinds matter:
+662, none ignored, no warnings. Ten kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -262,6 +262,18 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   none differ — and the subroutine bias is tested at 107, 1131 and 32768 *and at 1239, 1240
   and 33 900 subroutines*, because the boundaries are where an off-by-one lives and one
   sample inside a range cannot see one.
+- **Every glyph of every Type 1 font on the machine, against the same face in OpenType** —
+  the 28 URW and Nimbus faces are installed twice on a machine that has Ghostscript: once as
+  bare PFA programs, which is what a `/FontFile` carries, and once as OpenType/CFF. Both
+  readers are ours and both were written from a specification, so a disagreement between them
+  is a disagreement between two readings of the same outlines. All 28 609 glyphs of six fonts
+  walk with no refusal and no coordinate outside four ems, and 376 glyphs across four fonts
+  agree with their twins. This is what found that `hvcurveto` and `vhcurveto` take four
+  operands of which the *fourth* is the endpoint's x for the vertical one and its y for the
+  horizontal one — reading them the other way round swaps the two and turns every round letter
+  into a shape that closes and does not match. It cost 0.15 of SSIM on a page of ordinary
+  text. The same test found that `hsbw`'s first operand says where the outline sits relative
+  to the pen, which the charstring's own coordinates do not include.
 - **Widths against two other renderers** — the standard fonts' metrics are checked by
   measuring where a real renderer puts each glyph, not by reading the table back. One
   transcription error was found this way: `fraction` in Helvetica had the width of the URW

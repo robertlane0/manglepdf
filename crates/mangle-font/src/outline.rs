@@ -28,14 +28,17 @@
 //!
 //! A `/FontFile2` is TrueType and this module reads it through `ttf-parser`. A `/FontFile3`
 //! is CFF, and its glyphs are not points in a table but Type 2 *programs* that have to be
-//! executed; that reader is [`crate::cff`]. Both answer the same question in the same units,
-//! so [`Program`] is what asks which of them it has and does not care. A program that is
-//! neither is a `None` with a reason attached rather than an empty path, because "this file
-//! has no glyph I can draw" and "this file is not a font" are different findings.
+//! executed; that reader is [`crate::cff`]. A `/FontFile` is Type 1, which is a third thing
+//! again — a PostScript program encrypted twice, with a third charstring dialect inside the
+//! second layer — and that reader is [`crate::type1`]. All three answer the same question in
+//! the same units, so [`Program`] is what asks which of them it has and does not care. A
+//! program that is none is a `None` with a reason attached rather than an empty path, because
+//! "this file has no glyph I can draw" and "this file is not a font" are different findings.
 
 use ttf_parser::{Face, GlyphId, OutlineBuilder, PlatformId};
 
 use crate::cff::{self, Cff};
+use crate::type1::Type1;
 
 /// A glyph's outline, in ems, ready to be transformed onto a page.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -121,10 +124,12 @@ enum Kind {
     TrueType,
     /// CFF outlines, read by executing Type 2 charstrings.
     Cff,
+    /// Type 1 outlines, read by undoing two ciphers and executing Type 1 charstrings.
+    Type1,
 }
 
 impl Program {
-    /// A font program, as the bytes of a `/FontFile2` or `/FontFile3` stream.
+    /// A font program, as the bytes of a `/FontFile`, `/FontFile2` or `/FontFile3` stream.
     #[must_use]
     pub fn new(data: Vec<u8>) -> Self {
         Self {
@@ -162,13 +167,34 @@ impl Program {
 
     /// The one answer to "what is this", used by everything above so that the em, the
     /// outlines and the widths cannot disagree about it.
+    ///
+    /// The three kinds are told apart by what they start with, in this order, because each
+    /// test is cheap and each one is decisive: a `CFF ` table begins with its own major
+    /// version, a Type 1 program begins with a PostScript magic comment, and an `sfnt`
+    /// begins with a signature that is neither.
     fn read(&self) -> Result<(u16, Kind), String> {
         if let Some(table) = cff::cff_bytes(&self.data) {
             let cff = Cff::parse(table, 0).map_err(|why| format!("it is CFF but {why}"))?;
             return Ok((cff::units_from_matrix(&cff.font_matrix), Kind::Cff));
         }
+        if self.data.first() == Some(&b'%') {
+            let font = Type1::parse(&self.data).map_err(|why| format!("it is Type 1 but {why}"))?;
+            return Ok((cff::units_from_matrix(&font.font_matrix()), Kind::Type1));
+        }
         let face = Face::parse(&self.data, 0).map_err(|why| format!("it is not a font: {why}"))?;
         Ok((face.units_per_em(), Kind::TrueType))
+    }
+
+    /// The parsed font, for the one kind whose reader is not reached through a table.
+    ///
+    /// A Type 1 program is re-parsed rather than stored, for the same reason a CFF one is:
+    /// both borrow their bytes, and a page has a `Program` per font resource that outlives
+    /// the call that made it.
+    fn type1(&self) -> Option<Type1> {
+        if self.data.first() == Some(&b'%') {
+            return Type1::parse(&self.data).ok();
+        }
+        None
     }
 
     /// Why a character code cannot be turned into a glyph here, if it cannot.
@@ -181,6 +207,12 @@ impl Program {
     pub fn code_refusal(&mut self) -> Option<String> {
         if let Err(reason) = self.inspect() {
             return Some(reason);
+        }
+        // A Type 1 font carries its own encoding in its cleartext header and a glyph is
+        // named in its `CharStrings` dictionary, so a code reaches a glyph without any table
+        // this does not read. Both name-keyed and CID-keyed are answerable.
+        if self.type1().is_some() {
+            return None;
         }
         let table = cff::cff_bytes(&self.data)?;
         // A CID-keyed font resolves an identifier through its charset, and the only
@@ -218,13 +250,16 @@ impl Program {
 
     /// One glyph's outline, from whichever reader this program needs.
     fn computed_outline(&self, glyph: u32) -> Option<Outline> {
-        match cff::cff_bytes(&self.data) {
+        if let Some(table) = cff::cff_bytes(&self.data) {
             // A CFF outline is only known once its charstring has been executed, and a
             // charstring that refuses is a glyph that is not drawn rather than a glyph
             // drawn wrongly.
-            Some(table) => Cff::parse(table, 0).ok()?.outline(glyph).ok(),
-            None => outline_of(&self.data, 0, glyph).map(|(o, _)| o),
+            return Cff::parse(table, 0).ok()?.outline(glyph).ok();
         }
+        if let Some(font) = self.type1() {
+            return font.outline(glyph).ok();
+        }
+        outline_of(&self.data, 0, glyph).map(|(o, _)| o)
     }
 
     /// The outline one character code names, in ems, and the font's units per em.
@@ -249,6 +284,11 @@ impl Program {
     pub fn advance(&self, glyph: u32) -> Option<u16> {
         if let Some(table) = cff::cff_bytes(&self.data) {
             return Cff::parse(table, 0).ok()?.advance(glyph).ok();
+        }
+        // A Type 1 glyph's width is its own `hsbw`, in glyph units, and the font's matrix
+        // scales those to ems — the same arithmetic as the CFF answer above.
+        if let Some(font) = self.type1() {
+            return font.advance(glyph).ok();
         }
         let face = Face::parse(&self.data, 0).ok()?;
         face.glyph_hor_advance(GlyphId(checked(glyph, face.number_of_glyphs())))
@@ -285,6 +325,9 @@ impl Program {
     /// said so.
     #[must_use]
     pub fn glyph_for_code(&self, code: u32) -> Option<u32> {
+        if let Some(font) = self.type1() {
+            return font.glyph_for_code(code);
+        }
         match Face::parse(&self.data, 0) {
             Ok(face) => {
                 if let Some(found) = glyph_from_subtables(&face, code) {
@@ -411,6 +454,23 @@ pub fn from_cff(data: &[u8], index: u32) -> Option<(Outline, u16)> {
     let cff = Cff::parse(table, index).ok()?;
     let outline = cff.outline(0).ok()?;
     Some((outline, cff::units_from_matrix(&cff.font_matrix)))
+}
+
+/// The outline of glyph zero of a Type 1 font program, in ems, and the font's units per em.
+///
+/// The third of the three constructors, and the answer in the same units. `data` is the bare
+/// PostScript a `/FontFile` carries: the cleartext header followed by the `eexec`-encrypted
+/// private DICT and charstrings. A `.pfb` container wraps the same program in segment headers
+/// and is refused rather than mis-parsed, so this answers `None` for one.
+///
+/// `None` when the bytes are not a Type 1 font, which includes a font whose charstrings name
+/// an `OtherSubrs` procedure this does not run — a wrong glyph for every character in it
+/// being a worse answer than no glyph.
+#[must_use]
+pub fn from_type1(data: &[u8]) -> Option<(Outline, u16)> {
+    let font = Type1::parse(data).ok()?;
+    let outline = font.outline(0).ok()?;
+    Some((outline, cff::units_from_matrix(&font.font_matrix())))
 }
 
 /// The outline of one glyph of one face, in ems, and the font's units per em.

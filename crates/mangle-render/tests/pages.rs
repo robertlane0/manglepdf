@@ -2453,3 +2453,269 @@ fn a_bare_name_keyed_cff_font_reports_why_it_cannot_draw() {
         render.notes
     );
 }
+
+// ── Type 1 fonts: PostScript, encrypted twice ─────────────────────────────────────
+
+/// Where a Type 1 font might be, most-likely first.
+///
+/// Ghostscript's resource directory holds the URW and Nimbus faces as **bare PFA programs**,
+/// which is exactly what a `/FontFile` carries. A Linux distribution's own `type1`
+/// directory is usually empty — the outlines ship as OpenType — so Ghostscript's copy is
+/// where a real one is found.
+const TYPE1_CANDIDATES: [&str; 5] = [
+    "/usr/share/ghostscript/Resource/Font/NimbusSans-Regular",
+    "/usr/share/ghostscript/Resource/Font/NimbusRoman-Regular",
+    "/usr/share/ghostscript/Resource/Font/NimbusMonoPS-Regular",
+    "/usr/share/ghostscript/Resource/Font/URWGothic-Book",
+    "/usr/share/ghostscript/Resource/Font/P052-Roman",
+];
+
+/// A Type 1 font program to embed in a `/FontFile`, or the reason there is none.
+fn type1_font() -> Result<Vec<u8>, String> {
+    for path in TYPE1_CANDIDATES {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        if mangle_font::Program::new(bytes.clone()).inspect().is_ok() {
+            return Ok(bytes);
+        }
+    }
+    Err(format!(
+        "no Type 1 font found; looked in {}",
+        TYPE1_CANDIDATES.join(", ")
+    ))
+}
+
+/// The lines the Type 1 fixture shows, in the order the content stream writes them.
+///
+/// **Deliberately asymmetric, and the asymmetry is the point.** Three lines of different
+/// lengths at three different sizes, starting at three different x positions, and a filled
+/// rectangle in one corner. A symmetric fixture — the same word repeated, centred, evenly
+/// spaced, on white — scores well against a renderer that draws the *wrong* glyphs, because
+/// the error is a mirror image of itself and the two cancel. This one cannot be got right by
+/// accident: a glyph offset by a mis-decrypted `eexec` layer, a first `rrcurveto` whose last
+/// y was read as a delta rather than a position, or an outline scaled by the em twice, each
+/// moves ink to where there is none and SSIM notices.
+const TYPE1_LINES: [Line; 3] = [
+    Line {
+        text: "Hamburgefonstiv",
+        size: 34.0,
+        at: (18.0, 96.0),
+    },
+    Line {
+        text: "Qqjx 0258 @",
+        size: 19.0,
+        at: (33.0, 57.0),
+    },
+    Line {
+        text: "Bg",
+        size: 52.0,
+        at: (274.0, 33.0),
+    },
+];
+
+/// A page set in an embedded Type 1 font, with a shape in one corner.
+///
+/// The font is embedded whole rather than subset, and no `/Encoding` is written: a simple font
+/// with none is addressed through the font's *own* built-in encoding, which is what both this
+/// renderer and the oracle do, so the comparison is about glyph shapes and not about two
+/// different encodings. The shape is there so that part of the page is *not* text — without
+/// it the comparison is only ever about glyphs, and a fixture that cannot tell "nothing was
+/// drawn" from "the page is blank" is a fixture that scores well when everything fails.
+fn type1_page(program: &[u8]) -> Vec<u8> {
+    let reader = mangle_font::Program::new(program.to_vec());
+    let mut widths = Vec::with_capacity(95);
+    for code in 32u8..=126 {
+        let width = reader
+            .glyph_for_code(u32::from(code))
+            .and_then(|glyph| reader.advance(glyph))
+            .unwrap_or(500);
+        widths.push(width.to_string());
+    }
+    let widths = widths.join(" ");
+
+    let mut content = String::from("0.86 0.86 0.86 rg 300 8 92 26 re f\n");
+    for line in &TYPE1_LINES {
+        let _ = writeln!(
+            content,
+            "BT 0 0 0 rg /F1 {} Tf {} {} Td ({}) Tj ET",
+            line.size, line.at.0, line.at.1, line.text
+        );
+    }
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 8];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 400 130] \
+          /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content.as_bytes());
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+
+    at[5] = out.len();
+    out.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Embedded /FirstChar 32 \
+             /LastChar 126 /Widths [{widths}] /FontDescriptor 6 0 R >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    at[6] = out.len();
+    out.extend_from_slice(
+        b"6 0 obj\n<< /Type /FontDescriptor /FontName /Embedded /Flags 32 /FontBBox \
+          [-210 -299 1032 1075] /ItalicAngle 0 /Ascent 900 /Descent -300 /CapHeight 700 \
+          /StemV 80 /MissingWidth 500 /FontFile 7 0 R >>\nendobj\n",
+    );
+    at[7] = out.len();
+    let mut file = format!(
+        "7 0 obj\n<< /Length {} /Length1 {} /Subtype /Type1 >>\nstream\n",
+        program.len(),
+        program.len()
+    )
+    .into_bytes();
+    file.extend_from_slice(program);
+    file.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&file);
+
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 7\n");
+    for offset in at.iter().take(8).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// A page in a Type 1 font, rendered, or the reason there is none.
+fn render_type1_page(pdf_bytes: Vec<u8>, scale: f64) -> Result<mangle_render::PageRender, String> {
+    let doc = open(pdf_bytes);
+    let all = pages(&doc);
+    let page = all.first().ok_or("the page has no page tree")?;
+    let resources = page
+        .inherited
+        .resources
+        .as_ref()
+        .and_then(|o| doc.resolve_object(o))
+        .and_then(|o| o.as_dict().cloned())
+        .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+        .unwrap_or_default();
+    Ok(render_page(
+        &doc,
+        page,
+        &resources,
+        RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        },
+    ))
+}
+
+/// An embedded Type 1 page, compared with `mutool`.
+///
+/// This is the check that says something about *correctness*. Every other Type 1 test here is
+/// self-consistent, and a self-consistent interpreter can be self-consistently wrong — undoing
+/// the two ciphers in the wrong order, reading the first `rrcurveto`'s last y as a delta, or
+/// resolving a character code through a table that does not exist. `mutool` is a different
+/// codebase with a decade of accumulated knowledge of what a glyph is meant to look like, and
+/// an SSIM against it is a statement about the decryption, the charstring dialect, the code
+/// lookup, the em scale, the placement matrix and the fill rule all at once, and about
+/// nothing else.
+#[test]
+fn our_type1_glyphs_agree_with_mutools() {
+    if mutool().is_none() {
+        eprintln!("skipped: mutool is not installed");
+        return;
+    }
+    let font = match type1_font() {
+        Ok(font) => font,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let dir = std::env::temp_dir().join("mangle-render-oracle");
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let pdf = dir.join("type1.pdf");
+    let bytes = type1_page(&font);
+    std::fs::write(&pdf, &bytes).expect("a file to render");
+
+    // 150 DPI is the resolution the acceptance criteria name, so this measures the thing the
+    // bar is written against rather than an easier version of it.
+    let scale = 150.0 / 72.0;
+    let ours = render_type1_page(bytes, scale).expect("a font");
+    assert!(
+        ours.notes.is_empty(),
+        "an embedded Type 1 font should draw without complaint: {:?}",
+        ours.notes
+    );
+    let Some(comparison) = score_against_mutool(&ours, &pdf, scale, "Type 1 page") else {
+        return;
+    };
+    assert!(
+        comparison.metrics.meets_fidelity_bar(0.95),
+        "our render scores {:.4} against mutool, below the 0.95 fidelity bar: {}",
+        comparison.metrics.ssim,
+        comparison.metrics.summary()
+    );
+}
+
+/// A `/FontFile` that is not a Type 1 font says so, rather than drawing nothing for every
+/// character on the page.
+///
+/// Drawing nothing with nothing in the report is the failure this guards against. And
+/// *mis-parsing* the bytes — taking them for a CFF, or for a `sfnt` — is worse, because that
+/// draws the wrong letters and looks like a font problem rather than a reader one.
+#[test]
+fn a_font_file_that_is_not_a_type1_font_says_so() {
+    for (what, bytes) in [
+        (
+            "a TrueType program",
+            b"%!PS-AdobeFont-1.0: Not 001.001\n".to_vec(),
+        ),
+        (
+            "a PDF",
+            b"%PDF-1.7\n1 0 obj\n<< >>\nendobj\n%%EOF\n".to_vec(),
+        ),
+        (
+            "a PFB container",
+            b"\x80\x01\x2a\x00\x00\x00%!PS-AdobeFont-1.0: Not 001.001\n".to_vec(),
+        ),
+    ] {
+        let render = render_type1_page(type1_page(&bytes), 2.0).expect("a page");
+        let said = render.notes.iter().any(|note| {
+            note.contains("FontFile")
+                && note.contains(what.split_once(' ').map_or(what, |(w, _)| w))
+        });
+        assert!(
+            said,
+            "{what} in a /FontFile must say why it cannot be drawn: {:?}",
+            render.notes
+        );
+    }
+}
+
+/// A Type 1 program truncated at every length gives a reason rather than a panic.
+///
+/// A PDF's `/FontFile` stream can be cut short by anything from a truncated download to a
+/// damaged cross-reference table, and a crash on one is a crash on a file a user opened.
+#[test]
+fn a_type1_font_cut_at_every_length_does_not_panic() {
+    let Ok(font) = type1_font() else {
+        eprintln!("skipped: no Type 1 font on this machine");
+        return;
+    };
+    for cut in 1..font.len() {
+        let _ = mangle_font::from_type1(&font[..cut]);
+    }
+}
