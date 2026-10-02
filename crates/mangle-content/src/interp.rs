@@ -61,7 +61,9 @@ pub enum Mark {
     },
     /// A shading, filled into the current clip.
     Shading { name: String, matrix: Matrix },
-    /// A clip was narrowed.
+    /// A clip was narrowed. The bounds are the bounding box of the clipping path in the
+    /// page's coordinate space, as of the moment the clip was set, with the CTM then in
+    /// force already applied.
     ClipChanged(Option<ClipBounds>),
 }
 
@@ -81,7 +83,12 @@ pub struct Record {
     pub span: Range<usize>,
     /// The transformation the page had when it was drawn.
     pub ctm: Matrix,
-    /// The clip in force, in device space.
+    /// The clip in force: the bounding box of the clipping path, in the page's coordinate
+    /// space, as of the moment the clip was set.
+    ///
+    /// The CTM in force when the clip was set is already applied to these bounds, so a
+    /// renderer only has to apply the page placement on top. Applying the mark's CTM again
+    /// would apply it twice.
     pub clip: Option<ClipBounds>,
     /// The fill and stroke alphas, which a compositing renderer needs and a geometry
     /// one does not.

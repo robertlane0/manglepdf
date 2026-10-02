@@ -207,7 +207,7 @@ fn pixel_is_fraction(image: &mangle_render::Image, fx: f64, fy: f64, want: [u8; 
     let Some([r, g, b, _]) = image.get(x, y) else {
         return false;
     };
-    let close = |a: u8, b: u8| i32::from(a) - i32::from(b) <= 2;
+    let close = |a: u8, b: u8| (i32::from(a) - i32::from(b)).abs() <= 2;
     close(r, want[0]) && close(g, want[1]) && close(b, want[2])
 }
 
@@ -238,7 +238,7 @@ fn region_is(
             // A tolerance of two, because a solid fill at a non-integer boundary blends
             // and an exact comparison would be testing the arithmetic rather than the
             // intent.
-            let close = |a: u8, b: u8| i32::from(a) - i32::from(b) <= 2;
+            let close = |a: u8, b: u8| (i32::from(a) - i32::from(b)).abs() <= 2;
             if !(close(r, want[0]) && close(g, want[1]) && close(b, want[2])) {
                 return false;
             }
@@ -738,10 +738,20 @@ fn a_rotated_page_puts_its_ink_where_the_rotation_says() {
         region_is_fraction(&render.image, 0.05, 0.05, 0.45, 0.45, [0, 0, 0]),
         "the black square moved to the upper left"
     );
-    // And the lower right, which held the blue square, now holds paper.
+    // The red square was in the upper left and is now in the upper right, and the lower
+    // right, which held the blue square, still holds blue: a quarter turn moves the three
+    // squares round and leaves the empty quadrant in the lower left.
     assert!(
-        region_is_fraction(&render.image, 0.55, 0.55, 0.95, 0.95, [255, 255, 255]),
-        "and the quadrant that had blue is now paper"
+        region_is_fraction(&render.image, 0.55, 0.05, 0.95, 0.45, [255, 0, 0]),
+        "the red square moved to the upper right"
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.55, 0.55, 0.95, 0.95, [0, 0, 255]),
+        "the blue square stayed in the lower right"
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.55, 0.45, 0.95, [255, 255, 255]),
+        "and the quadrant that was empty is now paper"
     );
 }
 
@@ -838,6 +848,42 @@ fn image_page() -> Vec<u8> {
     }
     out.extend_from_slice(
         format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// A page whose content scales the coordinate system by two, clips to a quarter of that
+/// space, and then fills the whole of it.
+///
+/// The page is 100 by 100 points. The clip is `0 0 25 25` in a space the CTM has doubled,
+/// so on the page it is `0 0 50 50`: the lower left quadrant. The fill is `0 0 50 50` in
+/// that same space, which is the entire page. A renderer that applied the CTM to the clip a
+/// second time would find the clip larger than the fill and paint everything.
+fn scaled_clip_page() -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 5];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    let content = b"q 2 0 0 2 0 0 cm 0 0 25 25 re W n 0 0 50 50 re f Q";
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content);
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 4\n");
+    for offset in at.iter().take(5).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
     );
     out
 }
@@ -979,4 +1025,31 @@ fn a_shading_is_painted_through_its_pattern() {
         region_is_fraction(&render.image, 0.25, 0.55, 0.75, 0.95, [255, 255, 255]),
         "below the rectangle is untouched paper"
     );
+}
+
+/// A clip under a scaled coordinate system scales with it.
+///
+/// The interpreter's bounds already carry the CTM, so the renderer must not apply it again.
+/// Under an identity CTM the two agree, which is why a test at 72 DPI with no scaling could
+/// never have found this.
+#[test]
+fn a_clip_under_a_scaled_ctm_is_not_transformed_twice() {
+    let render = render(scaled_clip_page(), 1.0);
+    // The clip is `0 0 25 25` in a space doubled by the CTM, so on the page it is
+    // `0 0 50 50`: the lower left quadrant, because the canvas counts y downward.
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.55, 0.45, 0.95, [0, 0, 0]),
+        "the lower left quadrant is inside the clip"
+    );
+    for (x0, y0, x1, y1, which) in [
+        (0.55f64, 0.55f64, 0.95f64, 0.95f64, "the lower right"),
+        (0.05, 0.05, 0.45, 0.45, "the upper left"),
+        (0.55, 0.05, 0.95, 0.45, "the upper right"),
+    ] {
+        assert!(
+            region_is_fraction(&render.image, x0, y0, x1, y1, [255, 255, 255]),
+            "{which} is outside the clip and is still paper; a clip applied twice would be \
+             the whole page and every quadrant would be black"
+        );
+    }
 }

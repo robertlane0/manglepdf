@@ -302,6 +302,7 @@ pub fn render_page(
             &mut device,
             &record.mark,
             &to_device,
+            &placement.matrix,
             record,
             &mut render.notes,
             &mut lookup,
@@ -413,6 +414,7 @@ fn draw_mark(
     device: &mut Device,
     mark: &Mark,
     to_device: &Matrix,
+    placement: &Matrix,
     record: &mangle_content::Record,
     notes: &mut Vec<String>,
     images: &mut dyn FnMut(&str) -> Result<Raster, String>,
@@ -473,20 +475,20 @@ fn draw_mark(
             device.reset_clip();
         }
         Mark::ClipChanged(Some(bounds)) => {
-            // The interpreter records clip bounds in *user* space — the space its path
-            // operators work in — so they must go through the mark's own transformation
-            // before they mean anything in pixels. Skipping this is invisible at scale one
-            // and wrong at every other scale, which is the worst kind of bug: a clip that
-            // works on the one fixture written at 72 DPI.
+            // The interpreter has already put these bounds through the CTM that was in force
+            // when the clip was set, so they are in the page's own space and the *only*
+            // transformation left is the page placement. Pushing them through the mark's
+            // matrix as well applies the CTM twice, which is invisible under an identity
+            // CTM and turns a scaled clip into no clip at all.
             //
             // All four corners go through the matrix and the result is re-bounded, because
             // a transformation that rotates or flips does not map an axis-aligned rectangle
             // to an axis-aligned rectangle.
             let corners = [
-                to_device.apply(bounds.x0, bounds.y0),
-                to_device.apply(bounds.x1, bounds.y0),
-                to_device.apply(bounds.x1, bounds.y1),
-                to_device.apply(bounds.x0, bounds.y1),
+                placement.apply(bounds.x0, bounds.y0),
+                placement.apply(bounds.x1, bounds.y0),
+                placement.apply(bounds.x1, bounds.y1),
+                placement.apply(bounds.x0, bounds.y1),
             ];
             let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
             let max_x = corners
@@ -519,12 +521,15 @@ fn draw_mark(
                     // A shading paints the *current clip*, which for `sh` is whatever path
                     // the page set with `W n`. The recorded bounds are that path's box, and
                     // painting outside it would put a gradient where the page drew nothing.
+                    // They are already in the page's own space — the interpreter applied the
+                    // CTM when the clip was set — so only the placement remains, and the
+                    // CTM must not be applied again.
                     if let Some(bounds) = record.clip {
                         let corners = [
-                            to_device.apply(bounds.x0, bounds.y0),
-                            to_device.apply(bounds.x1, bounds.y0),
-                            to_device.apply(bounds.x1, bounds.y1),
-                            to_device.apply(bounds.x0, bounds.y1),
+                            placement.apply(bounds.x0, bounds.y0),
+                            placement.apply(bounds.x1, bounds.y0),
+                            placement.apply(bounds.x1, bounds.y1),
+                            placement.apply(bounds.x0, bounds.y1),
                         ];
                         let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
                         let max_x = corners
