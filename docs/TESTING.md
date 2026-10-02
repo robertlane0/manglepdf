@@ -59,6 +59,20 @@ every page at 150 DPI, compares it with `mutool draw` through `compare()`, and c
 text with `pdftotext` at word level. It writes `corpus/wild/report/SUMMARY.md`, a Markdown
 report per file, and PNGs of the worst pages: ours, mutool's, and the heatmap between them.
 
+**It is `#[ignore]`d, and the other two tests in that file are not.** One run is about two
+hours, which is fine for a corpus and fatal for `cargo test --workspace`. So:
+
+```sh
+cargo test -p mangle-render --test wild_corpus                  # the two cheap harness tests
+cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture   # the two-hour run
+```
+
+The cheap pair check the harness itself — that a PAM round-trips, and that a heatmap lands
+under the name the report links to — and a missing heatmap looks exactly like a page that
+passed, so they are worth having in the default suite. The long one needs the corpus fetched
+(`cargo xtask corpus fetch`) and `mutool` and `pdftotext` installed for the halves that
+compare against them.
+
 **It asserts nothing about any individual file**, on purpose. A corpus test's job is to
 find things; a threshold on a document nobody has read yet turns the first unexpected result
 into a permanent red build, and the response to a permanent red build is to raise the

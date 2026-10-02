@@ -232,6 +232,46 @@ pub fn effective_scale(asked: f64) -> f64 {
     asked.min(MAX_SCALE)
 }
 
+/// How close to a whole number of pixels a page size must be before it counts as whole.
+///
+/// This is relative rather than absolute because the error it exists to absorb is relative:
+/// `792.0 * (150.0 / 72.0)` is not 1650 in binary floating point, it is `1650.0000000000002`,
+/// one unit in the last place above 1650 and a relative error of 1.4e-16. The identical
+/// mistake on a 100-point page is `208.33333333333334`, which is 1.3e-15 from 208.33 and
+/// nowhere near the next integer — so an absolute epsilon wide enough to catch the Letter
+/// page would also swallow a quarter of a pixel on a small page, and one narrow enough to
+/// spare the small page would miss the Letter page entirely. 1e-9 is roughly 4.5 million
+/// ulps, which f64 rounding cannot exceed, and it is four thousand times narrower than the
+/// smallest real difference: a page 612.0001 points wide is 1275.0002 pixels.
+const WHOLE_PIXEL_EPSILON: f64 = 1e-9;
+
+/// One side of a page buffer, in pixels.
+///
+/// **Rounded up**, because rounding down clips the page: 100 points at 150 DPI is 208.33
+/// pixels and a buffer of 208 loses the last third of a pixel off the bottom of the page.
+///
+/// **Except when it is already a whole number of pixels**, which is not the same thing as
+/// when floating point says it is. `792.0 * (150.0 / 72.0)` is `1650.0000000000002`, and
+/// `ceil` of that is 1651 — so a US-Letter page, the most common page size there is, came
+/// out one row too tall, and a 960-point side came out one column too wide. That is not a
+/// cosmetic difference: a buffer one pixel larger than the oracle's is a *size
+/// disagreement*, not a worse picture, so every comparison of such a page is refused
+/// rather than scored, and 80 pages of the wild corpus produced no measurement at all.
+///
+/// So a value within `WHOLE_PIXEL_EPSILON` of an integer is taken to *be* that integer
+/// before the ceiling is applied. The ceiling itself is right and stays: it is what makes
+/// 208.33 into 209, and what `mutool` does.
+fn pixels_for(pixels: f64, shrink: f64) -> usize {
+    let exact = pixels * shrink;
+    let whole = exact.round();
+    let settled = if (exact - whole).abs() <= WHOLE_PIXEL_EPSILON * exact.abs().max(1.0) {
+        whole
+    } else {
+        exact
+    };
+    settled.ceil().max(1.0) as usize
+}
+
 /// Render one page.
 ///
 /// The page's content is run by the content layer and each mark is drawn in turn, in the
@@ -259,14 +299,10 @@ pub fn render_page(
     } else {
         1.0
     };
-    // Rounded *up*, not to nearest. A page of 208.33 pixels needs 209 rows to hold its last
-    // third of a pixel, and rounding down clips it; rounding up also matches what the
-    // comparison oracles do, which is what makes a page-by-page comparison possible at all
-    // rather than merely usually possible.
-    let size = (
-        (pixels_w * shrink).ceil().max(1.0) as usize,
-        (pixels_h * shrink).ceil().max(1.0) as usize,
-    );
+    // Rounded *up*, not to nearest, so a page of 208.33 pixels has the 209 rows it needs to
+    // hold its last third of a pixel. `pixels_for` is where that happens, and where the one
+    // exception to it lives.
+    let size = (pixels_for(pixels_w, shrink), pixels_for(pixels_h, shrink));
 
     // The canvas is already `points × scale` pixels wide, so the page is fitted into it
     // with a scale of one. Passing `scale` here as well would apply it twice and draw the
@@ -1156,6 +1192,95 @@ mod tests {
         );
     }
 
+    /// A page whose size in points is a whole number of pixels stays that number of pixels.
+    ///
+    /// This is the other half of `a_page_buffer_rounds_up_so_the_edge_is_not_clipped`, and it
+    /// is the half that was wrong. A US-Letter page is 612 by 792 points, which at 150 DPI is
+    /// 1275 by 1650 pixels — not 1651. `792.0 * (150.0 / 72.0)` is not 1650 in binary
+    /// floating point; it is `1650.0000000000002`, one unit in the last place above 1650, and
+    /// `ceil()` turns that into 1651. The same happens to a 960-point side, which is
+    /// `2000.0000000000002` and became 2001.
+    ///
+    /// The error is invisible at small sizes, because one ulp of 208.33 is far too small to
+    /// reach the next integer, which is why a 100-point page rounds up correctly and a
+    /// Letter page does not. It is only visible on pages big enough that one ulp is
+    /// comparable to a pixel boundary — which is to say, on the page size most documents in
+    /// the world use.
+    ///
+    /// Both numbers here were checked against `mutool draw -r 150`, which produces 1275x1650
+    /// and 1650x1275 for these two page sizes. A size disagreement is not a rendering
+    /// difference: it suppresses the comparison entirely, which is how 80 pages of the wild
+    /// corpus ended up with no measurement at all.
+    #[test]
+    fn a_whole_number_of_pixels_is_not_rounded_up_to_one_more() {
+        let scale = 150.0 / 72.0;
+        for (w, h, expect_w, expect_h) in [
+            (612, 792, 1275, 1650),
+            (792, 612, 1650, 1275),
+            (960, 540, 2000, 1125),
+            (1224, 1584, 2550, 3300),
+        ] {
+            let doc = Document::open(rect_page_bytes(w, h), mangle_syntax::OpenOptions::default())
+                .expect("the file opens");
+            let page = page_of(&doc);
+            let render = render_page(
+                &doc,
+                &page,
+                &Resources::default(),
+                RenderOptions {
+                    scale,
+                    ..RenderOptions::default()
+                },
+            );
+            assert_eq!(
+                (render.image.width, render.image.height),
+                (expect_w, expect_h),
+                "{w} by {h} points at 150 DPI is {expect_w} by {expect_h} pixels, but the \
+                 buffer is {} by {}. 792.0 * (150.0/72.0) is 1650.0000000000002 and ceil() \
+                 makes that 1651.",
+                render.image.width,
+                render.image.height
+            );
+        }
+    }
+
+    /// A fractional page size still rounds up, and the whole-number rule did not take it.
+    ///
+    /// The epsilon that fixes the Letter page must not be wide enough to swallow a real
+    /// fraction. 100 points at 150 DPI is 208.33 pixels and has to become 209, or the last
+    /// third of a pixel is clipped off the page — which is the case the ceiling exists for.
+    /// 595x842 (A4) is 1239.58 by 1754.17 and has the same obligation on its long side.
+    #[test]
+    fn a_fractional_page_size_still_rounds_up() {
+        let scale = 150.0 / 72.0;
+        for (w, h, expect_w, expect_h) in [
+            (100, 100, 209, 209),
+            (595, 842, 1240, 1755),
+            (288, 288, 600, 600),
+        ] {
+            let doc = Document::open(rect_page_bytes(w, h), mangle_syntax::OpenOptions::default())
+                .expect("the file opens");
+            let page = page_of(&doc);
+            let render = render_page(
+                &doc,
+                &page,
+                &Resources::default(),
+                RenderOptions {
+                    scale,
+                    ..RenderOptions::default()
+                },
+            );
+            assert_eq!(
+                (render.image.width, render.image.height),
+                (expect_w, expect_h),
+                "{w} by {h} points at 150 DPI rounds up to {expect_w} by {expect_h} pixels, \
+                 but the buffer is {} by {}",
+                render.image.width,
+                render.image.height
+            );
+        }
+    }
+
     /// A page's own corner lands on the canvas's corner, at every zoom.
     ///
     /// The assertion a page fitted into a canvas cannot fail unless the zoom is applied
@@ -1206,6 +1331,11 @@ mod tests {
 
     /// A one-page file of the given size in points, with no content, as bytes.
     fn page_bytes(points: i64) -> Vec<u8> {
+        rect_page_bytes(points, points)
+    }
+
+    /// A one-page file of the given width and height in points, with no content, as bytes.
+    fn rect_page_bytes(points_w: i64, points_h: i64) -> Vec<u8> {
         let mut body: Vec<u8> = Vec::new();
         body.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
         let mut at = [0usize; 4];
@@ -1214,7 +1344,8 @@ mod tests {
         at[2] = body.len();
         body.extend_from_slice(
             format!(
-                "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 {points} {points}] >>\nendobj\n"
+                "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 {points_w} \
+                 {points_h}] >>\nendobj\n"
             )
             .as_bytes(),
         );

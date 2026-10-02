@@ -176,7 +176,10 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Tests
 
-677, none ignored, no warnings. Ten kinds matter:
+683 passing, 1 ignored, none failing, no warnings. The ignored one is the Tier-B wild
+corpus — a two-hour job, run deliberately with
+`cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture`; the two cheap
+tests in the same file check the harness itself and run by default. Ten kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -391,7 +394,44 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   read a `/FlateDecode` stream we write; the same file written as a bare deflate stream is
   rejected by all three. Every other filter we produce still needs the same checking before
   the writer ships.
-- A page's pixel buffer is `ceil(points × scale)` on each side, and a product that lands a
-  hair over a whole number in binary gives one pixel more than the comparison oracles give.
-  It only shows on a page whose width is a whole number of pixels at the requested
-  resolution, and the oracle comparison refuses rather than comparing different sizes.
+- A page's pixel buffer rounds *up* to a whole pixel, so a page of 208.33 pixels gets the
+  209 rows it needs and its last third of a pixel is not clipped. A value that binary
+  floating point has nudged a hair above an integer counts as that integer before the
+  ceiling, so a US-Letter page is 1275×1650 at 150 DPI rather than 1275×1651. See D3 in
+  `docs/known-diffs.md`.
+
+## What the Tier-B wild corpus found
+
+The corpus is 77 hard files from pdf.js, PDFBox, NIST, the IRS, the USGS and arXiv, pinned
+by SHA-256 in `corpus/wild/MANIFEST.toml` and measured against `mutool draw -r 150` and
+`pdftotext`. One run, 77 files and 542 pages, produced **two clusters** and almost nothing
+else — which is the point of having it.
+
+**34 files do not open.** 29 of them say `dangling reference: the page tree root is
+missing`, 4 say `no catalogue`, and 1 is `the document is encrypted: incorrect password`.
+So this is one dominant bug and a long tail, not 34 separate ones: the cross-reference
+*stream* path cannot be used, the reader falls back to scanning for `N G obj` headers, and
+an object stream hides `/Pages` from a scan. Between them those 34 files cover live
+government forms (IRS 1040 and W-4, NIST FIPS 197 and SP 800-88), two 1:25000 USGS topo
+sheets and every Adobe InDesign output in the set.
+
+**80 pages could not be compared at all, from one off-by-one.** They rendered 1275×1651
+where `mutool` renders 1275×1650 — 70 of them exactly that pair, the rest on other page
+sizes — and `compare()` refuses to compare images of different sizes. 70 of the 80 are a
+US-Letter page, one arXiv paper has 23 Letter pages and the other has 12, so the corpus
+was measuring almost no LaTeX at all. The cause was `ceil()` applied to a product floating
+point had already put a hair above the integer: `792.0 * (150.0/72.0)` is
+`1650.0000000000002`. **Fixed** — see D3.
+
+The fix matters more than its size suggests, because the two clusters interact. A page that
+is one pixel too tall is not scored slightly worse; it is *refused*, so 80 pages produced no
+SSIM at all and the file looks like a renderer that works. Now that the sizes agree those
+pages are measured: `gov__arxiv-1206.5537.pdf` page 1 goes from *not measured* to **0.7915
+SSIM** against `mutool`, which is a real number about a real defect (D1: a Flate-compressed
+content stream is not decoded, so we draw blank paper) rather than the absence of one. A
+full re-run of the corpus is wanted to re-baseline the median; it takes two hours.
+
+The corpus test asserts nothing and the report is the output — the reasoning is at the top
+of `crates/mangle-render/tests/wild_corpus.rs`. A threshold on a document nobody has read
+yet turns the first surprise into a permanent red build, and the response to a permanent red
+build is to raise the threshold, which is the one thing the corpus was for.

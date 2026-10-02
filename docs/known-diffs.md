@@ -5,22 +5,30 @@ and Tier B; ≤ 3% of pages below 0.95, each documented in `docs/known-diffs.md`
 cause and evidence."*
 
 **The Tier-B target is not met, and not narrowly.** Against `mutool draw` at 150 DPI over the
-77-file wild corpus: 460 pages were compared, the median SSIM is **0.6929**, and **436 of 460
-pages (94.8%) are below 0.95**. Thirty-five of the 77 files could not be opened at all. This
-page records what the corpus found and the evidence for each claim; none of it is fixed yet.
+77-file wild corpus: **460 of 542 pages were compared** and the median SSIM is **0.6929**, and
+**436 of those 460 pages (94.8%) are below 0.95**. Thirty-four of the 77 files could not be
+opened at all. This page records what the corpus found and the evidence for each claim.
 
 The corpus is `corpus/wild/`, pinned by SHA-256 in `corpus/wild/MANIFEST.toml`, fetched with
 `cargo xtask corpus fetch`, and measured by `crates/mangle-render/tests/wild_corpus.rs`.
 That test asserts nothing: the numbers below come from `corpus/wild/report/SUMMARY.md` and
 the per-file reports beside it, which are git-ignored and regenerated on every run. Oracle
-versions: `mutool 1.28.5`, `pdftotext 26.08.0` (poppler), `qpdf` (system).
+versions: `mutool 1.28.5`, `pdftotext` (poppler), `qpdf` (system).
+
+**The test is `#[ignore]`d, on purpose.** One run over the corpus takes about two hours, so
+leaving it in the default suite makes `cargo test --workspace` unusable. The two cheap tests
+beside it — which check the harness itself — still run by default.
 
 Reproduce any line:
 
 ```sh
 cargo xtask corpus fetch
-cargo test -p mangle-render --test wild_corpus -- --nocapture
+cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture
 ```
+
+The 460/542 split matters as much as the SSIM does: **80 pages produced no SSIM at all**,
+because their buffers came out one pixel larger than the oracle's and `compare()` refuses
+images of different sizes. That was D3, and D3 is now fixed.
 
 ---
 
@@ -60,14 +68,28 @@ unfiltered or through `/ASCIIHexDecode`, both of which need no inflate.
 
 ## D2 — a cross-reference stream with a PNG predictor is not decoded, so the file reports zero pages
 
-**Severity: critical. 31 of the 34 files that would not open.**
+**Severity: critical. 29 of the 34 files that would not open.**
+
+The 34 failures, by the reader's own reason string:
+
+| reason | files |
+|---|---|
+| `dangling reference: the page tree root is missing` | **29** |
+| `no catalogue` | 4 |
+| `the document is encrypted: incorrect password` | 1 |
+
+The middle two rows are related but not the same failure and are recorded elsewhere: the
+`no catalogue` four include the uncompressed cross-reference stream of D4 and three files
+with no reachable trailer at all, and the encrypted one is legitimately unreadable without a
+password. Everything below is about the 29, which is one bug.
 
 When the reader cannot use the cross-reference stream at the `startxref` offset it falls
 back to scanning for `N G obj` headers. That scan cannot see objects stored inside object
 streams, so `/Pages` is unreachable and the document reports **0 pages** with the note
 `dangling reference: the page tree root is missing`.
 
-Correlation over the corpus is exact:
+Correlation over the corpus is exact (characterised by hand on an earlier run; the totals
+are 77 files, 43 opened and 34 not):
 
 | cross-reference stream | PNG predictor | result |
 |---|---|---|
@@ -123,25 +145,83 @@ been isolated by direct experiment yet.
 
 ## D3 — the page canvas gains a spurious row whenever the size in points times the scale should be a whole number
 
-**Severity: high, and small. 80 pages across 17 files became impossible to compare.**
+**Severity: was high. FIXED. 80 pages across 17 files had become impossible to compare.**
 
-`render_page` computes `(points * scale).ceil()` with the division hoisted into `scale`.
+`render_page` computed `(points * scale).ceil()` with the division hoisted into `scale`.
 In IEEE-754:
 
 ```
 792.0 * (150.0/72.0) == 1650.0000000000002   ->  ceil == 1651
 792.0 * 150.0 / 72.0 == 1650.0               ->  ceil == 1650
 561.6 * (150.0/72.0) == 1170.0000000000002   ->  ceil == 1171
+960.0 * (150.0/72.0) == 2000.0000000000002   ->  ceil == 2001
 ```
 
-So US Letter (612 × 792 pt) comes out **1651 rows tall where `mutool` produces 1650**, and
-`compare()` refuses to compare images of different sizes. Every such page is recorded in the
-report as `size disagreement: we rendered 1275x1651, mutool rendered 1275x1650`.
+So US Letter (612 × 792 pt) came out **1651 rows tall where `mutool` produces 1650**, and a
+960-point side came out one column too wide. `compare()` refuses to compare images of
+different sizes, so every such page was recorded as
+`size disagreement: we rendered 1275x1651, mutool rendered 1275x1650` and **scored nothing**.
+All 80 had the same shape — one dimension exactly one pixel too big:
 
-That is 80 pages, including **all 23 pages of an arXiv paper** and **all 12 pages of a second
-arXiv paper** — which is to say the corpus currently measures almost no LaTeX at all.
+| we rendered | mutool rendered | pages |
+|---|---|---|
+| 1275x1651 | 1275x1650 | 70 |
+| 1153x1651 | 1153x1650 | 4 |
+| 1250x1751 | 1250x1750 | 2 |
+| 915x901 | 915x900 | 1 |
+| 2001x1125 | 2000x1125 | 1 |
+| 1575x1171 | 1575x1170 | 1 |
+| 1020x1531 | 1020x1530 | 1 |
 
-Note the existing fixtures did not catch this either: they are 200 × 200 pt and similar, where
+70 of the 80 are a US-Letter page, which includes **all 23 pages of an arXiv paper** and
+**all 12 pages of a second one** — the corpus was measuring almost no LaTeX at all.
+
+### What was wrong, and what was not
+
+The ceiling itself is **correct** and was kept. A page of 208.33 pixels needs 209 rows to
+hold its last third of a pixel, rounding down clips it, and `mutool` rounds up too. Rounding
+to *nearest* would have fixed the Letter page and re-broken the small page, and 208 is a
+worse answer than 209: it loses part of the page rather than adding an empty row.
+
+What was wrong was that the ceiling was applied to a value floating point had already put a
+hair above the integer. `1650.0000000000002` is one unit in the last place above 1650 and
+`ceil` turns that into 1651. The error is invisible at small sizes — one ulp of 208.33 is far
+too small to reach the next integer — which is exactly why a 100-point page rounded up
+correctly and a Letter page never did. So the epsilon has to be *relative*, not absolute:
+one wide enough for 1650 would swallow a quarter of a pixel on a 208-pixel page, and one
+narrow enough to spare that page would miss 1650.
+
+`pixels_for` in `crates/mangle-render/src/page.rs` now snaps a value within `1e-9` of an
+integer — relative, so about 4.5 million ulps — to that integer before applying the
+ceiling. 1e-9 is four thousand times narrower than the smallest difference a real page size
+can produce: a page 612.0001 points wide is 1275.0002 pixels, so it still rounds up.
+
+### The evidence, before and after
+
+The oracle's own rule was checked directly rather than assumed, by rendering 15 page sizes
+from 1×1 to 1224×1584 with `mutool draw -r 150` and reading the PAM headers. `mutool`
+matches ceil-with-epsilon-snap on **all 15**; plain `ceil` disagrees on two of them (792×612
+and 1224×1584) and plain `round` disagrees on six.
+
+Then one affected file, `gov__arxiv-1206.5537.pdf` page 1 (MediaBox 612 × 792), rendered
+and compared the way the harness does:
+
+| | we rendered | mutool rendered | SSIM |
+|---|---|---|---|
+| before | 1275x1651 | 1275x1650 | *not measured — size disagreement* |
+| after | **1275x1650** | 1275x1650 | **0.7915** (rms 35.4, max delta 224, 116 023 of 2 103 750 pixels above tolerance) |
+
+The off-by-one is gone and the page is compared. The 0.79 is D1 talking — that page's
+content stream is Flate-compressed and is drawn blank — so the off-by-one was hiding a real
+defect behind an absence of a measurement, which is the worst way for it to hide.
+
+Two tests hold this down in `page.rs`: `a_whole_number_of_pixels_is_not_rounded_up_to_one_more`
+(1275x1650, 1650x1275, 2000x1125, 2550x3300) and `a_fractional_page_size_still_rounds_up`
+(209x209 for 100pt, 1240x1755 for A4, 600x600), alongside the original
+`a_page_buffer_rounds_up_so_the_edge_is_not_clipped`. A fix that traded one for the other
+would fail the second.
+
+The existing fixtures did not catch this either: they are 200 × 200 pt and similar, where
 `200 × (150/72) = 416.666…`, and both renderers round up to 417.
 
 ---
