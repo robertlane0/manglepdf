@@ -417,7 +417,7 @@ that is worth being able to point at.
 ## D5 — the fax scan on a multi-page TIFF page rendered as a black rectangle
 
 **Severity: was high — 0.38414 SSIM, 60.6% of pixels wrong. FIXED as a codec defect. What is
-left on this page is a placement defect in the image path, which is not this one.**
+left on this page is D5b, which is a placement defect and not this one.**
 
 `pdfbox__multitiff.pdf` page 1, measured against `mutool draw` at 150 DPI:
 
@@ -452,8 +452,89 @@ cases now match byte for byte**, 896 of 896 rows.
 What is still wrong on this page is **not** the codec and never was. The page's content is a
 full-page colour scan — object 12 is 344 by 287 samples covering the whole 595.28 by 496.64
 point width and height the content stream gives it, not a numeral, and it is fully decoded.
-It lands in the wrong device rows, which is a placement defect in the image path rather
-than a codec one.
+It lands in the wrong device rows, for the reason in D5b.
+
+---
+
+## D5b — `image::draw` rebases its writes to the page origin and mirrors its samples
+
+**Severity: high, and every image on every page is affected. Not fixed — the cause is
+recorded here rather than patched, because a placement bug in the image path is worth
+understanding rather than correcting by inspection.**
+
+`crates/mangle-render/src/image.rs`, in `draw`. Two independent errors, either of which alone
+puts an image in the wrong place.
+
+**1. The write is rebased to the clipped area; the bounds and the sampling are not.** The
+rectangle is built from `matrix.apply`, which is in absolute device pixels, and
+`area = bounds.intersect(device.clip())` keeps it there, so `area.pixels()` yields absolute
+device rows and columns. The loop then walks those absolute coordinates and maps them back
+through the inverse — correctly, in absolute device space — but writes with
+
+```rust
+device.put(x - x0, y - y0, px);
+```
+
+`x0` and `y0` are `columns.start` and `rows.start`, the origin of the clipped area.
+`Device::put` is documented and implemented as an absolute device write: it bounds-checks
+against the whole image and then writes at those coordinates. So every pixel is written at its
+own position *minus the clipped area's origin*, and every image not at the page origin is
+drawn at the page origin. The displacement is exactly the area's origin and nothing else.
+
+Measured on the corpus: the placement rectangle is device `(0.4, 719.3)..(1240.6, 1754.0)`
+and `area.pixels()` gives rows `719..1754`. The image's ink lands at rows 141..1020 — 719
+rows high — and its columns match the oracle exactly, because the area's column origin is 0
+(the image is full-page-width). Changing only that one line to `device.put(x, y, px)` moves
+the ink to rows 860..1739, which is 719 rows down and exactly where the rectangle says it
+belongs.
+
+Reproduced without the corpus at all: a 100 by 100 point page whose only mark is
+`40 0 0 40 60 10 cm /Im1 Do`, so the image belongs at device rows 50..90 and columns 60..100.
+Its ink is at rows **0..39** and columns **0..39**.
+
+**2. The vertical axis is mirrored.** `to_device` is `placement.matrix.concat(record.ctm)`,
+and `placement.matrix` inverts y because a canvas counts down and a page counts up. So the
+unit square's `(0, 0)` is the placement's *bottom* and `inverse.apply(..)` returns `v = 0`
+there. `Raster::sample(u, v)` reads `v = 0` as raster row 0, which is the scan's *top* row.
+The image is therefore drawn upside down. Only `v` is affected: `u` is correct, which is why
+the corpus page's horizontal band matches the oracle exactly while its rows do not.
+
+Measured on the corpus by matching each source row of the frozen `libtiff` raster against the
+device row that best reproduces it: the device row falls by 3.606 per source row here and
+**rises** by 3.604 in `mutool`'s. Same magnitude, opposite sign — 1035 device pixels over 287
+source rows is 3.606, so the scale is right and only the sense of the axis is wrong.
+
+Reproduced without the corpus: a 100 by 100 point page with `100 0 0 100 0 0 cm /Im1 Do` and an
+8 by 8 image whose top half is red and bottom half blue. The top quarter of the page renders
+`[0, 0, 255]` and the bottom quarter `[255, 0, 0]`.
+
+**Why it is not a clean translation, and why the row count looks wrong.** The two errors
+compose into a mirror about the middle of the placement rectangle rather than a shift, and a
+mirror is not something a vertical shift can explain: the best pure vertical shift accounts
+for 62.7% of the oracle's ink, and the rest is the part of the scan that is not near-symmetric
+about the band. The ink *band* also moves by 127 rows rather than by 0 or by 719, because the
+band's extent is set by the first and last inked source rows and a mirror puts the top row at
+the bottom: content spanning source rows 4 to 248 renders at rows 860..1739 where the oracle
+has 733..1612, both bands exactly 879 rows tall.
+
+**Why nothing caught it.** `crates/mangle-render/tests/pages.rs` has five tests that draw an
+image — `an_image_is_drawn_through_the_resources`, the three `an_image_mask_…` tests, and
+`an_image_that_is_not_a_mask_is_unaffected_by_the_fill_colour` — and neither of their two
+fixture images has any vertical structure in it: one is a 2 by 2 of pure red, the other is
+`0b0000_1111` repeated on all eight of its rows. Every assertion is on columns, and both are
+drawn by a `cm` whose translation is 0, so the clipped area's origin is the page's own and
+the rebase subtracts nothing. A mirror and a rebase are both invisible to all five.
+
+**Also unresolved, and a separate defect: `pdfjs__issue13372.pdf` page 1 draws nothing at
+all.** It is not this one. Object 18 is a 646 by 761 CCITT G.4 `/ImageMask`, and the content
+stream draws it in a *pattern* colour — `/R9` is a `PatternType 2` axial shading over
+`/DeviceRGB`. `page.rs` declines to draw an image mask whose fill colour space is `Pattern`
+and records `an image mask painted in a pattern colour was found and not drawn`. The
+placement rectangle is right (device rows 329..1530 against the oracle's ink at 329..1529),
+so nothing is misplaced; there is simply nothing drawn. The cause is that pattern colours
+are not implemented as fills. It is not caused by, and does not cause, the placement defect
+above — and when pattern colours are implemented, this page will be subject to it, because its
+rectangle starts at row 329 rather than at 0.
 
 ---
 

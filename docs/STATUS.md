@@ -484,13 +484,19 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    6 or 7, or a pattern needs a tiling loop, and each is reported as a note against the mark
    rather than skipped silently, so a page that used one is visibly incomplete instead of
    quietly wrong.
-7. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
+7. **`image::draw` puts an image in the wrong rows.** It rebases each write to the origin of
+   the clipped area while its bounds and its sampling stay in absolute device pixels, and it
+   reads `v = 0` as the raster's first row when the placement matrix puts `v = 0` at the
+   bottom. Every image not at the page origin is drawn at the page origin, upside down. The
+   cause and its measurements are D5b in `docs/known-diffs.md`; it is recorded rather than
+   patched.
+8. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the marks the content layer produces.
-8. **An object that came out of an object stream cannot keep its original bytes**,
+9. **An object that came out of an object stream cannot keep its original bytes**,
    because it had none: it was compressed with everything else in its container. A full
    save writes it as a direct object, which every reader accepts but which is a
    re-serialisation rather than a copy.
-9. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
+10. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
 
 ## Metric-compatible aliases
 
@@ -722,8 +728,10 @@ the fourth was fixed:
    The third row scores *lower* than the second and the page is closer to right. 0.91170 was
    the score for drawing nothing at all, and a page with no ink on it agrees very well with a
    page that is 92% paper. The third row draws the oracle's amount of ink in the oracle's
-   horizontal band and puts it in the wrong rows, which is a placement defect in the image
-   path and not a codec one, and which predates every defect on this page.
+   horizontal band and puts it in the wrong rows, because `image::draw` rebases its writes to
+   the origin of the clipped area and mirrors its samples about the horizontal axis. That is a
+   placement defect in the image path, it predates every defect on this page, and it is
+   recorded with its evidence as D5b in `docs/known-diffs.md`.
 
 3. **An `/ImageMask` painted the wrong bits, and with a colour nobody asked for.** `Do` names
    no colour, so a mask's colour comes from the graphics state and has to travel with the

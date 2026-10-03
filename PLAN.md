@@ -325,8 +325,10 @@ on a value normalised over 255.
 third row's 0.91170 was the score for drawing *nothing*: a blank page agrees with a page that
 is 92% paper, which is a flattering number for a page with no content on it. The fourth row
 draws the right amount of ink (7.98% against the oracle's 7.99%) in the right horizontal band,
-in the wrong rows, which is a placement defect in the image path rather than a codec one and
-which predates everything on this page. The codec is settled; the placement is not.
+in the wrong rows — `image::draw` rebases its writes to the origin of the clipped area and
+mirrors its samples about the horizontal axis. That is a placement defect in the image path
+rather than a codec one, it predates everything on this page, and it is recorded with its
+evidence in `docs/known-diffs.md` as D5b. The codec is settled; the placement is not.
 
 **An `/ImageMask` painted nothing.** `Do` names no colour, so the graphics state's fill
 colour has to travel with the mark, and the painter had been given black unconditionally —
