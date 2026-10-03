@@ -966,12 +966,14 @@ fn draw_mark(
             stroke,
             rule,
         } => {
-            // The path's points are already in the space the record's own transformation
-            // produces — `GraphicsState::device_path` applies the CTM to them — so passing
-            // `to_device` applies that transformation a second time. That is a pre-existing
-            // defect with its own evidence in `docs/known-diffs.md` (D9), deliberately left
-            // alone here: it changes every page with a `cm` and belongs in its own change.
-            let polygon = transform_path(segments, to_device);
+            // The path's points arrive already multiplied by the CTM that was in force when
+            // the operator ran — `GraphicsState::device_path` does that, and it is why a
+            // `Mark::Path`'s geometry is in the page's own space rather than in user space.
+            // The placement is therefore the *only* part of `to_device` these points have not
+            // seen, so applying `to_device` applies the CTM a second time: a 1×1 square
+            // under `50 0 0 50 10 10 cm` becomes a 2500-unit one, off the page, drawn
+            // nowhere. This is the same rule `clip_region` follows, and for the same reason.
+            let polygon = transform_path(segments, placement);
             if polygon.is_empty() {
                 return;
             }

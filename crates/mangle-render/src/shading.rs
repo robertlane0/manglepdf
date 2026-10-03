@@ -39,7 +39,7 @@ use crate::{Device, Rect};
 pub enum Function {
     /// Type 0: a table of samples, interpolated between entries.
     Sampled(Sampled),
-    /// Type 2: `C0 + C1 · t^n` over each output's own domain.
+    /// Type 2: `C0 + t^n · (C1 − C0)` over each output's own domain.
     Exponential(Exponential),
     /// Type 3: a run of type-2 functions stitched end to end.
     Stitching(Stitching),
@@ -179,7 +179,8 @@ impl Sampled {
     }
 }
 
-/// A type 2 function: `C0 + C1 · (x - x0)^n`.
+/// A type 2 function: `C0 + (x - x0)^n · (C1 - C0)`, which is `C0` at the bottom of the
+/// domain and `C1` at the top of it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Exponential {
     pub domain: Vec<[f64; 2]>,
@@ -214,7 +215,11 @@ impl Exponential {
             if !power.is_finite() {
                 return None;
             }
-            out.push(c0 + c1 * power);
+            // ISO 32000-1 Table 42: `C0 + x^N · (C1 − C0)`. The two ends are the values at
+            // `x = 0` and `x = 1`, so the exponent bends the ramp *between* them. Adding `C1`
+            // instead of the difference gives the same answer only when `C0` is zero, which is
+            // most hand-written gradients and none of Adobe's.
+            out.push(c0 + power * (c1 - c0));
         }
         Some(out)
     }
@@ -1589,8 +1594,19 @@ mod tests {
         );
     }
 
+    /// ISO 32000-1 Table 42: a type 2 function is `C0 + x^N · (C1 − C0)`.
+    ///
+    /// `C0` and `C1` are the two ends of the ramp, so the ends are the first two assertions
+    /// and the middle one is the exponent bending the ramp between them.
+    ///
+    /// **`C0` must not be zero here.** With `C0 = 0` this reduces to `x^N · C1`, which is
+    /// also what the simpler `C0 + x^N · C1` gives, so a fixture with a zero `C0` cannot tell
+    /// the two rules apart and a test built on one passes against the other. Every fixture in
+    /// this repository that exercises a type 2 function writes `C0 [0]`, which is why the case
+    /// went unnoticed; the test that used to pin it asserted `C0 + C1` at `t = 1`, which is
+    /// one step from this one and no further.
     #[test]
-    fn an_exponential_function_is_c0_plus_c1_times_t_to_the_n() {
+    fn an_exponential_function_is_c0_plus_t_to_the_n_times_c1_minus_c0() {
         let f = Function::Exponential(Exponential {
             domain: vec![[0.0, 1.0]],
             range: vec![[0.0, 1.0, 2.0]],
@@ -1598,12 +1614,25 @@ mod tests {
             c1: vec![0.75],
         });
         let at = |t: f64| f.apply1(t).and_then(|v| v.first().copied()).unwrap_or(-1.0);
+        // By hand, from `0.25 + t²·(0.75 − 0.25)`:
         assert!(close(at(0.0), 0.25), "C0 at t = 0, got {}", at(0.0));
-        assert!(close(at(1.0), 1.0), "C0 + C1 at t = 1, got {}", at(1.0));
         assert!(
-            close(at(0.5), 0.25 + 0.75 * 0.25),
-            "n = 2 squares it, got {}",
+            close(at(1.0), 0.75),
+            "C1 at t = 1, which the wrong rule makes 1.0; got {}",
+            at(1.0)
+        );
+        assert!(
+            close(at(0.5), 0.25 + 0.25 * 0.5),
+            "n = 2 squares the parameter and the ramp runs from C0 to C1: \
+             0.25 + 0.5²·0.5 = 0.375, got {}",
             at(0.5)
+        );
+        // The other half of the rule: the ends are the ends, so every value between them is
+        // between them. A quarter of the way is a quarter of the way from C0 to C1.
+        assert!(
+            close(at(0.25), 0.25 + 0.0625 * 0.5),
+            "0.25 + 0.25²·0.5 = 0.28125, got {}",
+            at(0.25)
         );
     }
 
@@ -1641,6 +1670,10 @@ mod tests {
         );
     }
 
+    /// Two functions stitched end to end have to meet. The second half runs from `0.5` to
+    /// `1.0`, which is `C0 = 0.5, C1 = 1.0` under the specification's rule and not
+    /// `C0 = 0.5, C1 = 0.5`: the second of those is a constant function of value `0.5`, so a
+    /// stitch built from it would end the gradient halfway and stay there.
     #[test]
     fn a_stitching_function_picks_the_right_part() {
         let part = |c0: f64, c1: f64| {
@@ -1653,7 +1686,7 @@ mod tests {
         };
         let s = Function::Stitching(Stitching {
             domain: vec![[0.0, 1.0]],
-            functions: vec![part(0.0, 0.5), part(0.5, 0.5)],
+            functions: vec![part(0.0, 0.5), part(0.5, 1.0)],
             bounds: vec![0.5],
             encode: vec![[0.0, 1.0], [0.0, 1.0]],
         });

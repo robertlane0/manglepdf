@@ -2,13 +2,20 @@
 
 Where the work actually is. Updated whenever a milestone moves.
 
-A word about the tests here, because it is the pattern rather than any single finding. Four
+A word about the tests here, because it is the pattern rather than any single finding. Five
 of the real defects this project has had were invisible to its own suite and were found by
 comparing against something outside: a page rendered at scale squared, a clip transformed
-twice, a test helper missing an absolute value, and a compression format that only this
-project could read. Each was masked by the same thing — fixtures written to be simple, and
-therefore symmetric. A symmetric page renders correctly even when it is rendered wrongly, so
-the shape of a fixture decides how much of a renderer's arithmetic it actually exercises.
+twice, a filled path transformed twice, a test helper missing an absolute value, and a
+compression format that only this project could read. Each was masked by the same thing —
+fixtures written to be simple, and therefore symmetric. A symmetric page renders correctly
+even when it is rendered wrongly, so the shape of a fixture decides how much of a renderer's
+arithmetic it actually exercises. The two path defects were masked the same way twice over:
+the one test that named the doubled transformation used a *clip*, which was installed from the
+page placement alone and therefore already right, and its fill was exactly its clip — so the
+test passed with the bug and would have passed with the fix. A gradient function is the same
+shape of mistake in the other direction: `C0 + x^N·(C1 − C0)` and `C0 + x^N·C1` are the same
+number when `C0` is zero, and every fixture in this repository that exercises one writes
+`C0 [0]`.
 
 ## Milestones
 
@@ -245,7 +252,7 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Tests
 
-788 passing, 1 ignored, none failing, no warnings. The ignored one is the Tier-B wild
+792 passing, 1 ignored, none failing, no warnings. The ignored one is the Tier-B wild
 corpus — a two-hour job, run deliberately with
 `cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture`; the two cheap
 tests in the same file check the harness itself and run by default. Ten kinds matter:
@@ -284,6 +291,14 @@ tests in the same file check the harness itself and run by default. Ten kinds ma
   rather than two that happen to agree. An image mask in a pattern colour draws; a tiling
   pattern is reported by name; a shading in a `/Separation` colour space is reported rather
   than read as the grey its one-component function looks like.
+  A filled path under a `cm` is checked against the closed form rather than a proportion of
+  the page: `50 0 0 50 10 10 cm` over `0 0 1 1 re` must cover device pixels `10·scale` to
+  `60·scale` on both axes and nothing else, at three scales, and `30 0 0 10` must give a
+  rectangle three times as wide as it is tall rather than the nine-to-one one a second
+  application of the transformation would give. The same path with no `cm` is pinned
+  separately, because that is the case every other fixture in the file is and the one a fix in
+  the wrong place would leave passing. An image and a glyph under the same kind of `cm` are
+  compared against the same mark with no `cm`, which is what says they were not moved by it.
   Two of those fixtures are about the clip: a diagonal-clip page scores **0.99639** against
   `mutool`, and so does a page whose clip outlives the mark that set it, which is the case a
   per-mark reset got wrong. Both are deliberately asymmetric — nothing is mirrored in either
@@ -517,7 +532,8 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    quietly wrong. A *shading* pattern as a fill colour does draw, per pixel; the tiling loop
    is what is missing, and a note about a fill in a tiling says which pattern type it did not
    draw, because one cell of a tiling is a texture that looks plausible and is wrong
-   everywhere. The type-2 function's own rule is a separate matter and is recorded as D10.
+   everywhere. The type-2 function's own rule was a separate matter, recorded as D10 and
+   since fixed against ISO 32000-1 Table 42.
 7. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the marks the content layer produces.
 8. **An object that came out of an object stream cannot keep its original bytes**,
@@ -525,6 +541,14 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    save writes it as a direct object, which every reader accepts but which is a
    re-serialisation rather than a copy.
 9. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
+10. **A stroke's width does not scale with the page.** `Record::device_line_width` is
+   `stroke.width × ctm.mean_scale()`, so it carries the content stream's `cm` and nothing
+   else — not the page placement, which is what turns points into pixels. Geometry and width
+   are therefore scaled by different factors: `2 w` on `0 0 10 10 re` under `4 0 0 4 50 50 cm`
+   is 48 device pixels wide at scale 1 and 88 at scale 2, where the closed form says 96, so a
+   stroke does not thicken when the page is zoomed. This is the D9 measurement's by-product
+   and is deliberately **not** fixed here: D9's figures were measured without it, and a
+   change to stroke width moves every stroked page on the corpus.
 
 ## Metric-compatible aliases
 

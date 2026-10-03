@@ -2795,7 +2795,12 @@ fn true_type_font() -> Result<Vec<u8>, String> {
 /// by the oracle would compare a drawn page against a differently-drawn one and the score
 /// would be about the font loader rather than about the outlines. `/Length` is written
 /// correctly, so a reader that believes it has no trouble with binary bytes.
-fn text_page(font: &[u8], text: &str, size: f64) -> Vec<u8> {
+///
+/// `cm` is a `cm` operator's six numbers, written in front of the `BT`, or empty for none. It
+/// is what puts the text under a transformation at all: a glyph's placement already carries
+/// the CTM, so a fixture that wants to ask whether a transformation reaches a glyph has to
+/// write one, and taking it from the caller is cheaper than a second font-embedding builder.
+fn text_page(font: &[u8], text: &str, size: f64, cm: &str) -> Vec<u8> {
     let mut program = mangle_font::Program::new(font.to_vec());
     let units = program.units_per_em().unwrap_or(1000);
     // `/Widths` in thousandths of an em, from the font's own advances, over the ASCII range.
@@ -2834,7 +2839,15 @@ fn text_page(font: &[u8], text: &str, size: f64) -> Vec<u8> {
     at[3] = out.len();
     out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
     at[4] = out.len();
-    let content = format!("BT 0 0 0 rg /F1 {size} Tf 18 60 Td ({text}) Tj ET");
+    // `cm` with nothing on the operand stack is an operator error, and the oracle stops on
+    // one: `q  cm BT ...` leaves `mutool` with a blank page. So the transformation is either
+    // written in full or not written at all, and the empty case is byte for byte what it
+    // always was rather than a degenerate matrix.
+    let content = if cm.is_empty() {
+        format!("BT 0 0 0 rg /F1 {size} Tf 18 60 Td ({text}) Tj ET")
+    } else {
+        format!("q {cm} cm BT 0 0 0 rg /F1 {size} Tf 18 60 Td ({text}) Tj ET Q")
+    };
     let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
     body.extend_from_slice(content.as_bytes());
     body.extend_from_slice(b"\nendstream\nendobj\n");
@@ -2884,7 +2897,7 @@ fn render_text_page(
     scale: f64,
 ) -> Result<mangle_render::PageRender, String> {
     let font = true_type_font()?;
-    let doc = open(text_page(&font, text, size));
+    let doc = open(text_page(&font, text, size, ""));
     let all = pages(&doc);
     let page = all.first().expect("a page");
     let resources = page
@@ -3007,7 +3020,7 @@ fn our_glyphs_agree_with_mutools() {
     let dir = std::env::temp_dir().join("mangle-render-oracle");
     std::fs::create_dir_all(&dir).expect("a place to work");
     let pdf = dir.join("text.pdf");
-    std::fs::write(&pdf, text_page(&font, text, 36.0)).expect("a file to render");
+    std::fs::write(&pdf, text_page(&font, text, 36.0, "")).expect("a file to render");
 
     let scale = 150.0 / 72.0;
     let ours = render_text_page(text, 36.0, scale).expect("a font");
@@ -3382,6 +3395,246 @@ fn a_clip_under_a_scaled_ctm_is_not_transformed_twice() {
              the whole page and every quadrant would be black"
         );
     }
+}
+
+// ── Where a path lands when a `cm` is in front of it ─────────────────────────────────
+
+/// The smallest box bounding every pixel that has ink on it, in device pixels and with the
+/// right and bottom edges exclusive, so it reads as a range the way the assertions below
+/// quote it.
+///
+/// The threshold is a low one on purpose. A solid fill is far darker than this and paper is
+/// exactly zero, so the box is not sensitive to it; what it does decide is whether a partly
+/// covered antialiased edge pixel counts, which is a question about the intent of a
+/// "nothing else is drawn" assertion rather than about the rasteriser.
+fn ink_box(image: &mangle_render::Image) -> Option<(usize, usize, usize, usize)> {
+    let mut b: Option<(usize, usize, usize, usize)> = None;
+    for y in 0..image.height {
+        for x in 0..image.width {
+            if darkness(image, x, y) > 8 {
+                b = Some(match b {
+                    None => (x, y, x + 1, y + 1),
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1)),
+                });
+            }
+        }
+    }
+    b
+}
+
+/// The box a page-space rectangle occupies in device pixels.
+///
+/// `y` counts downward on a device and upward on a page, so a rectangle from `(x0, y0)` to
+/// `(x1, y1)` in page points is rows from `height − y1·scale` to `height − y0·scale`, and a
+/// translation by `f` in page points moves it *up* the image by `f·scale` rows.
+///
+/// Every scale used with this is one where the page fits its canvas exactly, so the page's
+/// own scale and the render's are the same number: at 150 DPI a 200 point page is 417
+/// pixels wide and the effective scale is 417/200, not 150/72, and a closed form written
+/// against the requested scale would be wrong by a pixel for a reason that has nothing to do
+/// with what it is measuring.
+fn box_pixels(
+    image: &mangle_render::Image,
+    scale: f64,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+) -> (usize, usize, usize, usize) {
+    let h = image.height as f64;
+    (
+        (x0 * scale).round() as usize,
+        (h - y1 * scale).round() as usize,
+        (x1 * scale).round() as usize,
+        (h - y0 * scale).round() as usize,
+    )
+}
+
+/// The ink box as page points, `(x0, y0, x1, y1)`, with `y` counting up as a page's does.
+fn ink_points(image: &mangle_render::Image, scale: f64) -> Option<(f64, f64, f64, f64)> {
+    ink_box(image).map(|(x0, y0, x1, y1)| {
+        let h = image.height as f64;
+        (
+            x0 as f64 / scale,
+            (h - y1 as f64) / scale,
+            x1 as f64 / scale,
+            (h - y0 as f64) / scale,
+        )
+    })
+}
+
+/// The same rectangle with a `cm` in front of it lands at the size and the place the matrix
+/// says, and nowhere else.
+///
+/// The interpreter's `device_path` has already multiplied the path's points by the CTM, so
+/// the placement is the only transformation left to apply. Applying the mark's own matrix on
+/// top of that applies the CTM twice: `0 0 1 1 re` under `50 0 0 50 10 10 cm` becomes a 2500
+/// point square starting at (510, 510), which is off a 200 point page and therefore drawn
+/// nowhere. This is the closed form, stated rather than sampled, and it is checked at three
+/// scales because "off the page" and "twice the size" are different wrong answers.
+#[test]
+fn a_filled_path_under_a_ctm_lands_where_the_matrix_says() {
+    for scale in [1.0, 2.0, 3.0] {
+        let render = render(
+            page_with("q 50 0 0 50 10 10 cm 1 0 0 rg 0 0 1 1 re f Q", 200),
+            scale,
+        );
+        assert!(
+            render.notes.is_empty(),
+            "at scale {scale}: a filled rectangle under a `cm` should draw without \
+             complaint: {:?}",
+            render.notes
+        );
+        // Page (10, 10) to (60, 60): the CTM's own translation, and a unit square scaled by
+        // fifty on both axes.
+        let want = box_pixels(&render.image, scale, 10.0, 10.0, 60.0, 60.0);
+        let got =
+            ink_box(&render.image).unwrap_or_else(|| panic!("nothing was drawn at scale {scale}"));
+        assert_eq!(
+            got, want,
+            "at scale {scale}: the ink is exactly the rectangle the matrix places"
+        );
+        // And the two claims the box does not make on its own: the inside is the fill colour
+        // and the page immediately around it is paper.
+        let (mid_x, mid_y) = (
+            usize::midpoint(want.0, want.2),
+            usize::midpoint(want.1, want.3),
+        );
+        let Some([r, g, b, _]) = render.image.get(mid_x, mid_y) else {
+            panic!("no pixel at the middle of the rectangle");
+        };
+        assert!(
+            close_to([r, g, b], [255, 0, 0]),
+            "at scale {scale}: the middle of the rectangle is the colour it was filled with, \
+             got ({r}, {g}, {b})"
+        );
+        for (x, y, which) in [
+            (want.0 as i64 - 2, mid_y as i64, "to its left"),
+            (want.2 as i64 + 1, mid_y as i64, "to its right"),
+            (mid_x as i64, want.1 as i64 - 2, "below it"),
+            (mid_x as i64, want.3 as i64 + 1, "above it"),
+        ] {
+            if x < 0 || y < 0 {
+                continue;
+            }
+            let (x, y) = (x as usize, y as usize);
+            if x >= render.image.width || y >= render.image.height {
+                continue;
+            }
+            assert!(
+                darkness(&render.image, x, y) == 0,
+                "at scale {scale}: the page {which} is paper, and a rectangle fifty times \
+                 too large would have run off the page instead of landing beside itself"
+            );
+        }
+    }
+}
+
+/// The same rectangle with no `cm` in front of it lands where the page puts it.
+///
+/// This is the case every other fixture in this file is, and the one that a fix made in the
+/// wrong place breaks: removing the CTM application from `device_path` instead of from the
+/// renderer leaves this test passing and takes every scaled path on every real page with it,
+/// so it is pinned here rather than left to the corpus.
+#[test]
+fn a_filled_path_without_a_ctm_is_where_the_page_puts_it() {
+    for scale in [2.0, 3.0] {
+        let render = render(page_with("1 0 0 rg 0 0 1 1 re f", 200), scale);
+        let want = box_pixels(&render.image, scale, 0.0, 0.0, 1.0, 1.0);
+        let got =
+            ink_box(&render.image).unwrap_or_else(|| panic!("nothing was drawn at scale {scale}"));
+        assert_eq!(
+            got, want,
+            "at scale {scale}: with no `cm` the identity leaves the rectangle where it was"
+        );
+    }
+}
+
+/// A non-uniform scale, because it is where applying a transformation twice is hardest to
+/// mistake for something else.
+///
+/// A uniform `50 0 0 50` applied twice is a square either way, so a mistransformed rectangle
+/// is still a square and a test that only asks "is it square" would pass. `30 0 0 10` is
+/// thirty wide and ten tall, and applying it twice gives a rectangle of ratio 900:100 — a 9:1
+/// shape, which cannot be confused with the 3:1 one the matrix says. The expected box is
+/// stated from the matrix rather than read off a previous run of this code.
+#[test]
+fn a_filled_path_under_a_non_uniform_ctm_is_not_squashed_or_doubled() {
+    let scale = 2.0;
+    let render = render(
+        page_with("q 30 0 0 10 20 40 cm 1 0 0 rg 0 0 1 1 re f Q", 200),
+        scale,
+    );
+    // Page (20, 40) to (50, 50): thirty wide and ten tall, at the matrix's own translation.
+    let want = box_pixels(&render.image, scale, 20.0, 40.0, 50.0, 50.0);
+    let got = ink_box(&render.image).expect("something was drawn");
+    assert_eq!(
+        got, want,
+        "the rectangle is three times as wide as it is tall, and the CTM has been applied \
+         once: a second application would make it 900 by 100 and put it off the page"
+    );
+    assert_eq!(
+        want.2 - want.0,
+        (want.3 - want.1) * 3,
+        "and the drawn box really is 3:1, which is what `30 0 0 10` says"
+    );
+}
+
+/// An image and a glyph under a `cm` are placed by it once, as they always were.
+///
+/// The fix is in the path arm and touches nothing else, which is exactly the kind of claim a
+/// regression needs pinned rather than assumed: an image and a glyph each carry their own
+/// placement, and a change made one step away in the wrong direction would move them. Both
+/// are compared against the *same mark with no `cm`*, so the expected answer is the closed
+/// form — the matrix's effect on a box that is already known — rather than a snapshot of a
+/// render, and both use a non-uniform scale so that half of the answer would be wrong if the
+/// placement were applied twice.
+#[test]
+fn an_image_and_a_glyph_under_a_ctm_are_moved_by_it_once() {
+    let scale = 2.0;
+    // An eight by eight image over the unit square, drawn twice under matrices that differ
+    // by a half in the x scale and a translation of (40, 20). Both stay inside the 200 point
+    // page, so nothing is clipped and the closed form needs no exception.
+    let image_page =
+        |cm: &str| placed_image_page(200, &format!("q {cm} cm /Im0 Do Q"), &quadrant_samples());
+    let plain = render(image_page("100 0 0 100 0 0"), scale);
+    let moved = render(image_page("50 0 0 100 40 20"), scale);
+    let (x0, y0, x1, y1) = ink_points(&plain.image, scale).expect("the image at the origin");
+    let want = box_pixels(
+        &moved.image,
+        scale,
+        x0 * 0.5 + 40.0,
+        y0 + 20.0,
+        x1 * 0.5 + 40.0,
+        y1 + 20.0,
+    );
+    assert_eq!(
+        ink_box(&moved.image).expect("the image under the `cm`"),
+        want,
+        "the image is placed by its own matrix, which the path arm does not touch"
+    );
+
+    let Ok(font) = true_type_font() else {
+        eprintln!("skipped: no TrueType font to embed");
+        return;
+    };
+    let glyph_page = |cm: &str| text_page(&font, "H", 48.0, cm);
+    let plain = render(glyph_page("1 0 0 1 0 0"), scale);
+    let moved = render(glyph_page("0.5 0 0 0.5 20 5"), scale);
+    let (x0, y0, x1, y1) = ink_points(&plain.image, scale).expect("the glyph at its own place");
+    let want = box_pixels(
+        &moved.image,
+        scale,
+        x0 * 0.5 + 20.0,
+        y0 * 0.5 + 5.0,
+        x1 * 0.5 + 20.0,
+        y1 * 0.5 + 5.0,
+    );
+    assert_eq!(
+        ink_box(&moved.image).expect("the glyph under the `cm`"),
+        want,
+        "and so is the glyph: half as wide and half as tall, translated by (20, 5)"
+    );
 }
 
 // ── CFF fonts: Type 2 charstrings, executed rather than walked ─────────────────────

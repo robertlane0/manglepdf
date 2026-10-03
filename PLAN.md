@@ -282,11 +282,15 @@ renderer that never has to ask the machine for a font.
    per pixel where the fill lands, sharing `sh`'s evaluator; a `/PatternType 1` tiling
    pattern needs a loop over cells in the pattern's own space — `/Matrix`, `/BBox`, `/XStep`,
    `/YStep` and paint type — and is reported by name rather than approximated with one cell.
-   Two defects that were found while building the fill, and are recorded but not fixed, are
-   [D9](docs/known-diffs.md) (a filled path is transformed by the content stream's `cm`
-   twice) and [D10](docs/known-diffs.md) (the type-2 function adds `C1` where the
-   specification adds `C1 − C0`). D9 is the more urgent of the two: it moves every filled
-   shape on every page that uses a `cm`.
+   Two defects found while building the fill have since been fixed: [D9](docs/known-diffs.md)
+   (a filled path was transformed by the content stream's `cm` twice, so a fill under a
+   scaled `cm` landed off the page and was drawn nowhere) and [D10](docs/known-diffs.md) (the
+   type-2 function added `C1` where the specification adds `C1 - C0`, which is the same answer
+   only when `C0` is zero). D9 was the urgent one and its two corpus pages are at 0.98826 and
+   0.99366; D10's is at 0.92923, and what is left there is the oracle's dither rather than a
+   wrong colour. What the D9 measurement turned up on the way is a defect neither entry
+   covered: a stroke's width is scaled by the CTM and by nothing else, so it is not multiplied
+   by the page placement and a stroke does not thicken when the page is zoomed.
 3. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
    not going to be built.
 4. **Fill the Inspector's right-hand region** from the object model, which is the window work
