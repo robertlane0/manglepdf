@@ -3637,6 +3637,237 @@ fn an_image_and_a_glyph_under_a_ctm_are_moved_by_it_once() {
     );
 }
 
+// ── How wide a stroke is, in device pixels ────────────────────────────────────────
+
+/// The device-pixel box a page-space rectangle occupies when its edges are *not* whole pixels.
+///
+/// [`box_pixels`] rounds, which is right for an edge on a boundary and wrong by a pixel for an
+/// edge in the middle of one: a shape ending at 95.66 device pixels inks 96 of them, and
+/// `round(95.66)` is 96 by luck rather than by argument. This floors the near edges and ceils the
+/// far ones, which is what the antialiased edge actually covers, and it is only exact when the
+/// edge is at least `8/255` of a pixel inside its pixel rather than a hair outside it — which the
+/// two scales it is used at both are.
+fn box_pixels_between(
+    image: &mangle_render::Image,
+    scale: f64,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+) -> (usize, usize, usize, usize) {
+    let h = image.height as f64;
+    (
+        (x0 * scale).floor() as usize,
+        (h - y1 * scale).floor() as usize,
+        (x1 * scale).ceil() as usize,
+        (h - y0 * scale).ceil() as usize,
+    )
+}
+
+/// The `2 w` square under `4 0 0 4 50 50 cm` that D9 measured, as a fixture.
+///
+/// D9 measured the ink of this stroke at two render scales to find a missing factor, and the
+/// measurement is what this whole section is about, so it is the fixture rather than a new one.
+/// `0 0 10 10 re` under `4 0 0 4 50 50 cm` is a square of side 40 on the page, from (50, 50) to
+/// (90, 90), and a width of `2 × 4 = 8` points puts the ink half that width either side of the
+/// centre lines.
+fn stroke_under_a_ctm_page() -> Vec<u8> {
+    page_with("q 4 0 0 4 50 50 cm 0 0 0 RG 2 w 0 0 10 10 re S Q", 200)
+}
+
+/// A stroke's width grows with the page, which is what a stroke drawn on a canvas is.
+///
+/// The defect this pins is a missing factor rather than a doubled one, and it was measured in
+/// D9's own fixture: `Record::device_line_width` is `w × ctm.mean_scale()`, so it carried the
+/// content stream's `cm` and nothing else, and the same stroke was 48 device pixels wide at
+/// scale 1 and 88 at scale 2 where the closed form is 96. The page's geometry *did* scale, so
+/// the stroke was a hairline at every zoom — thinner, relatively, the further in you went.
+///
+/// The width is checked at three scales and against the closed form rather than against the
+/// scale-1 answer, because "the ink width doubles" and "the ink width is `48 × scale`" are the
+/// same claim and only the second survives a scale where the factor is not a whole number.
+#[test]
+fn a_strokes_width_grows_with_the_page_scale() {
+    for scale in [1.0, 2.0, 3.0] {
+        let render = render(stroke_under_a_ctm_page(), scale);
+        assert!(
+            render.notes.is_empty(),
+            "at scale {scale}: a stroked square under a `cm` draws without complaint: {:?}",
+            render.notes
+        );
+        // Centre lines at 50 and 90, half a width of `2 × 4 × scale / 2 = 4·scale` either side:
+        // page (46, 46) to (94, 94) at scale 1, which is 48 pixels across and 48·scale at any.
+        let want = box_pixels(&render.image, scale, 46.0, 46.0, 94.0, 94.0);
+        assert_eq!(
+            ink_box(&render.image).unwrap_or_else(|| panic!("nothing was drawn at scale {scale}")),
+            want,
+            "at scale {scale}: the stroke is 48·scale pixels across, so it thickens as the page \
+             does"
+        );
+        assert_eq!(
+            want.2 - want.0,
+            ((94.0 - 46.0) * scale).round() as usize,
+            "at scale {scale}: which is the closed form for a width of 2 under a `cm` of 4, \
+             scaled by the page"
+        );
+    }
+}
+
+/// The D9 measurement itself, pinned: `2 w` on `0 0 10 10 re` under `4 0 0 4 50 50 cm` puts its
+/// ink exactly on page (46, 46) to (94, 94).
+///
+/// This held before the width was scaled by the placement and holds after it, which is the
+/// point: it is the one place where the geometry and the width are scaled by the same factors,
+/// so a fix applied to the width alone — or to it twice — breaks it. Stated in page points and
+/// checked at three scales, because "the geometry moved" and "the width moved" are different
+/// wrong answers and only the box says both.
+#[test]
+fn a_stroked_path_under_a_ctm_is_where_the_matrix_says() {
+    for scale in [1.0, 2.0, 4.0] {
+        let render = render(stroke_under_a_ctm_page(), scale);
+        let want = box_pixels(&render.image, scale, 46.0, 46.0, 94.0, 94.0);
+        assert_eq!(
+            ink_box(&render.image).expect("the stroked square"),
+            want,
+            "at scale {scale}: page (46, 46) to (94, 94) is 40 points of path plus 4 either \
+             side, which is the closed form for `2 w` under `4 0 0 4`"
+        );
+    }
+}
+
+/// A stroke with no `cm` in front of it is where it was, unchanged.
+///
+/// Every other fixture in this file has no `cm`, so this is the case a fix in the wrong place
+/// breaks first: applying the page placement to the *record's* width as well as to the geometry
+/// would double the factor on a page whose `cm` is the identity, and nothing else here would
+/// notice. A page at scale 1 has a placement of exactly 1, so the width must be exactly the
+/// number the stream gave.
+#[test]
+fn a_stroke_without_a_ctm_is_the_width_the_stream_asked_for() {
+    for scale in [1.0, 2.0] {
+        // A horizontal line with a butt cap: the ink is the width, and nothing else rounds it.
+        let render = render(page_with("0 0 0 RG 6 w 20 100 m 180 100 l S", 200), scale);
+        let drawn = ink_box(&render.image).expect("the line was drawn");
+        assert_eq!(
+            drawn.3 - drawn.1,
+            (6.0 * scale).round() as usize,
+            "at scale {scale}: the line is six points wide, which is six·scale pixels and no \
+             more — the placement applies once, and the identity applies nothing"
+        );
+        // The centre line is at page y = 100, so the ink is symmetric about it.
+        assert_eq!(
+            (drawn.1 + drawn.3) as f64 / 2.0,
+            200.0 * scale - 100.0 * scale,
+            "at scale {scale}: and centred on the line the stream drew"
+        );
+    }
+}
+
+/// A hairline is a hairline: one device pixel, at every scale.
+///
+/// `w 0` means the thinnest line the device can render, which is one pixel — and *one pixel*
+/// rather than a hundredth of one, because a zero that becomes zero pixels is not a hairline but
+/// an absence. Poppler was asked and gives a single hard row at 72, 150 and 300 DPI alike, which
+/// is the specification's rule and a property of the device rather than of the page: a hairline
+/// does not thicken when the page is zoomed, which is the whole of what distinguishes it from a
+/// thin line.
+///
+/// The width is measured as ink *across* the line rather than as a bounding box, so the assertion
+/// holds whether the one pixel lands inside one row (centred on a pixel) or is shared between two
+/// (centred on a boundary). Both are the same width.
+#[test]
+fn a_hairline_is_one_device_pixel_at_every_scale() {
+    for scale in [1.0, 2.0, 3.0, 4.0] {
+        let render = render(page_with("0 0 0 RG 0 w 20 100 m 180 100 l S", 200), scale);
+        let Some((x0, y0, x1, y1)) = ink_box(&render.image) else {
+            panic!(
+                "at scale {scale}: `0 w` drew nothing at all, which is the absence rather \
+                    than the thinnest line"
+            );
+        };
+        // A column of ink across the middle of the line, summed rather than boxed.
+        let column = usize::midpoint(x0, x1);
+        let ink: u64 = (y0..y1)
+            .map(|y| u64::from(darkness(&render.image, column, y)))
+            .sum();
+        assert!(
+            ink.abs_diff(255) <= 2,
+            "at scale {scale}: the line is one pixel's worth of ink whatever the page scale, \
+             got {ink} across rows {y0}..{y1}"
+        );
+        // And it is a *line*, not a blob: it runs the length it was asked for.
+        assert!(
+            x1 - x0 >= (160.0 * scale).round() as usize - 1,
+            "at scale {scale}: the hairline runs the 160 points it was given, got {} pixels",
+            x1 - x0
+        );
+    }
+}
+
+/// A non-uniform `cm` scales a stroke's width by the geometric mean of its two axes.
+///
+/// This is the arithmetic, written out, because the answer is a choice and a choice with no
+/// arithmetic behind it is a guess:
+///
+/// - `4 0 0 2 50 50 cm` over `0 0 10 10 re` puts the path at page (50, 50) to (90, 70) — forty
+///   wide and twenty tall.
+/// - `2 w` is a half-width of 1 in the space the `cm` maps from.
+/// - The axes are 4 and 2, so the stroke the matrix really gives is the ellipse a circle of
+///   radius 1 becomes: semi-axes 4 and 2, eight across and four up where the path runs
+///   horizontally. **Both oracles on this machine draw that** — 48 by 24 device pixels for this
+///   square at scale 1, four and two either side of the centre lines.
+/// - This renderer has one width rather than an elliptical pen, and takes
+///   `sqrt(|det|) = sqrt(4 × 2) = sqrt(8) ≈ 2.828`, the geometric mean of the axes: a half-width
+///   of `2 × 2.828 / 2 ≈ 2.828` either side, which is page (47.17, 47.17) to (92.83, 72.83), or
+///   **45.7 by 25.7** device pixels at scale 1 — against the oracles' 48 by 24.
+///
+/// So the width is wrong in each axis — too narrow across, too wide up — and right between them,
+/// which is the trade a single number makes. The test pins the number rather than the wish: it
+/// is what this renderer does, stated so that a change to the choice — a stroked ellipse, say —
+/// fails here first.
+#[test]
+fn a_stroke_under_a_non_uniform_ctm_takes_the_geometric_mean_of_its_axes() {
+    // `w × sqrt(|det|) / 2` with `w = 2` and `|det| = 4 × 2`, so the half-width is `sqrt(8)`.
+    let half = 2.0 * (4.0f64 * 2.0).sqrt() / 2.0;
+    assert!(
+        (half * half - 8.0).abs() < 1e-12,
+        "the half-width is `w × sqrt(|det|) / 2`, so its square is `w² × |det| / 4 = 8`: got \
+         {half}"
+    );
+    for scale in [1.0, 4.0] {
+        let render = render(
+            page_with("q 4 0 0 2 50 50 cm 0 0 0 RG 2 w 0 0 10 10 re S Q", 200),
+            scale,
+        );
+        // Page (50, 50) to (90, 70), widened by the half-width on every side.
+        let want = box_pixels_between(
+            &render.image,
+            scale,
+            50.0 - half,
+            50.0 - half,
+            90.0 + half,
+            70.0 + half,
+        );
+        assert_eq!(
+            ink_box(&render.image).expect("the stroked square"),
+            want,
+            "at scale {scale}: `sqrt(|det|) = sqrt(8) ≈ 2.83` either side, where the oracles \
+             draw an ellipse of half-widths 4 and 2"
+        );
+        // The width lands between the two axis choices rather than on either of them, which is
+        // the whole claim a geometric mean makes. The x axis alone would give `40 + 2×4 = 48`
+        // pixels across and the y axis alone `40 + 2×2 = 44`; a pixel of slack either way,
+        // because the box above is floor-to-ceil of two edges that are not on the grid.
+        let drawn = want.2 - want.0;
+        let (narrow, wide) = ((44.0 * scale) as usize, (48.0 * scale) as usize);
+        assert!(
+            drawn + 1 >= narrow && drawn <= wide + 1,
+            "at scale {scale}: between the y axis' own answer ({narrow}) and the x axis' \
+             ({wide}), got {drawn}"
+        );
+    }
+}
+
 // ── CFF fonts: Type 2 charstrings, executed rather than walked ─────────────────────
 
 /// Where a CFF font might be, most-likely first.

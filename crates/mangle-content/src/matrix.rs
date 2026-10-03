@@ -154,8 +154,16 @@ impl Matrix {
             && self.f.abs() < EPS
     }
 
-    /// The scale factor to apply to a stroke width: the square root of the determinant
-    /// of the linear part, which is the mean of the two axis scales.
+    /// The scale factor to apply to a stroke width: the square root of the absolute
+    /// determinant of the linear part, which is the *geometric* mean of the two axis scales
+    /// (`|det| = s₁ × s₂`, so `sqrt(|det|) = sqrt(s₁) × sqrt(s₂)`) and the factor by which the
+    /// transform scales an area, since an area is multiplied by `|det| = s²`.
+    ///
+    /// A uniform transform is the easy case, where this is the only scale there is. A
+    /// non-uniform one has no single answer — the stroke of a line under `4 0 0 2` is an
+    /// ellipse, 8 across and 4 up — so this is the midpoint between the axes rather than a
+    /// claim to be either of them, and a renderer that can stroke with an elliptical pen should
+    /// use that instead.
     #[must_use]
     pub fn mean_scale(self) -> f64 {
         let det = self.determinant().abs();

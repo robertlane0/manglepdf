@@ -884,13 +884,101 @@ factor for the first time. Measured, `2 w` on `0 0 10 10 re` under `4 0 0 4 50 5
 ink exactly on page (46, 46) to (94, 94), which is the closed form: centre lines at 50 and 90,
 half a scaled width of 4 either side.
 
-What the measurement also turned up is a **separate** defect this change does not touch, and
-which the corpus figures above would move if it did: the width is scaled by the CTM and by
-nothing else, so it is not multiplied by the page placement. The same stroke is 48 device
-pixels wide at scale 1 and 88 at scale 2, where the geometry scales correctly and the answer
-should be 96 — a stroke does not thicken when you zoom in. That is a missing factor rather than
-a doubled one, it predates this entry, and it is worth its own entry rather than a line
-smuggled in beside a measurement that was taken without it.
+What the measurement also turned up is a **separate** defect this change does not touch: the
+width is scaled by the CTM and by nothing else, so it is not multiplied by the page placement.
+The same stroke is 48 device pixels wide at scale 1 and 88 at scale 2, where the geometry scales
+correctly and the answer should be 96 — a stroke does not thicken when you zoom in. That is a
+missing factor rather than a doubled one and it predates this entry, so it was left out of it
+rather than smuggled in beside a measurement taken without it.
+
+#### That defect is now fixed: the placement reaches the width too
+
+`page.rs` applies the placement to the path's points at draw time, because that is the only
+layer that knows the canvas, the scale and `/Rotate`. The width is in the same boat and is
+applied by the same code:
+
+```rust
+let width = device_line_width(record.device_line_width, placement);   // draw_mark, Mark::Path
+```
+
+`Record::device_line_width` still carries `w × ctm.mean_scale()` and still stops there — the
+interpreter cannot know the canvas, exactly as it cannot decide `Placement::fit`. The two
+factors are **multiplied** rather than composed into one matrix, because the geometry has
+already had the CTM applied to it by `device_path`: asking `placement ∘ ctm` for its scale would
+apply the CTM to the width a second time, which is this entry's defect wearing a different hat.
+
+The same stroke is now 48, 96 and 144 device pixels across at scales 1, 2 and 3. `mutool`,
+asked directly about that page at 72 and 144 DPI, draws 48 and 96 — the numbers this entry
+predicted.
+
+#### `0 w` is a hairline, and it is one device pixel
+
+The old code drew a stroke only when `device_line_width > 0.0`, so `w 0` drew **nothing at all**,
+which is not what the specification asks for. ISO 32000-1 Table 52: a `/LineWidth` of zero
+"shall be rendered as the thinnest line that can be rendered". A zero that becomes zero pixels
+is an absence, not a hairline, and `0 w` is how producers draw fine rules — so the width now
+floors at one device pixel.
+
+One pixel rather than a fraction of one, and one pixel *whatever the scale*: the thinnest line
+a device can draw is a property of the device, so a hairline does not thicken when the page is
+zoomed, which is the whole of what distinguishes it from a thin line. Poppler was asked and
+gives a single hard row for `0 w` at 72, 150 and 300 DPI alike. `mutool` 1.28 draws something
+much fainter — about 13% of black over two rows — so the two oracles differ here and the
+specification and poppler are followed.
+
+#### What a non-uniform `cm` still gets wrong
+
+This is the part that is **not** fixed, and it is worth being exact about why. It is also
+[D11](#d11--a-strokes-width-is-one-number-where-a-non-uniform-cm-makes-it-an-ellipse), which
+holds the measurement and the rest of the reasoning.
+
+A stroke of a non-uniform transformation is an ellipse: under `4 0 0 2` the pen is the image of
+a circle of radius `w/2`, so its semi-axes are `4 × w/2` and `2 × w/2` — for `2 w`, 4 and 2, so
+8 across and 4 up where the path runs horizontally. Both renderers on this machine draw that
+ellipse: `mutool` and poppler both put `2 w` on `0 0 10 10 re` under `4 0 0 2 50 50 cm` on
+**48 by 24** device pixels at scale 1, which is the 40-by-20 square with 4 and 2 either side.
+
+This renderer has one width rather than a pen that can be elliptical. It takes
+`Matrix::mean_scale` = `sqrt(|det|)`, the **geometric mean of the two axis scales**: the transform
+multiplies an area by `|det| = s²`, so `s` is the factor by which it scales a region, and it is
+the midpoint *between* the axes rather than outside them — the most a single number can be when
+the truth is an ellipse. For that stroke it is `2 × sqrt(8) ≈ 5.657`, which is **45.7 by 25.7**
+device pixels: too narrow across and too wide up, by about 5% and 7% at scale 1.
+
+That is defensible but it is not the same as correct, and the reason it is not fixed here is a
+size one rather than a difficulty: the exact ellipse means stroking in user space and
+transforming the finished outline, which is a change to the stroker (`stroke_outline` takes a
+half-width and offsets by it, twice) rather than to this arithmetic, and it would move every
+stroked page on the corpus a second time. The arithmetic is pinned by
+`a_stroke_under_a_non_uniform_ctm_takes_the_geometric_mean_of_its_axes`, with the two oracles'
+numbers written out beside it, so a change to the choice fails there first.
+
+#### What it bought, measured against `mutool` at 150 DPI
+
+| file | page | before | after | our ink before | our ink after | oracle ink |
+|---|---|---|---|---|---|---|
+| `gov__irs-f1040` | 1 | 0.93970 | **0.97348** | 45 501 092 | 50 689 496 | 52 616 027 |
+| `gov__irs-fw4` | 1 | 0.95949 | **0.97742** | 40 588 966 | 43 846 558 | 44 132 346 |
+| `gov__arxiv-1512.03385` | 1 | 0.94453 | 0.94472 | 28 667 788 | 28 689 444 | 29 188 929 |
+
+The two IRS forms are forms of ruled boxes and lines, so they are the pages where a stroke's
+width is most of the drawing; `f1040` gains 0.034 of SSIM and reaches 96.3% of the oracle's ink
+where it reached 86.5%. Five files this renderer draws no strokes on measured identical before
+and after, which is what says the change is confined to strokes. A full 542-page re-run is
+wanted and takes two hours.
+
+#### The tests
+
+Five new tests in `crates/mangle-render/tests/pages.rs`, all stated as closed forms rather than
+as snapshots of a render. Each was checked by reverting the fix in `page.rs` alone:
+
+| test | what it pins | on the old code |
+|---|---|---|
+| `a_strokes_width_grows_with_the_page_scale` | `2 w` on `0 0 10 10 re` under `4 0 0 4 50 50 cm` inks exactly 48·scale pixels across, at scales 1, 2 and 3 | **fails**: 88 at scale 2, where the closed form is 96 |
+| `a_stroked_path_under_a_ctm_is_where_the_matrix_says` | the same stroke on page (46, 46)–(94, 94), pinned at three scales because "the geometry moved" and "the width moved" are different wrong answers | **fails** at scale 2 and 4, passes at scale 1 |
+| `a_stroke_without_a_ctm_is_the_width_the_stream_asked_for` | a `6 w` line with no `cm` inks 6·scale pixels, centred on the line the stream drew | **fails** at scale 2: 6 pixels where 12 is the closed form |
+| `a_hairline_is_one_device_pixel_at_every_scale` | `0 w` is one pixel's worth of ink at scales 1 to 4, measured as ink across the line rather than as a box | **fails**: nothing is drawn at all |
+| `a_stroke_under_a_non_uniform_ctm_takes_the_geometric_mean_of_its_axes` | `sqrt(|det|)` either side of `4 0 0 2`, with the oracles' ellipse written out beside it | **fails**: `sqrt(8)` is not what the old code drew |
 
 ### Why the clip is not a defence
 
@@ -973,3 +1061,68 @@ caught it. The one other test that broke is worth naming:
 under the wrong rule is a ramp from 0.5 to 1.0 and under the specification's is a *constant*
 0.5 — the stitch would have ended the gradient halfway. It is now `C0 = 0.5, C1 = 1.0`, which is
 the ramp both rules agree is a ramp.
+
+---
+
+## D11 — a stroke's width is one number, where a non-uniform `cm` makes it an ellipse
+
+**Severity: only a stroke drawn under a non-uniform transformation. Open, and recorded rather
+than closed.**
+
+A stroke's width is a scalar everywhere in this renderer: `Record::device_line_width` is
+`w × mean_scale(ctm)`, and `mangle_render::device_line_width` multiplies that by
+`mean_scale(placement)`. Both factors are now applied to the geometry's own scale as well
+(D9, which is fixed), so a stroke thickens with the page. But a non-uniform `cm` makes the
+correct stroke an **ellipse** — the image of the pen under the transformation — and one number
+cannot be an ellipse.
+
+### What the oracles draw, measured
+
+`2 w` on `0 0 10 10 re` under `4 0 0 2 50 50 cm`, on a 200 point page at 72 DPI. The path is
+40 by 20 on the page, from (50, 50) to (90, 70), and the pen is a circle of radius 1 which the
+matrix turns into an ellipse of semi-axes 4 and 2 — so 4 either side across and 2 either side
+up.
+
+| renderer | ink box, device pixels | that is |
+|---|---|---|
+| `mutool` 1.28.5 | 48 × 24 | the exact ellipse |
+| poppler 26.08 | 48 × 24 | the exact ellipse |
+| this renderer | **45.7 × 25.7** | `sqrt(|det|) = sqrt(8) ≈ 2.828` either side |
+
+5% narrow across and 7% wide up. Both oracles agree with each other and both disagree with us,
+so this is a real difference and not a rendering of a different fixture.
+
+### What this renderer does, and why
+
+`Matrix::mean_scale` is `sqrt(|det|)`: the **geometric mean** of the two axis scales, and the
+factor by which the transform scales a region, since an area is multiplied by `|det| = s²`. It
+is the midpoint *between* the axes rather than outside them, which is the most a single number
+can be when the truth is an ellipse. The arithmetic mean is worse on both axes at once:
+`(4 + 2)/2 = 3` would give 6 across and 6 up, where the oracles have 4 and 2 and `sqrt(8)` has
+2.83 and 2.83.
+
+The arithmetic is pinned by `a_stroke_under_a_non_uniform_ctm_takes_the_geometric_mean_of_its_axes`,
+which writes out the whole derivation and fails if the choice changes.
+
+### What fixing it would mean
+
+Stroking in user space and transforming the finished outline afterwards — which is what
+"the stroke is the path offset by `width/2`" means under a transformation, and what the module
+comment in `mangle-render/src/lib.rs` used to claim before it stopped being true. It is a
+change to `stroke_outline`, which offsets a polyline by a single half-width on both sides and
+adds the caps and joins by hand; a matrix-aware pen is a different data structure, not a new
+factor in an existing expression. It would also move every stroked page on the corpus a second
+time, so it wants its own entry and its own measurements rather than a line inside D9's.
+
+### What is not wrong here
+
+- **A uniform `cm`**, which is nearly every `cm` in practice: the pen stays a circle, `sqrt(|det|)`
+  is exactly its radius, and D9's fixture is drawn on the pixel both oracles put it on.
+- **A rotation**, which `|det|` ignores and must: `sqrt(|det|)` of a rotation is 1, and the
+  `a_rotated_page_puts_its_ink_where_the_rotation_says` test is unchanged.
+- **The placement**, which is always a uniform scale composed with a rotation and a shift.
+- **A dash pattern's lengths**, which are in user space and which nothing scales: `page.rs` hands
+  `record.dash` to the stroker unchanged, so a `[6 3]` pattern is six points of ink whatever the
+  page scale. `mutool` was asked and scales it — 6, 12 and 24 device pixels of on-run at 72,
+  144 and 288 DPI for one `[6 3] 0 d` line. That is a separate defect of the same shape, with
+  the same answer, and it is untouched by D9's fix and by this one.

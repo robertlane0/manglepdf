@@ -1013,14 +1013,18 @@ fn draw_mark(
                     }
                 }
             }
-            if let Some(colour) = stroke
-                && record.device_line_width > 0.0
-            {
+            if let Some(colour) = stroke {
+                // The one place a stroke's width becomes a number of device pixels, and it
+                // is here because that is the layer that knows the page scale — the same
+                // reason `polygon` above is transformed by the placement and not by
+                // `to_device`. `record.device_line_width` is the content stream's own
+                // factor; the placement's is applied alongside the geometry.
+                let width = device_line_width(record.device_line_width, placement);
                 match colour.to_rgba(None) {
                     Some(rgba) => {
                         let style = line_style_of(record.line_cap, record.line_join);
                         let style = StrokeStyle {
-                            width: record.device_line_width,
+                            width,
                             dash: record.dash.clone(),
                             ..style
                         };
@@ -1263,6 +1267,58 @@ pub fn fill_rule_of(rule: mangle_content::FillRule) -> FillRule {
     match rule {
         mangle_content::FillRule::EvenOdd => FillRule::EvenOdd,
         mangle_content::FillRule::NonZero => FillRule::NonZero,
+    }
+}
+
+/// The thinnest line a device can draw, in device pixels.
+///
+/// ISO 32000-1 Table 52: a `/LineWidth` of zero "shall be rendered as the thinnest line that
+/// can be rendered", which is one pixel and not zero — the line is a hairline, not an absence.
+/// One pixel is a property of the *device* rather than of the page, so it is one pixel at
+/// every scale: a hairline does not thicken when the page is zoomed, which is what makes it a
+/// hairline. Poppler, asked, gives a single hard row for `0 w` at 72, 150 and 300 DPI alike.
+const HAIRLINE_WIDTH: f64 = 1.0;
+
+/// The width a stroke is drawn at, in device pixels.
+///
+/// `Record::device_line_width` carries the content stream's own factor — `w × mean(ctm)` — and
+/// nothing else, because the interpreter knows the `cm` and no more: not the canvas, not the
+/// scale, not `/Rotate`. The factor that turns points into pixels is the renderer's, exactly as
+/// it is for `Placement::fit` and for the transformation of the path's own points, so it is
+/// applied here, at the same time and by the same code as the geometry beside it. Leaving it
+/// off is what made a stroke a hairline at every zoom: `2 w` on `0 0 10 10 re` under
+/// `4 0 0 4 50 50 cm` was 48 device pixels wide at scale 1 and 88 at scale 2, where the
+/// closed form is 96.
+///
+/// The two factors are **multiplied**, not composed into one matrix, because the geometry has
+/// already had the CTM applied to it by `device_path`. Asking `placement ∘ ctm` for its scale
+/// would apply the CTM to the width a second time, which is D9's defect wearing a different
+/// hat.
+///
+/// **A non-uniform `cm` has no single answer**, and this is the documented one: the geometric
+/// mean of the two axis scales, `sqrt(|det|)`, which is [`Matrix::mean_scale`]. A transform
+/// multiplies an area by `|det| = s²`, so `s` is the factor by which it scales a region, and it
+/// is the midpoint *between* the two axes rather than outside them — which is the most that a
+/// single number can be when the truth is an ellipse.
+///
+/// For `4 0 0 2` with `2 w` the stroke is the ellipse the matrix gives a circle of radius 1:
+/// semi-axes `1 × 4 = 4` and `1 × 2 = 2`, so 8 across and 4 up where the path runs
+/// horizontally, and both oracles on this machine draw exactly that — 48 by 24 device pixels
+/// for the square of `0 0 10 10 re`, which is 40 by 20 with 4 and 2 either side. This draws
+/// `2 × sqrt(8) ≈ 5.657` either side, which is 45.7 by 25.7: the right order of magnitude and
+/// the right ink on average, and a shape that is a compromise rather than the answer. Getting
+/// the ellipse means stroking in user space and transforming the outline afterwards, which is
+/// a change to the stroker and not to this arithmetic; `docs/known-diffs.md` records the
+/// difference until it is made.
+fn device_line_width(stream_width: f64, placement: &Matrix) -> f64 {
+    // `abs` because a negative width is invalid and `stroke_outline` already assumed one
+    // would be drawn from it; a width that cannot be a number at all is a hairline rather
+    // than an exception.
+    let width = stream_width.abs() * placement.mean_scale();
+    if width.is_finite() && width > 0.0 {
+        width
+    } else {
+        HAIRLINE_WIDTH
     }
 }
 

@@ -541,14 +541,30 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    save writes it as a direct object, which every reader accepts but which is a
    re-serialisation rather than a copy.
 9. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
-10. **A stroke's width does not scale with the page.** `Record::device_line_width` is
-   `stroke.width × ctm.mean_scale()`, so it carries the content stream's `cm` and nothing
-   else — not the page placement, which is what turns points into pixels. Geometry and width
-   are therefore scaled by different factors: `2 w` on `0 0 10 10 re` under `4 0 0 4 50 50 cm`
-   is 48 device pixels wide at scale 1 and 88 at scale 2, where the closed form says 96, so a
-   stroke does not thicken when the page is zoomed. This is the D9 measurement's by-product
-   and is deliberately **not** fixed here: D9's figures were measured without it, and a
-   change to stroke width moves every stroked page on the corpus.
+10. **A stroke's width is not a stroked ellipse.** The width now scales with everything the
+    geometry scales with — the content stream's `cm` at interpretation, the page placement at
+    draw time — so a stroke thickens when the page is drawn larger, and the missing factor
+    D9 measured is gone: `2 w` on `0 0 10 10 re` under `4 0 0 4 50 50 cm` was 48 device
+    pixels across at scale 1 and 88 at scale 2, and is 96 now, which is what `mutool` draws. A
+    *non-uniform* `cm` is the part still standing: the true stroke is the ellipse the matrix
+    gives a circle, and this renderer has one width rather than a pen that can be elliptical,
+    so it takes `sqrt(|det|)`, the geometric mean of the two axis scales. For `4 0 0 2` with
+    `2 w` both oracles draw 48 by 24 device pixels — the exact ellipse — where this draws
+    45.7 by 25.7. See D9 and `docs/known-diffs.md`.
+
+    **What it bought, measured against `mutool` at 150 DPI** on the two corpus pages with the
+    most stroked ink, which is where a missing factor showed:
+
+    | file | SSIM before | SSIM after | our ink before | our ink after | oracle ink |
+    |---|---|---|---|---|---|
+    | `gov__irs-f1040` | 0.93970 | **0.97348** | 45 501 092 | 50 689 496 | 52 616 027 |
+    | `gov__irs-fw4` | 0.95949 | **0.97742** | 40 588 966 | 43 846 558 | 44 132 346 |
+
+    `gov__arxiv-1512.03385` moved 0.94453 → 0.94472, and three files this renderer draws no
+    strokes on measured identical before and after — `pdfbox__PDFA3A` at 0.99923,
+    `pdfbox__simple-openoffice` at 0.99963, `pdfbox__openoffice-test-document` at 0.99998 —
+    which is what says the change is confined to strokes. A full 542-page re-run is still
+    wanted.
 
 ## Metric-compatible aliases
 

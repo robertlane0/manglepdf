@@ -8,9 +8,9 @@
 //!    from how far the curve bulges in device space rather than fixed, so a curve that is
 //!    nearly straight costs almost nothing.
 //! 2. **Stroke, if stroking.** A stroke is an outline, and building it means caps, joins,
-//!    dashes and the miter limit. It is done in user space, before the transformation, so
-//!    a stroke's width is the width the user asked for rather than a width distorted by
-//!    the matrix.
+//!    dashes and the miter limit. It is done on the polygon's own device-space points with a
+//!    width in the same space, so the two are scaled by the same factors and a stroke thickens
+//!    when the page is drawn larger.
 //! 3. **Rasterise coverage**, analytically, so a fill is exact rather than sampled.
 //! 4. **Clip**, intersect the coverage with the clip rather than testing it per pixel.
 //! 5. **Composite**, which is where colour, alpha and blending happen.

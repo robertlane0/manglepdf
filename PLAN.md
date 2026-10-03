@@ -289,8 +289,18 @@ renderer that never has to ask the machine for a font.
    only when `C0` is zero). D9 was the urgent one and its two corpus pages are at 0.98826 and
    0.99366; D10's is at 0.92923, and what is left there is the oracle's dither rather than a
    wrong colour. What the D9 measurement turned up on the way is a defect neither entry
-   covered: a stroke's width is scaled by the CTM and by nothing else, so it is not multiplied
-   by the page placement and a stroke does not thicken when the page is zoomed.
+   covered, and it is now fixed too: a stroke's width was scaled by the CTM and by nothing else,
+   so it was not multiplied by the page placement and a stroke did not thicken when the page was
+   zoomed. The placement is the renderer's business — it is the layer that knows the canvas and
+   the scale, and it is the layer that already scales the path's own points — so the width is
+   multiplied by it there, in the same place and by the same code, and the two factors multiply
+   rather than compose because the geometry has already had the `cm` applied. `gov__irs-f1040`
+   went from 0.93970 to 0.97348 and `gov__irs-fw4` from 0.95949 to 0.97742 against `mutool` at
+   150 DPI; a `w 0` hairline now draws as the specification's one device pixel instead of not at
+   all. What is left is [D11](docs/known-diffs.md): a non-uniform `cm` makes a stroke's width an
+   ellipse and this renderer has one number for it, so it takes `sqrt(|det|)` — 45.7 by 25.7
+   device pixels where both oracles draw the exact ellipse's 48 by 24. Fixing that means
+   stroking in user space and transforming the outline, which is a change to the stroker.
 3. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
    not going to be built.
 4. **Fill the Inspector's right-hand region** from the object model, which is the window work
