@@ -565,6 +565,49 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
     `pdfbox__simple-openoffice` at 0.99963, `pdfbox__openoffice-test-document` at 0.99998 —
     which is what says the change is confined to strokes. A full 542-page re-run is still
     wanted.
+11. **A dash pattern's lengths scale with the page, and its gaps are paper.** Both halves of
+    this were wrong at once, and the second hid the first: `stroke_polygon` received every
+    on-run and off-run from `walk_dashes` and **stroked both**, so any pattern drew as one
+    solid line, and the lengths were user-space lengths that nothing turned into pixels. A
+    `[6 3] 0 d` line was therefore a solid 160-point run at 72, 144 and 288 DPI alike.
+
+    Now the gaps are paper and the lengths scale, and both oracles agree with the result to the
+    pixel — `mutool draw` at 72, 144 and 288 DPI gives on-runs of 6, 12 and 24 pixels, and so
+    do we; `pdftoppm` agrees at 72. The same holds for `[6 3] 2 d`, where the two-unit phase
+    leaves a four-pixel first run at 72 DPI and an eight-pixel one at 144, and for the
+    zero-length entry `[6 0 3 4] 0 d`, which is nine of ink and four of paper at 72 DPI in all
+    three renderers.
+
+    **The scaling is in `page.rs`, beside the geometry, not in the interpreter** — the
+    interpreter knows the content stream's `cm` and no more, so a pattern scaled there would
+    carry one factor where the canvas's zoom is not. The two factors are multiplied exactly as
+    `device_line_width` multiplies them for a width. **The phase is scaled by the same factor
+    as the lengths**, which is what keeps it a phase: it is a distance into the pattern measured
+    against the pattern's own total, so scaling both leaves the fraction named unchanged, and
+    scaling only the lengths would move every dash along the line as the page is zoomed. **An
+    array that sums to zero is drawn solid** — `walk_dashes` returns before it divides by the
+    total — where both oracles draw nothing; that one is recorded in D11b rather than closed.
+
+    **What it bought, measured against `mutool` at 150 DPI**, page 1, on the corpus files that
+    carry a dash in their content:
+
+    | file | SSIM before | SSIM after | our ink before | our ink after | oracle ink |
+    |---|---|---|---|---|---|
+    | `gov__irs-f1040` | 0.97348 | **0.97408** | 50 689 496 | 50 572 581 | 52 616 027 |
+    | `gov__arxiv-1512.03385` | 0.94472 | 0.94472 | 28 689 444 | 28 689 444 | 29 188 929 |
+
+    Both are small movements, and honestly read: `gov__irs-f1040`'s page 1 gains 0.0006 SSIM
+    while its ink falls 116 915 further short of the oracle's, and `gov__arxiv-1512.03385`'s
+    page 1 does not move at all because its dashes are on another page. The corpus measurement
+    is weak here for a reason worth stating rather than hiding — **six of the seven corpus
+    files that contain a dash pattern draw almost no dashed ink on page 1**, so a single-page
+    score barely registers a change confined to dashes. What the oracle comparison above is for
+    is the direct check, and it is exact.
+
+    One further find, recorded because it is a page that draws nothing at all:
+    `pdfjs__issue13325_reduced` is one page with `[11.376 11.376] 0 d` in it and the largest
+    dashes in the corpus, and this renderer puts **zero ink** on it — 11 marks recorded and
+    nothing composited. That is a separate defect, not a dash one, and it is worth a look.
 
 ## Metric-compatible aliases
 

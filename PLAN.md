@@ -301,6 +301,27 @@ renderer that never has to ask the machine for a font.
    ellipse and this renderer has one number for it, so it takes `sqrt(|det|)` — 45.7 by 25.7
    device pixels where both oracles draw the exact ellipse's 48 by 24. Fixing that means
    stroking in user space and transforming the outline, which is a change to the stroker.
+   **The dash pattern has now had the same treatment** ([D11b](docs/known-diffs.md)), and it
+   turned out to be two defects rather than one. `stroke_polygon` received every on-run and
+   off-run from `walk_dashes` and **stroked both**, so a gap was a thinner stroke rather than
+   no stroke and every pattern drew solid — the flag was being thrown away one call away from
+   where it was computed. And the lengths themselves were user-space lengths that nothing
+   turned into pixels, so a `[6 3] 0 d` line was one solid run at 72, 144 and 288 DPI alike.
+   Both halves live in the same layer as the width, for the same reason: the interpreter knows
+   the content stream's `cm` and no more, so `page.rs` multiplies the array by
+   `mean_scale(ctm) × mean_scale(placement)` beside the geometry rather than the interpreter
+   carrying a half-converted pattern. **The phase is scaled by the same factor as the
+   lengths** — it is a distance into the pattern measured against the pattern's own total, so
+   scaling both leaves the fraction named unchanged, and scaling only the lengths would slide
+   every dash along the line as the page is zoomed. A zero-length entry is the one thing
+   scaling could break: a factor times a zero is a zero, and `walk_dashes` walks it as a
+   hairline, so `[6 0 3 4] 0 d` is nine of ink and four of paper as both oracles draw it.
+   `[6 3] 0 d` now gives 6, 12 and 24 pixel on-runs at 72, 144 and 288 DPI — `mutool`'s own
+   figures, matched to the pixel, with `pdftoppm` agreeing at 72. Against `mutool` at 150 DPI
+   the corpus movement is small, and that is stated rather than dressed: `gov__irs-f1040` page 1
+   is 0.97348 → 0.97408 and `gov__arxiv-1512.03385` page 1 does not move, because most corpus
+   dash patterns are sub-pixel or on another page. One case is left and recorded: an array that
+   sums to zero is drawn solid here, where both oracles draw nothing at all.
 3. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
    not going to be built.
 4. **Fill the Inspector's right-hand region** from the object model, which is the window work

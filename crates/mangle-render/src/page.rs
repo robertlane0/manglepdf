@@ -1025,7 +1025,10 @@ fn draw_mark(
                         let style = line_style_of(record.line_cap, record.line_join);
                         let style = StrokeStyle {
                             width,
-                            dash: record.dash.clone(),
+                            // The dash lengths are user-space lengths too, and they are
+                            // carried into device space by the same code that carries the
+                            // width and beside the geometry they are drawn along.
+                            dash: device_dash(&record.dash, &record.ctm, placement),
                             ..style
                         };
                         device.stroke_polygon(
@@ -1322,6 +1325,55 @@ fn device_line_width(stream_width: f64, placement: &Matrix) -> f64 {
     }
 }
 
+/// A dash pattern carried from the page's own units into device pixels.
+///
+/// Every number in a dash array is a **length in the space current when `d` ran**, which is
+/// user space, and so is `/Phase`: a pattern is a distance along the path, and a distance
+/// has to be multiplied by everything that turns a unit into a pixel. `mutool` was asked and
+/// does: `[6 3] 0 d` gives 6, 12 and 24 device pixels of on-run at 72, 144 and 288 DPI, while
+/// an unscaled array gives six at all three — a line that is dashed with a fixed pattern
+/// however far the page is zoomed in.
+///
+/// The factors are applied **here**, beside the geometry, and not in the interpreter, for
+/// `device_line_width`'s reason: the interpreter knows the content stream's `cm` and no more,
+/// so scaling the array there would put one factor where the canvas's is not, and the record
+/// would carry a pattern already half-converted. The two factors are therefore multiplied
+/// rather than composed into one matrix — `mean_scale(ctm) × mean_scale(placement)` — because
+/// the path's own points have already had the CTM applied to them by `device_path`, and asking
+/// `placement ∘ ctm` for its scale would apply the CTM to the lengths a second time.
+///
+/// The **phase** is scaled by the same factor as the lengths, which is what keeps it a phase:
+/// `walk_dashes` measures the phase against the pattern's own total, and multiplying both by
+/// one factor leaves the fraction of the pattern it names unchanged. Scaling the lengths alone
+/// would move the start of every dash as the page is zoomed, which is a different picture
+/// rather than the same one drawn larger.
+///
+/// A zero-length element is legal and means "the same colour twice". It stays zero here —
+/// a zero times a finite factor is a zero, so nothing is scaled *into* a division by zero —
+/// and `walk_dashes` already walks a zero-length element as a hairline rather than a spin. An
+/// array that sums to zero has no pattern to walk at all, so `walk_dashes` draws the line solid
+/// and returns before it divides by the total; an array that cannot be a number of pixels is
+/// passed through unscaled rather than turned into an infinity the walk would read as "no gap".
+fn device_dash(
+    dash: &mangle_content::Dash,
+    ctm: &Matrix,
+    placement: &Matrix,
+) -> mangle_content::Dash {
+    if dash.array.is_empty() {
+        return dash.clone();
+    }
+    let scale = ctm.mean_scale() * placement.mean_scale();
+    if !scale.is_finite() || scale <= 0.0 {
+        return dash.clone();
+    }
+    let array: Vec<f64> = dash.array.iter().map(|v| v * scale).collect();
+    let phase = dash.phase * scale;
+    if !phase.is_finite() || array.iter().any(|v| !v.is_finite()) {
+        return dash.clone();
+    }
+    mangle_content::Dash { array, phase }
+}
+
 /// A cap and join, for a caller building a style from the content layer's enums.
 #[must_use]
 pub fn line_style_of(cap: mangle_content::LineCap, join: mangle_content::LineJoin) -> StrokeStyle {
@@ -1532,6 +1584,92 @@ mod tests {
         );
         assert_eq!(round.cap, LineCap::Round);
         assert_eq!(round.join, LineJoin::Bevel);
+    }
+
+    /// A dash pattern's lengths and phase are both lengths in user space, so both are scaled.
+    ///
+    /// The arithmetic is the same one `device_line_width` does — the mark's own `cm` and the
+    /// placement, multiplied rather than composed — and the phase is scaled **by the same
+    /// factor as the lengths**, which is what keeps it a phase: a phase is a fraction of the
+    /// pattern's own total, so scaling both leaves the fraction named unchanged.
+    #[test]
+    fn a_dash_pattern_and_its_phase_are_scaled_by_both_factors() {
+        let identity = Matrix::IDENTITY;
+        let ctm = Matrix::new(4.0, 0.0, 0.0, 4.0, 50.0, 50.0);
+        let placement = Matrix::new(3.0, 0.0, 0.0, 3.0, 0.0, 0.0);
+        let pattern = mangle_content::Dash {
+            array: vec![6.0, 3.0],
+            phase: 2.0,
+        };
+        let got = device_dash(&pattern, &ctm, &placement);
+        assert_eq!(
+            got.array,
+            vec![72.0, 36.0],
+            "`6 3` under a `cm` of four and a placement of three is 72 and 36 device pixels"
+        );
+        assert!(
+            near(got.phase, 24.0),
+            "and the phase is the same twelve times over — 24 device pixels, not 2: a phase \
+             left in user space moves every dash along the line when the page is zoomed"
+        );
+        // The total is what a phase is measured against, and both numbers moved by one factor,
+        // so the fraction of the pattern the phase names is the fraction the file asked for.
+        let fraction = got.phase / (got.array[0] + got.array[1]);
+        assert!(
+            (fraction - 2.0 / 9.0).abs() < 1e-12,
+            "two ninths of the pattern is still two ninths of it: got {fraction}"
+        );
+        // The identity is the identity: a page with no `cm` and a placement of one is not
+        // changed at all, which is every page in the corpus.
+        let same = device_dash(&pattern, &identity, &identity);
+        assert_eq!(
+            same.array,
+            vec![6.0, 3.0],
+            "an unscaled page keeps its pattern"
+        );
+        assert!(near(same.phase, 2.0), "and its phase");
+    }
+
+    /// The cases where a dash pattern must be handed on untouched.
+    ///
+    /// A pattern that cannot be scaled must not be scaled into something that cannot be walked:
+    /// an empty array is the specification's solid line, a zero-length entry is legal and stays
+    /// zero — a factor times a zero is a zero, so nothing here can divide by a zero-length
+    /// element — and a page whose scale is zero or not a number leaves a pattern alone rather
+    /// than turning every length into an infinity the walk would read as "no gaps".
+    #[test]
+    fn a_dash_pattern_that_cannot_be_scaled_is_handed_on_unchanged() {
+        let identity = Matrix::IDENTITY;
+        let scaled = Matrix::new(2.0, 0.0, 0.0, 2.0, 0.0, 0.0);
+        let flat = Matrix::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let broken = Matrix::new(f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0);
+
+        let empty = mangle_content::Dash::default();
+        assert_eq!(
+            device_dash(&empty, &scaled, &scaled),
+            empty,
+            "an empty array is solid, and stays solid however large the page is"
+        );
+
+        let zeroed = mangle_content::Dash {
+            array: vec![6.0, 0.0, 3.0, 0.0],
+            phase: 0.0,
+        };
+        let got = device_dash(&zeroed, &scaled, &scaled);
+        assert_eq!(
+            got.array,
+            vec![24.0, 0.0, 12.0, 0.0],
+            "a zero-length entry is legal and scales to a zero-length entry, never to a \
+             division by zero"
+        );
+
+        for bad in [flat, broken] {
+            assert_eq!(
+                device_dash(&zeroed, &identity, &bad),
+                zeroed,
+                "a placement that is not a scale leaves the pattern as the file wrote it"
+            );
+        }
     }
 
     #[test]

@@ -3868,6 +3868,354 @@ fn a_stroke_under_a_non_uniform_ctm_takes_the_geometric_mean_of_its_axes() {
     }
 }
 
+// ── How long a dash is, in device pixels ──────────────────────────────────────────
+
+/// The runs of ink along the device row through the middle of a horizontal line.
+///
+/// A dash pattern is a claim about **lengths**, and a bounding box cannot see one: a dashed
+/// line at any scale has the same box as the solid line it came from. So the picture is read
+/// the only way a length can be — as the distance between two edges, in pixels, with the right
+/// edge exclusive.
+///
+/// The row is the middle one of the line's own ink box rather than a row written out in
+/// numbers, so the measurement finds the stroke wherever the placement put it and lands on a
+/// row the stroke covers completely. A run's edges are found at **half** ink, which is where
+/// an antialiased cap edge is: a butt cap ends in a ramp, and the ramp's midpoint is the end
+/// of the dash. Counting whole-ink pixels instead would measure the ramp as no dash at all
+/// when the line is thin and as a whole dash when it is thick.
+fn ink_runs(image: &mangle_render::Image) -> Vec<(usize, usize)> {
+    let (_, y0, _, y1) = ink_box(image).expect("the line was drawn");
+    let row = usize::midpoint(y0, y1);
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut start: Option<usize> = None;
+    for x in 0..image.width {
+        let ink = darkness(image, x, row) >= 128;
+        match (ink, start) {
+            (true, None) => start = Some(x),
+            (false, Some(from)) => {
+                runs.push((from, x));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = start {
+        runs.push((from, image.width));
+    }
+    runs
+}
+
+/// The length of the first run of ink, and the paper after it, in pixels.
+///
+/// Every dash pattern in this section puts its first gap where the picture can see it, so the
+/// first run and the first gap between them are two lengths read off one line — and a pattern
+/// that is not scaled at all has a run and a gap that both stay the size they had at scale 1,
+/// which is the defect these tests pin.
+fn first_run_and_gap(image: &mangle_render::Image) -> (usize, usize) {
+    let runs = ink_runs(image);
+    assert!(
+        runs.len() >= 2,
+        "a dashed line has a run and then a gap: got {runs:?}"
+    );
+    ((runs[0].1 - runs[0].0), (runs[1].0 - runs[0].1))
+}
+
+/// `[6 3] 0 d` on a 160 point horizontal line, as a fixture.
+///
+/// Written here rather than taken from the corpus so that what the pixels *should* be is
+/// stated by construction: a line two points wide in black from page x = 20 to x = 180 at
+/// y = 100, with the pattern's lengths in user space.
+fn dashed_line_page(dash: &str, phase: i64) -> Vec<u8> {
+    page_with(
+        &format!("0 0 0 RG 2 w [{dash}] {phase} d 20 100 m 180 100 l S"),
+        200,
+    )
+}
+
+/// A dash pattern's lengths scale with the page, which is what a dash on a page is.
+///
+/// Every number in a dash array is a length in user space, and a user-space length becomes
+/// device pixels at draw time by the same two factors that carry the path's own points: the
+/// content stream's `cm` and the page placement. `mutool` was asked and does — `[6 3] 0 d`
+/// gives 6, 12 and 24 device pixels of on-run at 72, 144 and 288 DPI — and this renderer gave
+/// six at all three, so a line stayed dashed with a fixed pattern however far the page was
+/// zoomed in. The page's geometry scaled while its dashes did not, which is why the difference
+/// only shows up away from scale 1.
+///
+/// The lengths are checked against the closed form rather than against each other: "the second
+/// render's run is twice the first's" is true of `6 × scale` and of every other linear function
+/// of the scale, and only `6 × scale` survives a scale where the answer is not a whole number.
+#[test]
+fn a_dash_patterns_lengths_scale_with_the_page() {
+    for scale in [1.0, 2.0] {
+        let render = render(dashed_line_page("6 3", 0), scale);
+        assert!(
+            render.notes.is_empty(),
+            "at scale {scale}: a dashed line draws without complaint: {:?}",
+            render.notes
+        );
+        let (run, gap) = first_run_and_gap(&render.image);
+        assert_eq!(
+            run,
+            (6.0 * scale).round() as usize,
+            "at scale {scale}: six points of ink is {run} pixels, which is 6·scale — the array \
+             is in user space and the page scale is what makes it pixels"
+        );
+        assert_eq!(
+            gap,
+            (3.0 * scale).round() as usize,
+            "at scale {scale}: and three points of paper is {gap} pixels, which is 3·scale"
+        );
+        // The first run starts where the line starts, at page x = 20.
+        let first = ink_runs(&render.image).first().copied().unwrap_or((0, 0));
+        assert_eq!(
+            first.0,
+            (20.0 * scale).round() as usize,
+            "at scale {scale}: the pattern begins at the line's own start"
+        );
+    }
+}
+
+/// The relationship is linear, which two scales cannot say and three can.
+///
+/// "Twice as big at twice the scale" and "twice as big because of an accident" are the same
+/// observation at two points and different at three: anything with a constant term — a
+/// hairline minimum, a floor, a pixel of rounding that is added once rather than per scale —
+/// agrees at 1 and 2 and disagrees at 3. So the run is compared with `6 × scale` and the three
+/// measured lengths are compared with each other, and both have to hold.
+#[test]
+fn a_dash_patterns_length_is_linear_in_the_page_scale() {
+    let mut measured: Vec<(f64, usize)> = Vec::new();
+    for scale in [1.0, 2.0, 3.0] {
+        let render = render(dashed_line_page("6 3", 0), scale);
+        let (run, _) = first_run_and_gap(&render.image);
+        assert_eq!(
+            run,
+            (6.0 * scale).round() as usize,
+            "at scale {scale}: the on-run is 6·scale pixels"
+        );
+        measured.push((scale, run));
+    }
+    let unit = f64::from(measured[0].1 as u32) / measured[0].0;
+    for (scale, run) in &measured {
+        assert!(
+            (f64::from(*run as u32) / scale - unit).abs() < 0.5,
+            "at scale {scale}: the on-run is {run} pixels, and {unit:.1} pixels per unit of \
+             scale at every scale — a constant term would show up here"
+        );
+    }
+    assert!(
+        measured[2].1 as f64 / measured[0].1 as f64 - 3.0 < 0.15,
+        "three times the scale is three times the run: {measured:?}"
+    );
+}
+
+/// A dash's phase is a place in the pattern, so it scales with the pattern.
+///
+/// `[6 3] 2 d` starts two units into the pattern: four of the six units of ink are left, so
+/// the first run is **four** long rather than six, and the gap after it is the whole three.
+/// The phase is what makes that first run short, and it is a length in the same user space as
+/// the array — so scaling the array without it would move every dash along the line as the page
+/// is zoomed, which is a different picture rather than the same one drawn larger.
+///
+/// Checked at two scales, and *both* claims are made: the first run is `4 × scale`, which says
+/// the phase was applied, and it starts at the line's own start rather than somewhere else
+/// along it, which says it was applied to the pattern rather than to the line.
+#[test]
+fn a_dash_phase_scales_with_the_pattern() {
+    for scale in [1.0, 2.0] {
+        let render = render(dashed_line_page("6 3", 2), scale);
+        assert!(
+            render.notes.is_empty(),
+            "at scale {scale}: a phase draws without complaint: {:?}",
+            render.notes
+        );
+        let (run, gap) = first_run_and_gap(&render.image);
+        assert_eq!(
+            run,
+            (4.0 * scale).round() as usize,
+            "at scale {scale}: two units into a six-unit run leaves four, which is 4·scale \
+             pixels — the phase is measured in the same user space as the array"
+        );
+        assert_eq!(
+            gap,
+            (3.0 * scale).round() as usize,
+            "at scale {scale}: and the gap after it is the pattern's own three units, 3·scale"
+        );
+        let first = ink_runs(&render.image).first().copied().unwrap_or((0, 0));
+        assert_eq!(
+            first.0,
+            (20.0 * scale).round() as usize,
+            "at scale {scale}: the phase shifts where the pattern *starts*, not where the ink \
+             starts"
+        );
+    }
+}
+
+/// A dash pattern is scaled with a `cm` in front of it as well as with the page.
+///
+/// The array is in the space current when `d` ran, so a `cm` that scales the page's units
+/// scales the dashes by the same factor the width is scaled by — which is what keeps a dashed
+/// line's dashes in proportion to its stroke. `4 0 0 4 50 50 cm` over `[6 3] 0 d` and a line
+/// from page (50, 50) to (90, 50) gives a 24 pixel run at scale 1 and 48 at scale 2, and 12
+/// pixels of both if the CTM were applied twice.
+///
+/// This is the case a fix in the wrong layer breaks: scaling in the interpreter would put the
+/// canvas's zoom where the content layer cannot see it, and scaling by `placement ∘ ctm` would
+/// apply the CTM to a path that has already had it applied.
+#[test]
+fn a_dash_pattern_under_a_ctm_scales_by_it_once() {
+    let bytes = page_with(
+        "q 4 0 0 4 50 50 cm 0 0 0 RG 2 w [6 3] 0 d 0 0 m 40 0 l S Q",
+        200,
+    );
+    for scale in [1.0, 2.0] {
+        let render = render(bytes.clone(), scale);
+        assert!(
+            render.notes.is_empty(),
+            "at scale {scale}: a dashed line under a `cm` draws without complaint: {:?}",
+            render.notes
+        );
+        let (run, gap) = first_run_and_gap(&render.image);
+        assert_eq!(
+            run,
+            (24.0 * scale).round() as usize,
+            "at scale {scale}: six user units under a `cm` of four is 24 device pixels, once"
+        );
+        assert_eq!(
+            gap,
+            (12.0 * scale).round() as usize,
+            "at scale {scale}: and three of them is twelve, once"
+        );
+    }
+}
+
+/// A zero-length entry is legal, means "the same colour twice", and must survive being scaled.
+///
+/// `[6 0 3 4] 0 d` is on 6, off 0, on 3, off 4: the specification's answer is that a zero-length
+/// element is two adjacent elements of the same colour, so the picture is **nine** points of ink
+/// and four of paper, repeating. That is the claim this test makes, and it is a strong one —
+/// a renderer that treated a zero as an invalid pattern would draw a solid line, and one that
+/// divided by it would not return.
+///
+/// Scaling is where a zero-length entry becomes dangerous rather than merely odd: a factor is
+/// applied to every entry, and a factor applied to a zero is a zero, so nothing is scaled *into*
+/// a division by zero. The walk treats a zero-length element as a hairline — it advances and
+/// carries on — so the pair is skipped and the two ink runs either side of it meet.
+#[test]
+fn a_zero_length_dash_entry_still_draws_dashes_after_scaling() {
+    for scale in [1.0, 2.0, 3.0] {
+        let render = render(dashed_line_page("6 0 3 4", 0), scale);
+        assert!(
+            render.notes.is_empty(),
+            "at scale {scale}: a zero-length entry is legal and is not a complaint: {:?}",
+            render.notes
+        );
+        let runs = ink_runs(&render.image);
+        assert!(
+            runs.len() >= 3,
+            "at scale {scale}: a pattern with four lengths draws several runs of ink, not one \
+             line: got {runs:?}"
+        );
+        let (run, gap) = first_run_and_gap(&render.image);
+        assert_eq!(
+            run,
+            (9.0 * scale).round() as usize,
+            "at scale {scale}: six units of ink followed immediately by three more is nine, and \
+             the zero-length off is what joins them — 9·scale pixels"
+        );
+        assert_eq!(
+            gap,
+            (4.0 * scale).round() as usize,
+            "at scale {scale}: the four-unit gap is 4·scale pixels"
+        );
+        // Every run is the same length and every gap is the same gap, which is what says the
+        // walk kept its place through the zero-length element instead of losing it. The **last**
+        // run is the exception the line's own end makes: 160 points of line do not divide by
+        // a thirteen point pattern, so the last dash is whatever is left over — four units at
+        // scale 1, and that arithmetic is checked as well rather than excused.
+        let widths: Vec<usize> = runs.iter().map(|(a, b)| b - a).collect();
+        let gaps: Vec<usize> = runs.windows(2).map(|w| w[1].0 - w[0].1).collect();
+        let want_run = (9.0 * scale).round() as usize;
+        let want_gap = (4.0 * scale).round() as usize;
+        let (whole, last) = widths.split_at(widths.len() - 1);
+        assert!(
+            whole.iter().all(|w| w.abs_diff(want_run) <= 1)
+                && gaps.iter().all(|g| g.abs_diff(want_gap) <= 1),
+            "at scale {scale}: every run is {want_run} and every gap {want_gap} pixels: runs \
+             {widths:?}, gaps {gaps:?}"
+        );
+        let period = 13.0 * scale;
+        assert_eq!(
+            last.first().copied().unwrap_or(0),
+            ((160.0 * scale - period * 12.0).round()) as usize,
+            "at scale {scale}: and the last run is the 160 points of line left over after twelve \
+             periods of 13, which is what ends a line rather than extending the pattern"
+        );
+    }
+}
+
+/// An empty dash array is a solid line, and that is the specification's answer.
+///
+/// ISO 32000-1 9.3.6: an empty array "shall specify that no dashing is done". It is the most
+/// common dash pattern there is — it is what a reset to the graphics state's default is — and
+/// it is the one that scaling must not change: an empty array has nothing to multiply, so it
+/// stays empty and the walk draws the whole line in one run.
+#[test]
+fn an_empty_dash_array_draws_a_solid_line() {
+    for scale in [1.0, 2.0] {
+        let render = render(dashed_line_page("", 0), scale);
+        assert!(
+            render.notes.is_empty(),
+            "at scale {scale}: an empty dash array is not an error: {:?}",
+            render.notes
+        );
+        let runs = ink_runs(&render.image);
+        assert_eq!(
+            runs.len(),
+            1,
+            "at scale {scale}: no dashing is done, so the line is one run of ink: got {runs:?}"
+        );
+        assert_eq!(
+            runs.first().copied().unwrap_or((0, 0)),
+            (
+                (20.0 * scale).round() as usize,
+                (180.0 * scale).round() as usize
+            ),
+            "at scale {scale}: and it is the whole 160 points of the line the stream drew"
+        );
+    }
+}
+
+/// A dash array that sums to zero is drawn solid rather than walked.
+///
+/// `[0 0] 0 d` has a pattern whose total length is zero, so there is no fraction of it for a
+/// phase to be, and walking it would divide by that total — every iteration at once, which is
+/// a hang rather than a slow page. The handling is the same one the specification gives the
+/// other unusable patterns: the line is drawn **solid**, by `walk_dashes` returning before it
+/// divides by anything.
+///
+/// A single zero is the other shape of the same thing — an odd-length array has no pair at all,
+/// so it is dropped and what remains is empty, which is a solid line as well.
+#[test]
+fn a_dash_array_that_sums_to_zero_is_drawn_solid() {
+    for dash in ["0 0", "0", "0 0 0 0"] {
+        for scale in [1.0, 2.0] {
+            let render = render(dashed_line_page(dash, 0), scale);
+            let runs = ink_runs(&render.image);
+            assert_eq!(
+                runs,
+                vec![(
+                    (20.0 * scale).round() as usize,
+                    (180.0 * scale).round() as usize
+                )],
+                "at scale {scale}: `[{dash}]` has no pattern to walk, so the whole line is \
+                 drawn solid"
+            );
+        }
+    }
+}
+
 // ── CFF fonts: Type 2 charstrings, executed rather than walked ─────────────────────
 
 /// Where a CFF font might be, most-likely first.

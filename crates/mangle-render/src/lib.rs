@@ -1222,7 +1222,14 @@ impl Device {
                 continue;
             }
             let mut outline = Polygon::default();
-            walk_dashes(&closed, &pairs, style.dash.phase, |_, run| {
+            // Only the **on** runs are inked. The walk already alternates and says which is
+            // which; drawing the off runs as well fills the gaps back in and turns every
+            // pattern into a solid line, which is why a dashed line's length was once
+            // measured as the whole line. A gap is not a thinner stroke, it is no stroke.
+            walk_dashes(&closed, &pairs, style.dash.phase, |on, run| {
+                if !on {
+                    return;
+                }
                 let piece = stroke_outline(run, style);
                 outline.subpaths.extend(piece.subpaths);
             });
@@ -1621,6 +1628,49 @@ mod tests {
         let mut count = 0;
         walk_dashes(&[(0.0, 0.0), (8.0, 0.0)], &pairs, 0.0, |_, _| count += 1);
         assert!(count < 100, "a zero-length run is a hairline, not a loop");
+    }
+
+    /// A dash pattern is drawn as gaps, and this is where that is decided.
+    ///
+    /// `walk_dashes` already alternates and hands each run a flag saying whether it is ink or
+    /// paper; `stroke_polygon` is what does with the flag. Stroking every run — the flag
+    /// ignored — fills the gaps back in and draws **every** pattern as one solid line, which is
+    /// what a page with a dashed line looks like when the dashes are not the page's fault.
+    ///
+    /// `[6 3] 0 d` over a line of 20 units with a width of 2 is twenty units long and cannot
+    /// hold a whole dash twice over, so the shape is easy to count: two runs of six units of
+    /// ink with four of paper between and four after.
+    #[test]
+    fn a_dash_pattern_leaves_paper_where_the_gaps_are() {
+        let pattern = mangle_content::Dash {
+            array: vec![6.0, 3.0],
+            phase: 0.0,
+        };
+        let style = StrokeStyle {
+            width: 2.0,
+            dash: pattern,
+            ..StrokeStyle::default()
+        };
+        let line = Polygon {
+            subpaths: vec![vec![(10.0, 50.0), (30.0, 50.0)]],
+        };
+        let mut device = paper(60, 100);
+        device.stroke_polygon(&line, &style, BLACK);
+
+        // A row through the middle of a two-unit stroke at y = 50 is row 50, and the dash
+        // boundaries land on whole pixels because every length here is a whole number.
+        let ink_at = |x: usize| darkness(device.image(), x, 50) > 128;
+        let dashed: Vec<usize> = (10..30).filter(|x| ink_at(*x)).collect();
+        assert_eq!(
+            dashed,
+            vec![
+                10, 11, 12, 13, 14, 15, // six of ink, and the butt cap starts on the pixel
+                19, 20, 21, 22, 23, 24, // three of paper, then six more
+                28, 29 // three of paper, then the line ends two units into the run
+            ],
+            "six units of ink, three of paper, six more, three of paper, and two — the \
+             gaps are paper rather than a thinner stroke"
+        );
     }
 
     #[test]

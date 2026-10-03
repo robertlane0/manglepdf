@@ -1121,8 +1121,68 @@ time, so it wants its own entry and its own measurements rather than a line insi
 - **A rotation**, which `|det|` ignores and must: `sqrt(|det|)` of a rotation is 1, and the
   `a_rotated_page_puts_its_ink_where_the_rotation_says` test is unchanged.
 - **The placement**, which is always a uniform scale composed with a rotation and a shift.
-- **A dash pattern's lengths**, which are in user space and which nothing scales: `page.rs` hands
-  `record.dash` to the stroker unchanged, so a `[6 3]` pattern is six points of ink whatever the
-  page scale. `mutool` was asked and scales it — 6, 12 and 24 device pixels of on-run at 72,
-  144 and 288 DPI for one `[6 3] 0 d` line. That is a separate defect of the same shape, with
-  the same answer, and it is untouched by D9's fix and by this one.
+- **A dash pattern's lengths**, which were the same defect in another place: user-space lengths
+  that nothing scaled, so a `[6 3]` pattern was six points of ink whatever the page scale. That is
+  fixed — see [D11b](#d11b--a-dash-patterns-lengths-were-never-scaled-and-every-pattern-drew-solid) —
+  and the `sqrt(|det|)` compromise above applies to a dash exactly as it does to a width.
+
+---
+
+## D11b — a dash pattern's lengths were never scaled, and every pattern drew solid
+
+**Severity: every dashed line on every page, at every scale, and worse the further in you went.
+FIXED.**
+
+Two defects in one place, and the second hid the first. `walk_dashes` computed on-runs and
+off-runs correctly and said which was which; `stroke_polygon` **threw the flag away** and
+stroked every run, which fills the gaps back in and draws any pattern as one solid line. And
+`page.rs` handed `record.dash` to the stroker unchanged, so the lengths were user-space lengths
+that nothing turned into pixels.
+
+So a `[6 3] 0 d` line was a solid line at 72 DPI, 144 DPI and 288 DPI alike, and the way to see
+that the lengths were wrong was to compare the run lengths once the gaps were there at all.
+
+### What the oracles draw, measured
+
+`[6 3] 0 d` on a two-point-wide horizontal line, 160 points long, at 72, 144 and 288 DPI. Both
+oracles agree with each other at every resolution, and now so do we, to the pixel:
+
+| on-run and gap | 72 DPI | 144 DPI | 288 DPI | what we gave before |
+|---|---|---|---|---|
+| `mutool draw` | 6 / 3 | 12 / 6 | 24 / 12 | — |
+| `pdftoppm` | 6 / 3 | — | — | — |
+| this renderer | **6 / 3** | **12 / 6** | **24 / 12** | one solid 160-point run |
+
+### What fixing it meant, and where
+
+The **phase** is what a scaling fix can get wrong. `/Phase` is a distance into the pattern in the
+same user space as the array, and `walk_dashes` measures it against the pattern's own total, so
+scaling the lengths without it moves every dash along the line as the page is zoomed — a
+different picture rather than the same one drawn larger. Both are scaled by one factor, which
+leaves the *fraction* of the pattern the phase names unchanged; `a_dash_pattern_and_its_phase_are_scaled_by_both_factors`
+pins that fraction at 2/9 across both factors.
+
+The scaling happens in `page.rs`, beside the geometry, and **not in the interpreter**: the
+interpreter knows the content stream's `cm` and no more, so scaling there would put one factor
+where the canvas's zoom is not, and the record would carry a pattern already half-converted. The
+two factors are multiplied, exactly as `device_line_width` multiplies them for a stroke's width:
+`mean_scale(ctm) × mean_scale(placement)`, because the path's points have already had the CTM
+applied to them by `device_path`.
+
+A **zero-length entry** is legal and means "the same colour twice". It is the one place scaling
+could do damage, and it cannot: a factor times a zero is a zero, so nothing is scaled *into* a
+division by zero, and `walk_dashes` walks a zero-length element as a hairline rather than a spin.
+`[6 0 3 4] 0 d` is nine points of ink and four of paper, repeating, and both oracles draw
+exactly that — 9 / 4 at 72 DPI and 36 / 16 at 288 DPI, as we do.
+
+### What is still not right
+
+- **An array that sums to zero** is drawn **solid**, and both oracles draw **nothing at all**:
+  `mutool draw` and `pdftoppm` put no ink on the page for `[0 0] 0 d`. Drawing it solid is the
+  handling the rest of this renderer gives an unusable pattern and what `Dash::is_solid` already
+  documents, and it is a handled answer rather than a hang or a division by the total — but it is
+  a difference, it is on the oracles' side, and it is recorded rather than defended. Closing it
+  means a stroke whose pattern has no length drawing nothing, which is one more case in
+  `stroke_polygon`.
+- **A non-uniform `cm`** is D11's compromise: the true dash lengths are the ellipse the matrix
+  gives a segment, and a scalar takes `sqrt(|det|)` — right between the two axes, wrong on both.
