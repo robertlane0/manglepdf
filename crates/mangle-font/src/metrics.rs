@@ -25,6 +25,12 @@
 //! Symbol and ZapfDingbats are not included: their widths belong to two fonts that no page
 //! uses for prose, and a table copied approximately is worse than an absent one. A page
 //! that names one is reported rather than laid out with invented numbers.
+//!
+//! Nor is `HelveticaNeue`, in any of the dozen spellings a corpus names it in. It is a
+//! different font from Helvetica with different advances, so answering it would not be an
+//! approximation to be tolerated but a number a reader could measure to be wrong. What *is*
+//! here is the narrow list in `FAMILY_ALIASES`: families whose metrics *are* the standard
+//! family's, mapped to that family's already-verified table.
 
 /// One standard font's widths, by glyph name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,11 +117,14 @@ pub const STANDARD_14: &[&str] = &[
 /// Helvetica, and answering it with Helvetica's widths would be a wrong answer rather than
 /// no answer. A short name is not a font either: `Helv` is a guess at Helvetica that some
 /// producer once wrote, and agreeing with that guess would turn it into our facts.
+///
+/// A family that is *not* one of the fourteen can still be answered, when it stands in for
+/// one by measurement rather than by guess — see `FAMILY_ALIASES` below.
 #[must_use]
 pub fn widths(name: &str) -> Option<&'static Widths> {
     let (family, style) = split_name(name)?;
     let (bold, italic) = style_words(&style)?;
-    Some(match family {
+    Some(match canonical_family(family) {
         "Helvetica" => {
             if bold {
                 &HELVETICA_BOLD
@@ -164,6 +173,46 @@ fn strip_face_suffix(name: &str) -> &str {
         name = shorter;
     }
     name
+}
+
+/// A family this has no widths of its own, and the Standard 14 family it stands in for.
+///
+/// An entry here is a claim about a *named* font, which is a different claim from the one
+/// [`widths`] refuses to make elsewhere. Refusing `Helv` is refusing to infer a font from a
+/// producer's abbreviation; `Arial` is not an abbreviation of anything, it is a font whose
+/// widths are Helvetica's widths. That pairing is what every metric-compatible clone of
+/// Arial exists to reproduce — a document laid out against one is laid out against the
+/// other — so answering it is measurement rather than a guess, and the numbers that come
+/// back are still the verified Adobe ones, never a second table.
+///
+/// `HelveticaNeue` is the omission that matters, and it is deliberate. Helvetica Neue is
+/// *not* metric-compatible with Helvetica: it is a different set of glyphs with different
+/// advances, and calling it Helvetica would not be an approximation to be tolerated but a
+/// number a reader could measure to be wrong. `HelveticaNeueLTStd-*` therefore still
+/// refuses, as does `Arial-Black` and any other name whose suffix changes the face rather
+/// than decorating it.
+///
+/// The pairing is not measured from the fonts themselves: they are proprietary, so it rests
+/// on their being metric-compatible by construction — every clone of them that exists to be
+/// substituted for them carries the same advances, and those agree with the tables below
+/// over the whole ASCII range. What is asserted is that documented property, not a number
+/// taken from a stand-in.
+const FAMILY_ALIASES: &[(&str, &str)] = &[
+    ("Arial", "Helvetica"),
+    ("CourierNew", "Courier"),
+    ("TimesNewRoman", "Times"),
+];
+
+/// The Standard 14 family a name stands in for, or the name itself when it names one.
+///
+/// Applied to the family [`split_name`] produced, which is why `TimesNewRomanPSMT`,
+/// `TimesNewRomanPS-BoldMT` and `TimesNewRoman,Bold` all arrive here as `TimesNewRoman`:
+/// the `PS` and `MT` are already gone by then.
+pub(crate) fn canonical_family(family: &str) -> &str {
+    FAMILY_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == family)
+        .map_or(family, |(_, target)| *target)
 }
 
 /// Read a style suffix as a pair of flags, or `None` when it is not one this file knows.
@@ -868,9 +917,9 @@ pub struct Declared {
 /// `missing` is `None`, which leaves a code outside the run to the caller's own default —
 /// there are none, and saying so is more honest than naming a width for them.
 ///
-/// A name with no table — `Symbol`, `ZapfDingbats`, `Helvetica-Narrow`, anything
-/// non-standard — is `None`, so the caller's refusal stands rather than being replaced by a
-/// width from the wrong font.
+/// A name with no table — `Symbol`, `ZapfDingbats`, `Helvetica-Narrow`, `HelveticaNeue`, a
+/// family that stands in for nothing — is `None`, so the caller's refusal stands rather than
+/// being replaced by a width from the wrong font.
 #[must_use]
 pub fn standard_run(name: &str, encoding: &crate::encoding::Encoding) -> Option<Declared> {
     let table = widths(name)?;
@@ -1466,10 +1515,85 @@ mod tests {
     #[test]
     fn a_font_we_do_not_have_is_reported_rather_than_guessed() {
         assert!(widths("NotAFont").is_none());
-        assert!(widths("Arial").is_none(), "not one of the fourteen");
         assert!(widths("Helvetica-Narrow").is_none(), "a different font");
         assert!(widths("Symbol").is_none(), "deliberately not included");
         assert!(widths("ZapfDingbats").is_none(), "nor this one");
+    }
+
+    /// Every alias answers with the table of the family it stands in for, in every style.
+    ///
+    /// The names are the ones a producer actually writes, and the assertion is against the
+    /// target's own name rather than a width, because an alias is a name-to-table mapping
+    /// and nothing about it is allowed to be a second opinion about a number.
+    #[test]
+    fn a_metric_compatible_alias_answers_with_its_targets_table() {
+        for (alias, target) in [
+            ("Arial", "Helvetica"),
+            ("Arial-Bold", "Helvetica-Bold"),
+            ("Arial,Italic", "Helvetica-Oblique"),
+            ("ArialMT", "Helvetica"),
+            ("Arial-BoldMT", "Helvetica-Bold"),
+            ("Arial-ItalicMT", "Helvetica-Oblique"),
+            ("ABCDEF+Arial", "Helvetica"),
+            ("TimesNewRoman", "Times-Roman"),
+            ("TimesNewRoman,Bold", "Times-Bold"),
+            ("TimesNewRoman,BoldItalic", "Times-BoldItalic"),
+            ("TimesNewRomanPSMT", "Times-Roman"),
+            ("TimesNewRomanPS-ItalicMT", "Times-Italic"),
+            ("TimesNewRomanPS-BoldMT", "Times-Bold"),
+            ("TimesNewRomanPS-BoldItalicMT", "Times-BoldItalic"),
+            ("CourierNew", "Courier"),
+            ("CourierNew,Bold", "Courier-Bold"),
+            ("CourierNewPSMT", "Courier"),
+            ("CourierNewPS-ItalicMT", "Courier-Oblique"),
+        ] {
+            let got = widths(alias).unwrap_or_else(|| panic!("{alias} should resolve"));
+            assert_eq!(
+                got.name,
+                widths(target).expect("a standard font").name,
+                "{alias} must answer with {target}'s table"
+            );
+        }
+    }
+
+    /// The pairing that is *not* measurement is refused, and saying so is the honest answer.
+    ///
+    /// Helvetica Neue is a different set of glyphs from Helvetica with different advances, so
+    /// mapping it would put a wrong number on the page rather than an uncertain one. The
+    /// corpus names a dozen spellings of it and every one of them must still refuse.
+    #[test]
+    fn helvetica_neue_is_refused_because_it_is_not_helvetica() {
+        for name in [
+            "HelveticaNeue",
+            "HelveticaNeueLTStd-Roman",
+            "HelveticaNeueLTStd-Bd",
+            "HelveticaNeueLTStd-Blk",
+            "HelveticaNeueLTStd-BdOu",
+            "HelveticaNeueLTStd-BlkCn",
+            "HelveticaNeueLTStd-Cn",
+            "HelveticaNeueLTStd-It",
+            "HelveticaNeueLTStd-BdCn",
+            "ABCDEF+HelveticaNeueLTStd-Roman",
+        ] {
+            assert!(widths(name).is_none(), "{name} must still refuse");
+        }
+    }
+
+    /// A suffix that changes the face still refuses even when the family is an alias.
+    ///
+    /// `Arial-Black` is not Arial Bold and `Arial-Narrow` is not Arial: the alias answers for
+    /// the family, and the family's own style rules still decide which face this is.
+    #[test]
+    fn an_alias_family_with_an_unknown_style_word_still_refuses() {
+        assert!(widths("Arial-Black").is_none());
+        assert!(widths("Arial-Narrow").is_none());
+        assert!(widths("Arial-Extrabold").is_none());
+        assert!(widths("TimesNewRomanPS-Condensed").is_none());
+        assert!(widths("CourierNewPS-Cond").is_none());
+        // A family that is neither one of the fourteen nor an alias is still a refusal.
+        assert!(widths("ArialNova").is_none());
+        assert!(widths("ArialUnicodeMS").is_none());
+        assert!(widths("TimesNewRomanPSNoSuchStyle").is_none());
     }
 
     #[test]

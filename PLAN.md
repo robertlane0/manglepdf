@@ -190,6 +190,19 @@ for Times, Mono for Courier, unmodified and under the OFL.
   and that is the one fact about the picture a user cannot read off it.
 - **A composite font gets no stand-in.** Its codes are CIDs the document chose itself, so a
   simple face is not a substitute however well the widths happen to agree.
+- **A family that stands in for a standard one by measurement is answered as that family.**
+  `Arial`, `TimesNewRoman` and `CourierNew` are not on the list of fourteen and are the names
+  a good deal of the wild corpus actually writes, so a table maps each onto the family whose
+  metrics it shares. This is a name→table mapping and nothing more — the numbers are still the
+  verified Adobe ones — and `split_name` has already stripped the subset prefix and the
+  trailing `MT`/`PS`, so one entry per family covers `TimesNewRomanPSMT`,
+  `TimesNewRomanPS-BoldItalicMT`, `Arial,Bold` and the rest without a second parser. **What
+  this does not do is guess:** refusing `Helv` is refusing to infer a font from a producer's
+  abbreviation, and that still happens. What is asserted instead is a property of a named
+  font. `HelveticaNeueLTStd-*` is therefore still refused and is meant to be — Helvetica Neue
+  is *not* metric-compatible with Helvetica, so mapping it would not be an approximation to be
+  tolerated but a number a reader could measure to be wrong. A style word the family does not
+  know refuses too, so `Arial-Black` is not quietly answered with `Helvetica-Bold`.
 
 Five things this is *not*, recorded so nobody reads a higher SSIM as more than it is:
 
@@ -206,14 +219,19 @@ Five things this is *not*, recorded so nobody reads a higher SSIM as more than i
 4. **`Symbol` and `ZapfDingbats` have no substitute and stay refused.** Liberation carries no
    symbol or dingbat face, and inventing a stand-in for a symbol font would put the wrong
    glyphs on the page. They are reported by name.
-5. **This does not close every blank page in the corpus.** A good deal of the wild corpus
-   names `TimesNewRomanPSMT`, `CourierNewPSMT` and `HelveticaNeueLTStd-*` — office and
-   desktop-publishing faces, not standard-fourteen names — and `metrics.rs` deliberately
-   refuses them, because answering them from the Times table would put the wrong widths on
-   the page. Measured against `mutool`, `pdfbox__data-000001` goes **0.93127 → 0.94703** with
-   ink **448 654 → 477 471** against an oracle of 483 043, and `gov__arxiv-1206.5537`
-   **0.87844 → 0.88414**. Both moved, neither is close to 0.99, and the rest of the gap is
-   not only fonts.
+5. **This does not close every blank page in the corpus.** Measured against `mutool`,
+   `pdfbox__data-000001` goes **0.93127 → 0.94703** with ink **448 654 → 477 471** against an
+   oracle of 483 043, and `gov__arxiv-1206.5537` **0.87844 → 0.88414**. Both moved, neither is
+   close to 0.99, and the rest of the gap is not only fonts. The alias table closed the naming
+   half of the remainder but **no corpus page number moved because of it**, and that is a
+   finding rather than a null: of the eight corpus files naming `Arial*`, `TimesNewRoman*` or
+   `CourierNew*`, four **do not open at all** (`gov__nist-sp800-88`, `gov__nist-fips197`,
+   `gov__nist-nistir7657`, `gov__usgs-topo-cnmi-1` — "the page tree root is missing" or "no
+   catalogue"), and of the four that do open none draws a glyph in one on any page. So the
+   alias is worth having and is worth **waiting to re-measure on** — it should matter a great
+   deal to the two NIST reports, which are the corpus's densest users of `TimesNewRomanPSMT`
+   (569 spans in `sp800-88`) and `CourierNew` (3069 in `fips197`) — but it cannot be, and is
+   not, credited with a number it did not move.
 
 **The cost is deliberate and on the record:** `include_bytes!` puts 4.4 MB of faces into
 every binary that links `mangle-font`, with no way to leave them out. That is the price of a
@@ -325,7 +343,9 @@ outlines through the same filler a path uses, the text matrix and the font size 
 double-count (a `TJ` kern also displaces the glyph that follows it, not the one at the same
 index), and the standard-14 width tables are verified rather than trusted — every one of the
 1043 widths was measured against two independent renderers and Adobe's own metrics, so
-nobody should re-derive them from a local URW clone. A font that declares no `/Widths` now
+nobody should re-derive them from a local URW clone. An alias is a different thing from a
+number and was not treated as one: the tables are unchanged, and only the names that reach
+them grew. A font that declares no `/Widths` now
 answers from those tables through its own `/Encoding` rather than from one average advance —
 see "Standard-14 substitution".
 

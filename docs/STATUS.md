@@ -447,10 +447,11 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    `pdfbox__data-000001` now covers 98.9% of the oracle's ink. Neither number is close to
    0.99, and the reason is recorded in `PLAN.md`: this closes the pages whose *only* obstacle
    was a font the document did not embed, and a good deal of the rest of the corpus names
-   `TimesNewRomanPSMT`, `CourierNewPSMT` and `HelveticaNeueLTStd-*`, which `metrics.rs`
-   deliberately refuses because they are not standard-fourteen names and answering them from
-   the wrong table would put the wrong widths on the page. A full corpus re-run is wanted and
-   takes two hours.
+   `TimesNewRomanPSMT`, `CourierNewPSMT` and `Arial*`, which `metrics.rs` used to refuse
+   because they are not standard-fourteen names. **Those are mapped now** — see "Metric-compatible
+   aliases" below. `HelveticaNeueLTStd-*` still refuses, and is meant to: Helvetica Neue is not
+   metric-compatible with Helvetica, so an alias for it would not be an approximation but a
+   wrong number. A full corpus re-run is wanted and takes two hours.
 3. **Composite fonts read two-byte codes, and the mark says so.** A `/Type0` font's
    character codes are two bytes, so a string is split into codes rather than bytes and the
    pen advances by the width of each code. Two things had to change together for that to be
@@ -489,6 +490,61 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    save writes it as a direct object, which every reader accepts but which is a
    re-serialisation rather than a copy.
 8. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
+
+## Metric-compatible aliases
+
+`metrics::widths` and `metrics::substitute` now answer for three families that are not on the
+list of fourteen, because their metrics *are* a standard family's:
+
+| alias | answers with |
+|---|---|
+| `Arial`, `ArialMT`, `Arial-BoldMT`, `Arial-ItalicMT`, `Arial,Bold`, `ABCDEF+Arial`, … | Helvetica |
+| `TimesNewRoman`, `TimesNewRomanPSMT`, `TimesNewRomanPS-BoldMT`, … | Times |
+| `CourierNew`, `CourierNewPSMT`, `CourierNew,Bold`, … | Courier |
+
+`split_name` already stripped the subset prefix and the trailing `MT`/`PS`, so one entry per
+family covers every spelling a producer writes. The alias is a **name→table mapping and nothing
+else**: the tables are the same Adobe metrics, verified as before, and no number was changed.
+
+**What this is not.** The refusal recorded in `metrics.rs` was not "non-standard names are
+refused"; it was that answering a name by inferring a font turns a producer's guess into our
+facts, which is why `Helv` still refuses. `Arial` is not a guess about a font — it is a font
+whose advances are Helvetica's, which is the whole reason every metric-compatible clone of it
+exists. So the decision stands; this is the other side of it.
+
+**`HelveticaNeueLTStd-*` still refuses, deliberately and on the merits.** Helvetica Neue is not
+metric-compatible with Helvetica — a different set of glyphs with different advances — so
+mapping it would not be an approximation a reader could tolerate but a number they could
+measure to be wrong. The corpus names a dozen spellings of it and every one refuses. The same
+goes for a suffix that changes the face: `Arial-Black` is not `Helvetica-Bold` and refuses,
+because `style_words` does not know the word `Black`.
+
+**What was measured.** The real Arial, Times New Roman and Courier New are proprietary and are
+not present here, so the pairings could not be checked against the fonts themselves. What can be
+checked is the other side of the claim, and was, with `fontTools`: every glyph of the ASCII
+range of all thirteen bundled Liberation faces against the table they stand in for,
+`advance × 1000 / unitsPerEm`. **No ASCII glyph differs by more than one thousandth of an em in
+any face** — most are exact, the rest are 2048-unit rounding. Two non-ASCII extras do differ
+materially (`periodcentered` and `macron`), and they are outside the range prose lives in. As a
+control, URW's own Adobe-metric clones match all 95 ASCII widths *exactly*, which is what
+confirms the tables are Adobe's and that the Liberation ±1s are rounding rather than
+disagreement.
+
+**No corpus page moved, and here is why.** Of the eight corpus files that name one of these
+families, four (`gov__nist-sp800-88`, `gov__nist-fips197`, `gov__nist-nistir7657`,
+`gov__usgs-topo-cnmi-1`) **do not open at all** — "the page tree root is missing" or "no
+catalogue" — so no before or after exists for them. Of the four that do open, none draws a
+single glyph in an alias-named font on any page: `pdfjs__issue16263.pdf` declares
+`TimesNewRomanPSMT` and `SymbolMT` but its page is two zero-by-zero images; `pdfbox__FC60_Times.pdf`
+has one glyph, a space; `pdfjs__TAMReview.pdf` names the two Times aliases in its resources but
+the only page carrying them (23) is two images with no text. Page 1 of each measured identical
+before and after — `pdfjs__TAMReview.pdf` at SSIM 0.925334 and 129 851 ink against `mutool`'s
+0.925334 and 147 677. So the change is asserted at the unit level instead:
+`a_metric_compatible_alias_draws_exactly_as_the_family_it_stands_in_for` renders an unembedded
+`Arial`, `Arial-BoldMT`, `TimesNewRomanPSMT`, `TimesNewRomanPS-ItalicMT` and `CourierNewPSMT`
+page and asserts the pixels are **identical** to the page naming `Helvetica`, `Helvetica-Bold`,
+`Times-Roman`, `Times-Italic` and `Courier`. That test fails on the previous code with "the
+font `/F1` has no `/FontDescriptor`", which is the blank page the alias exists to remove.
 
 ## Known limitations in the finished layers
 

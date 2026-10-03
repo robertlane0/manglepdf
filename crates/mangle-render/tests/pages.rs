@@ -3456,6 +3456,76 @@ fn a_standard_font_the_document_did_not_embed_is_drawn_from_a_substitute() {
     }
 }
 
+/// A family that stands in for a Standard 14 one by measurement draws from the same face.
+///
+/// `Arial`, `Arial-BoldMT`, `TimesNewRomanPSMT` and `CourierNewPSMT` are the names a producer
+/// actually writes, and none of them is on the list of fourteen. Before an alias existed each
+/// of these pages rendered blank and reported a font with no `/FontDescriptor`, which is a
+/// correct report about a font this had never heard of and no use at all to the reader.
+///
+/// The assertion is that the alias renders the *same pixels* as the family it stands in for.
+/// That is stronger than asserting ink: the widths have to agree and the outlines have to be
+/// the same program, or text laid out for one would be drawn in another's letters.
+#[test]
+fn a_metric_compatible_alias_draws_exactly_as_the_family_it_stands_in_for() {
+    let scale = 4.0;
+    for (alias, target) in [
+        ("Arial", "Helvetica"),
+        ("Arial-BoldMT", "Helvetica-Bold"),
+        ("TimesNewRomanPSMT", "Times-Roman"),
+        ("TimesNewRomanPS-ItalicMT", "Times-Italic"),
+        ("CourierNewPSMT", "Courier"),
+    ] {
+        let ours = render(unembedded_standard_page(alias, "WiWi", 48.0, 10.0), scale);
+        let theirs = render(unembedded_standard_page(target, "WiWi", 48.0, 10.0), scale);
+        assert!(
+            ours.notes.iter().any(|note| note.contains("stands in for")),
+            "{alias} was not embedded, so a substitute must say so: {:?}",
+            ours.notes
+        );
+        assert!(
+            !ours
+                .notes
+                .iter()
+                .any(|note| note.contains("no `/FontDescriptor`")),
+            "{alias} must not be reported as a font that cannot be read at all: {:?}",
+            ours.notes
+        );
+        assert!(
+            ink_in_columns(&ours.image, 0.0, 1.0) > 0,
+            "{alias} drew nothing at all, which is the failure this guards"
+        );
+        assert_eq!(
+            ours.image.width, theirs.image.width,
+            "{alias} and {target} should lay out at the same size"
+        );
+        assert_eq!(
+            ours.image.pixels, theirs.image.pixels,
+            "{alias} must draw exactly what {target} draws: the same advances and the same \
+             outlines, or the glyphs land somewhere the producer did not put them"
+        );
+    }
+}
+
+/// A name that stands in for nothing is still reported rather than drawn in someone's letters.
+///
+/// The companion to the test above, and the one that keeps the alias table from growing: a
+/// family that is *not* metric-compatible with a standard one — Helvetica Neue above all — must
+/// keep refusing, because a wrong number on the page is worse than a refusal to draw.
+#[test]
+fn a_family_that_stands_in_for_nothing_is_still_reported_rather_than_drawn() {
+    let scale = 4.0;
+    for base in ["HelveticaNeueLTStd-Roman", "Arial-Black", "ArialNova"] {
+        let render = render(unembedded_standard_page(base, "WiWi", 48.0, 10.0), scale);
+        assert!(
+            ink_in_columns(&render.image, 0.0, 1.0) == 0,
+            "{base} is not metric-compatible with a standard face, so it must not be drawn \
+             in one: it has ink in {:?}",
+            render.notes
+        );
+    }
+}
+
 /// The substitute's advances are the standard font's, or the text would not stay where the
 /// producer laid it out.
 ///

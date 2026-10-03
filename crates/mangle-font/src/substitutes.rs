@@ -9,8 +9,13 @@
 //! A name this module cannot answer for is reported rather than guessed at. `Symbol` and
 //! `ZapfDingbats` return `None`: Liberation has no equivalent face, and inventing a
 //! stand-in for a symbol font would silently put the wrong glyphs on the page.
+//!
+//! A name that is not one of the Standard 14 can still be answered when it stands in for
+//! one by measurement — `Arial` is Helvetica's metrics, so a page naming it draws in
+//! Liberation Sans rather than nothing. `HelveticaNeue` does not stand in for anything and is
+//! refused; the alias table in `metrics` records which pairings hold and which do not.
 
-use crate::metrics::{split_name, style_words};
+use crate::metrics::{canonical_family, split_name, style_words};
 
 /// The twelve Liberation faces, keyed by the Standard 14 family they stand in for.
 const HELVETICA: [(&str, &[u8]); 4] = [
@@ -74,11 +79,16 @@ const COURIER: [(&str, &[u8]); 4] = [
 ///
 /// A subset prefix (`ABCDEF+`) and a style suffix are both handled by the shared
 /// name-splitting in [`metrics`], so `ABCDEF+Helvetica-Bold` and `Helvetica-Bold` agree.
+/// A family that stands in for a Standard 14 one by measurement rather than by guess — `Arial`
+/// for Helvetica, `TimesNewRoman` for Times, `CourierNew` for Courier — resolves to the
+/// face of the family it stands in for, which is the point: the same substitution that
+/// gives the widths gives the outlines, so the glyphs land where the layout put them. The
+/// alias table in `metrics` records which pairings that is and which it is not.
 #[must_use]
 pub fn substitute(name: &str) -> Option<&'static [u8]> {
     let (family, style) = split_name(name)?;
     let (bold, italic) = style_words(&style)?;
-    let table = match family {
+    let table = match canonical_family(family) {
         "Helvetica" => &HELVETICA,
         "Times" => &TIMES,
         "Courier" => &COURIER,
@@ -180,5 +190,59 @@ mod tests {
     fn an_unknown_family_is_reported_rather_than_guessed() {
         assert!(substitute("NoSuchFont").is_none());
         assert!(substitute("Helvetica-Extrabold").is_none());
+    }
+
+    /// An alias stands in for the family it is metric-compatible with, in every style.
+    ///
+    /// The assertion is that the bytes are the same program, not merely that some bytes came
+    /// back: a substitute that resolved to the wrong face would put the right widths on the
+    /// page around the wrong outlines.
+    #[test]
+    fn a_metric_compatible_alias_stands_in_for_its_target_family() {
+        for (alias, target) in [
+            ("Arial", "Helvetica"),
+            ("ArialMT", "Helvetica"),
+            ("Arial-Bold", "Helvetica-Bold"),
+            ("Arial-BoldMT", "Helvetica-Bold"),
+            ("Arial-ItalicMT", "Helvetica-Oblique"),
+            ("ABCDEF+Arial,Bold", "Helvetica-Bold"),
+            ("TimesNewRoman", "Times-Roman"),
+            ("TimesNewRomanPSMT", "Times-Roman"),
+            ("TimesNewRomanPS-BoldMT", "Times-Bold"),
+            ("TimesNewRomanPS-ItalicMT", "Times-Italic"),
+            ("TimesNewRomanPS-BoldItalicMT", "Times-BoldItalic"),
+            ("CourierNew", "Courier"),
+            ("CourierNewPSMT", "Courier"),
+            ("CourierNew,Bold", "Courier-Bold"),
+        ] {
+            assert_eq!(
+                substitute(alias),
+                substitute(target),
+                "{alias} must stand in for {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn helvetica_neue_has_no_substitute_because_it_is_not_helvetica() {
+        for name in [
+            "HelveticaNeue",
+            "HelveticaNeueLTStd-Roman",
+            "HelveticaNeueLTStd-Bd",
+            "HelveticaNeueLTStd-Blk",
+            "HelveticaNeueLTStd-BdOu",
+            "HelveticaNeueLTStd-Cn",
+            "ABCDEF+HelveticaNeueLTStd-Roman",
+        ] {
+            assert!(substitute(name).is_none(), "{name} must still refuse");
+        }
+    }
+
+    #[test]
+    fn an_alias_family_with_an_unknown_style_word_still_refuses() {
+        assert!(substitute("Arial-Black").is_none());
+        assert!(substitute("Arial-Narrow").is_none());
+        assert!(substitute("ArialNova").is_none());
+        assert!(substitute("ArialUnicodeMS").is_none());
     }
 }
