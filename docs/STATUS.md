@@ -662,15 +662,19 @@ while the same dash drawn left to right is solid:
 20 50 m 80 50 l S    ....................000000000000............000000000000...
 ```
 
-`offset_sides` asks `normal_at(path, i - 1, 0)` for the normal of the segment arriving at vertex
-`i`, but `normal_at(_, index, 0)` *already* means "the segment ending at `index`", so the call is
-one segment too early. At a path's last vertex both lookups miss and the normal falls back to a
-fixed `(0, 1)` — right for a segment running in the positive x direction, wrong for one running
-in the negative x direction, which is the whole of the l2r/r2l split above. It predates the
-pattern fix, reproduces with a plain `0 0 0 RG` stroke, and is **not fixed here**: it changes
-every stroked path on every page, so it wants its own entry and its own corpus measurement
-rather than a second change to `stroke_outline` inside a commit about one. Both are written up in
-`docs/known-diffs.md`, as D12 and D13.
+`offset_sides` asked `normal_at(path, i - 1, 0)` for the normal of the segment arriving at vertex
+`i`, but `normal_at(_, index, 0)` *already* means "the segment ending at `index`", so the call was
+one segment too early. At a two-point path's last vertex both lookups miss and the normal fell
+back to a fixed `(0, 1)` — right for a segment running in the positive x direction, wrong for
+one running in the negative x direction, which is the whole of the l2r/r2l split above. It
+predated the pattern fix and reproduced with a plain `0 0 0 RG` stroke. **It is now fixed**, in
+its own commit and with its own corpus measurement, as D13; the pattern fix above is D12.
+
+Fixing it turned up three more places the same wrong argument had reached — the joins, both
+caps, and the seam of a ring — and one much larger defect standing next to them, which is written
+up as **D14**: an open path of three or more points is stroked as a **closed ring**, so it carries
+a stroke along its own closing segment and has no caps at all. `mutool` draws an `L` as an `L`;
+this drew the `L` plus a diagonal. That one is the next thing on the stroke item.
 
 Two smaller things the same page exposed, both left open: **`Do` of a `/Subtype /Form` XObject
 is not implemented** — `/Fm0 Do` became an image mark and reported `an image claims to be 0 by 0

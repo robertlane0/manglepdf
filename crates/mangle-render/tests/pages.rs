@@ -4063,6 +4063,450 @@ fn a_stroke_under_a_non_uniform_ctm_takes_the_geometric_mean_of_its_axes() {
     }
 }
 
+// ── Which way round a path was written ────────────────────────────────────────────
+
+/// How many pixels on a page are not paper.
+fn inked(image: &mangle_render::Image) -> usize {
+    (0..image.height)
+        .flat_map(|y| (0..image.width).map(move |x| (x, y)))
+        .filter(|(x, y)| darkness(image, *x, *y) > 8)
+        .count()
+}
+
+/// A polyline's operators, written forwards and backwards from the same points.
+///
+/// `m` then `l` per point, which is what a polyline is, so reversing the points reverses the
+/// path and nothing else: the same line, the same width, the same dash array, walked from the
+/// other end. `h` closes it, so a closed path stays closed when it is reversed.
+fn both_ways(points: &[(i64, i64)], closed: bool) -> (String, String) {
+    let one = |ps: &[(i64, i64)]| {
+        let mut ops: Vec<String> = ps
+            .iter()
+            .enumerate()
+            .map(|(i, (x, y))| format!("{x} {y} {}", if i == 0 { "m" } else { "l" }))
+            .collect();
+        if closed {
+            ops.push("h".into());
+        }
+        ops.join(" ")
+    };
+    let mut reversed = points.to_vec();
+    reversed.reverse();
+    (one(points), one(&reversed))
+}
+
+/// A reversal fixture: what to call it, its points, and whether it is closed.
+type Case = (&'static str, &'static [(i64, i64)], bool);
+
+/// How far apart two renderings of the same stroke may be, in 0..255 of pixel value.
+///
+/// Zero would be the ideal. What the fill actually gives is a boundary pixel or two: a stroke's
+/// outline is the same cycle of points whichever end the path was written from, but not the
+/// same *first* point, and the coverage is accumulated from where the cycle starts. The worst
+/// measured here is eighteen, on the outermost pixel of a round cap's sixteen step arc — not a
+/// difference in where the ink is. A bowtie is a difference of ninety, on every dash.
+const RENDERING_SLACK: u32 = 32;
+
+/// Draw a path forwards and backwards and require the ink to be the same.
+///
+/// Reversal invariance is the property that catches a stroke outline built from the wrong
+/// segment: a stroke covers the same points whichever end it was walked from, so any difference
+/// between the two renderings is a defect and not a style. It is also the only property that
+/// sees it — a bounding box, an ink count and a coverage total are all the same for a stroke
+/// and for a **bowtie** of the same area, which is how a hollow line survives all three.
+///
+/// The fixture must put down real ink in both directions, or "the same" would be two blank
+/// pages agreeing about nothing.
+fn assert_reversal_invariance(setup: &str, points: &[(i64, i64)], closed: bool, what: &str) {
+    let (forward, backward) = both_ways(points, closed);
+    let a = render(page_with(&format!("{setup} {forward} S"), 100), 1.0);
+    let b = render(page_with(&format!("{setup} {backward} S"), 100), 1.0);
+    assert!(
+        a.notes.is_empty() && b.notes.is_empty(),
+        "{what} should draw in both directions without complaint: {:?} {:?}",
+        a.notes,
+        b.notes
+    );
+    let (ia, ib) = (inked(&a.image), inked(&b.image));
+    assert!(
+        ia > 60 && ib > 60,
+        "{what}: the fixture must put down real ink either way, or this proves nothing: \
+         forwards {ia}, backwards {ib}"
+    );
+    let width = a.image.width;
+    let (mut worst, mut at) = (0u32, (0usize, 0usize));
+    for (i, (x, y)) in a
+        .image
+        .pixels
+        .chunks_exact(4)
+        .zip(b.image.pixels.chunks_exact(4))
+        .enumerate()
+    {
+        let d = u32::from(x[0].abs_diff(y[0]))
+            .max(u32::from(x[1].abs_diff(y[1])))
+            .max(u32::from(x[2].abs_diff(y[2])));
+        if d > worst {
+            worst = d;
+            at = (i % width, i / width);
+        }
+    }
+    assert!(
+        worst <= RENDERING_SLACK,
+        "{what}: drawing it from the other end must put ink in the same place, and this one does \
+         not — ({}, {}) differs by {worst}, where antialiasing rounding is {RENDERING_SLACK} \
+         ({ia} pixels one way, {ib} the other)",
+        at.0,
+        at.1
+    );
+}
+
+/// The reproduction: one dashed line, written from each end, comes out the same.
+///
+/// A 100 point page, a line at y = 50 two points wide, `2 w [12 12] 0 d`, once from x = 20 to
+/// x = 80 and once from x = 80 to x = 20. The dash array is symmetric about the line's middle —
+/// 60 points is two whole 12-on 12-off cycles and half of a third, so mirroring the path
+/// mirrors the dashes onto themselves — and the two directions therefore differ in nothing but
+/// the outline.
+///
+/// The shape of the failure is worth stating, because it is what made the defect findable. The
+/// two offset sides of the line pair up at each end instead of forming a rectangle, and the
+/// outline crosses itself: **dark at both ends, paper in the middle**, every dash, every time.
+/// An ink count cannot see it and a bounding box cannot see it, but "the same line drawn the
+/// other way round looks different" is visible on the page.
+#[test]
+fn a_dashed_line_drawn_right_to_left_is_not_a_bowtie() {
+    let setup = "0 0 0 RG 2 w [12 12] 0 d";
+    let l2r = render(page_with(&format!("{setup} 20 50 m 80 50 l S"), 100), 1.0);
+    let r2l = render(page_with(&format!("{setup} 80 50 m 20 50 l S"), 100), 1.0);
+    assert!(
+        l2r.notes.is_empty() && r2l.notes.is_empty(),
+        "a dashed line should draw in either direction: {:?} {:?}",
+        l2r.notes,
+        r2l.notes
+    );
+    assert!(
+        inked(&l2r.image) > 60 && inked(&r2l.image) > 60,
+        "both directions must put down real ink: {} and {}",
+        inked(&l2r.image),
+        inked(&r2l.image)
+    );
+    // The middle of the middle dash. A stroke two points wide centred on y = 50 covers rows 49
+    // and 50 completely, so this pixel is as dark as the picture gets — or, if the outline has
+    // crossed itself, it is paper.
+    assert!(
+        darkness(&l2r.image, 50, 50) >= 128,
+        "the middle of the middle dash of a line drawn left to right is ink"
+    );
+    assert!(
+        darkness(&r2l.image, 50, 50) >= 128,
+        "the middle of the middle dash of a line drawn right to left is ink too — a bowtie is \
+         dark at both ends and hollow in the middle, and this one is hollow (pixel {:?})",
+        r2l.image.get(50, 50)
+    );
+    assert_eq!(
+        l2r.image.pixels, r2l.image.pixels,
+        "the same line, the same dashes, the same paint: which end it was written from must not \
+         change a single pixel"
+    );
+}
+
+/// Three points and a turn: the offsets at the middle vertex have to meet, not fall back.
+///
+/// The two-point case above is degenerate — there is no vertex with a segment arriving *and* a
+/// segment leaving, so nothing has to meet anywhere. Add one and the middle vertex does, and
+/// the outline is now wrong there for a second and independent reason: the miter is taken
+/// between the normals of the wrong pair of segments, so the corner is mitred against a
+/// direction the path never went in.
+///
+/// The shape is a `V` opening to the right, so its first segment runs in the negative x
+/// direction and it is not symmetric about either axis.
+#[test]
+fn a_three_point_path_in_the_negative_direction_is_not_hollow() {
+    let points = [(80, 20), (20, 50), (80, 80)];
+    let (forward, _) = both_ways(&points, false);
+    let render = render(page_with(&format!("0 0 0 RG 10 w {forward} S"), 100), 1.0);
+    assert!(
+        render.notes.is_empty(),
+        "the path should draw without complaint: {:?}",
+        render.notes
+    );
+    assert!(
+        inked(&render.image) > 400,
+        "a `V` two segments long has real area: {}",
+        inked(&render.image)
+    );
+    // Points on the path itself, away from the corner, so what is being checked is the stroke
+    // and not the miter. A stroke ten points wide is five either side of the line, and a pixel
+    // whose centre is on the line is covered whole.
+    for (x, y) in [(60, 30), (40, 40), (50, 65), (40, 60), (60, 70)] {
+        assert!(
+            darkness(&render.image, x as usize, y as usize) >= 128,
+            "({}, {}) is on the path and must be ink, not a hole through the middle of the \
+             stroke (pixel {:?})",
+            x,
+            y,
+            render.image.get(x as usize, y as usize)
+        );
+    }
+    assert_reversal_invariance(
+        "0 0 0 RG 10 w",
+        &points,
+        false,
+        "a three-point `V` opening right",
+    );
+}
+
+/// The ink at a page point, given in page coordinates.
+///
+/// `y` counts upward on a page and downward on a device, so a point at page `y` is on device
+/// row `height - 1 - y`. Samples in a stroke test are about where the path is, so writing
+/// them in page coordinates is what keeps them readable.
+fn on_page(image: &mangle_render::Image, x: i64, y: i64) -> u32 {
+    darkness(
+        image,
+        x as usize,
+        (i64::try_from(image.height).unwrap_or(0) - 1 - y) as usize,
+    )
+}
+
+/// The join at a sharp corner: a mitre, not a notch and not a bowtie.
+///
+/// The path arrives at `(20, 80)` heading in the negative x direction and turns down, so the
+/// mitre on the outside of the turn is six points out on each axis from the vertex, at
+/// `(14, 86)` — arithmetic rather than a claim about the renderer, given a twelve point stroke.
+/// The three samples are inside that mitre and inside nothing else, so a corner mitred against
+/// the wrong segment leaves them paper.
+///
+/// The bevel branch of the same join is pinned by the closed ring below rather than here: it is
+/// only reached when the miter limit refuses, and on an *open* path the ring
+/// [D14](#d14--an-open-path-of-three-or-more-points-is-stroked-as-a-closed-ring) means the
+/// corner is a corner of a ring, where a sample would be measuring that defect and not this one.
+#[test]
+fn a_sharp_corner_in_the_negative_direction_has_no_notch() {
+    let points = [(80, 80), (20, 80), (20, 20)];
+    let mitred = render(
+        page_with(
+            &format!("0 0 0 RG 12 w {} S", both_ways(&points, false).0),
+            100,
+        ),
+        1.0,
+    );
+    assert!(
+        mitred.notes.is_empty(),
+        "the corner should draw without complaint: {:?}",
+        mitred.notes
+    );
+    assert!(
+        inked(&mitred.image) > 400,
+        "the corner has real area: {}",
+        inked(&mitred.image)
+    );
+    for (x, y) in [(15, 83), (15, 85), (17, 84)] {
+        assert!(
+            on_page(&mitred.image, x, y) >= 128,
+            "({}, {}) is inside the mitre of the corner at (20, 80) — the outside of the turn \
+             reaches (14, 86) — and must be ink, so a corner mitred against the wrong segment \
+             leaves a notch there (pixel is {})",
+            x,
+            y,
+            on_page(&mitred.image, x, y)
+        );
+    }
+    // And the same corner walked from the other end. The outer mitre is at (14, 86) either way —
+    // the turn is the same turn, only walked the other way round it — so the same three samples
+    // answer for the other rendering, which is checked here rather than by comparing the two
+    // images because on an open path that comparison is measuring D14.
+    let other = render(
+        page_with(
+            &format!("0 0 0 RG 12 w {} S", both_ways(&points, false).1),
+            100,
+        ),
+        1.0,
+    );
+    for (x, y) in [(15, 83), (15, 85), (17, 84)] {
+        assert!(
+            on_page(&other.image, x, y) >= 128,
+            "({}, {}) is inside the mitre of the same corner walked from the other end, and \
+             must be ink too (pixel is {})",
+            x,
+            y,
+            on_page(&other.image, x, y)
+        );
+    }
+}
+
+/// A cap is at the end of a stroke, whichever end of the path that is.
+///
+/// Both caps of a stroke are drawn, one at each end, and the outline is built left side first
+/// then right side back. So a cap is placed with the normal of the segment *at* its endpoint:
+/// the last segment for the end cap, the first for the start cap. Asking for the neighbouring
+/// segment instead asks for one that is not there, and the answer is a fixed direction that
+/// happens to suit a horizontal line going right and suits nothing else — so a projecting or
+/// round cap on a line drawn right to left, or on any vertical or diagonal line at all, grows
+/// out of the side of the stroke instead of out of its end.
+///
+/// The reach is arithmetic: a butt cap stops at the endpoint, a projecting or round cap reaches
+/// half the stroke width past it, and a six-point half-width on a segment from 80 to 20 puts
+/// the ink's edges at 14 and 86 whichever way round the segment was written.
+#[test]
+fn a_cap_lands_at_the_ends_of_a_negatively_drawn_path() {
+    // (cap operator, half width past the endpoint)
+    let caps = [("0 J", 0i64), ("1 J", 6), ("2 J", 6)];
+    // The four axis-aligned directions, where the reach on each axis is the endpoint's own
+    // coordinate plus or minus it, and then the two diagonals, where it is not and where only
+    // the direction the cap points in can be read off a sample.
+    let segments = [
+        ((20, 50), (80, 50)),
+        ((80, 50), (20, 50)),
+        ((50, 20), (50, 80)),
+        ((50, 80), (50, 20)),
+        ((20, 20), (80, 80)),
+        ((80, 80), (20, 20)),
+    ];
+    for (cap, reach) in caps {
+        for (p, q) in segments {
+            let r = render(
+                page_with(
+                    &format!("0 0 0 RG 12 w {cap} {} S", both_ways(&[p, q], false).0),
+                    100,
+                ),
+                1.0,
+            );
+            assert!(
+                r.notes.is_empty(),
+                "{cap} on {p:?} -> {q:?} should draw: {:?}",
+                r.notes
+            );
+            if p.0 == q.0 || p.1 == q.1 {
+                let (lo, hi) = (p.0.min(q.0) - reach, p.0.max(q.0) + reach);
+                let (lo_y, hi_y) = (p.1.min(q.1) - reach, p.1.max(q.1) + reach);
+                // One pixel outside the reach must be paper and one inside must be ink.
+                // Sampling the middle of the stroke, which is covered whole, so this measures
+                // the cap rather than an antialiased edge.
+                let samples = if p.1 == q.1 {
+                    [(lo - 1, 50i64), (lo, 50), (hi - 1, 50), (hi, 50)]
+                } else {
+                    [(50i64, lo_y - 1), (50, lo_y), (50, hi_y - 1), (50, hi_y)]
+                };
+                for ((x, y), ink) in samples.into_iter().zip([false, true, true, false]) {
+                    assert_eq!(
+                        on_page(&r.image, x, y) >= 128,
+                        ink,
+                        "{cap} on {p:?} -> {q:?}: page ({x}, {y}) should be {}, since the stroke \
+                         reaches x {lo}..{hi} and y {lo_y}..{hi_y} (ink {})",
+                        if ink { "ink" } else { "paper" },
+                        on_page(&r.image, x, y)
+                    );
+                }
+            }
+            assert_reversal_invariance(
+                &format!("0 0 0 RG 12 w {cap}"),
+                &[p, q],
+                false,
+                &format!("a {cap} cap on the segment {p:?} -> {q:?}"),
+            );
+        }
+    }
+}
+
+/// Reversal invariance, over shapes rather than over one of them.
+///
+/// Each case below is drawn forwards and backwards and compared, and they are written as a loop
+/// over a list rather than as one hand-picked case on purpose: the defect was found on a single
+/// two-point line, and a test written about that line would have said nothing about the cap, the
+/// bevel or the ring that the same wrong argument breaks. Four widths, three cap styles and a
+/// dash pattern run against all of them, so a case that happens to be all right at one width and
+/// wrong at another cannot pass.
+///
+/// Two things are deliberately *not* in the list, and both are the specification rather than a
+/// limit on this test:
+///
+/// - **An open path of three or more points.** The stroke of such a path is built as though the
+///   path were closed — it is stroked as a ring, so it carries a stroke along its own closing
+///   segment and has no caps. See
+///   [D14](#d14--an-open-path-of-three-or-more-points-is-stroked-as-a-closed-ring). Until that is
+///   fixed, comparing two such renderings is comparing two rings, which says nothing about the
+///   outline. Their joins and caps are pinned by the two tests above instead.
+/// - **A dash pattern that is not symmetric about the path's middle.** A dash array is walked
+///   from the *start* of the path, which is what the specification says, so reversing a dashed
+///   path is allowed to move the dashes and comparing the two would be asserting that the
+///   renderer ignores where the path began. The one dashed case here uses `[12 12]` on a sixty
+///   point line, which is two whole cycles and half a third and so mirrors onto itself.
+#[test]
+fn a_stroke_does_not_depend_on_which_end_the_path_was_written_from() {
+    let cases: &[Case] = &[
+        ("two points, horizontal", &[(20, 50), (80, 50)], false),
+        (
+            "two points, horizontal, negative",
+            &[(80, 50), (20, 50)],
+            false,
+        ),
+        ("two points, vertical", &[(50, 20), (50, 80)], false),
+        (
+            "two points, negative vertical",
+            &[(50, 80), (50, 20)],
+            false,
+        ),
+        ("two points, diagonal", &[(20, 20), (80, 80)], false),
+        (
+            "two points, negative diagonal",
+            &[(80, 80), (20, 20)],
+            false,
+        ),
+        ("two points, shallow negative", &[(80, 60), (20, 40)], false),
+        ("two points, steep negative", &[(70, 15), (40, 85)], false),
+        (
+            "closed ring",
+            &[(25, 25), (75, 25), (75, 75), (25, 75)],
+            true,
+        ),
+        (
+            "closed ring, rotated",
+            &[(50, 20), (80, 50), (50, 80), (20, 50)],
+            true,
+        ),
+        (
+            "closed ring, concave",
+            &[(20, 20), (80, 20), (80, 50), (50, 50), (50, 80), (20, 80)],
+            true,
+        ),
+        (
+            "closed ring, many corners",
+            &[(50, 15), (85, 40), (70, 85), (30, 85), (15, 40)],
+            true,
+        ),
+    ];
+    // The dash case is separated because it only holds for a line the pattern mirrors onto, so
+    // it names its own cases rather than running against the whole list.
+    let dashes: &[Case] = &[
+        ("two points, horizontal", &[(20, 50), (80, 50)], false),
+        (
+            "two points, horizontal, negative",
+            &[(80, 50), (20, 50)],
+            false,
+        ),
+    ];
+    let setups = [
+        "0 0 0 RG 6 w 0 J 0 j",
+        "0 0 0 RG 10 w 2 J 0 j",
+        "0 0 0 RG 14 w 1 J 1 j",
+        "0 0 0 RG 18 w 1 J 0 j",
+    ];
+    for setup in setups {
+        for (name, points, closed) in cases {
+            assert_reversal_invariance(setup, points, *closed, &format!("{setup}: {name}"));
+        }
+    }
+    for (name, points, closed) in dashes {
+        assert_reversal_invariance(
+            "0 0 0 RG 2 w 1 J 0 j [12 12] 0 d",
+            points,
+            *closed,
+            &format!("a [12 12] dash on {name}"),
+        );
+    }
+}
+
 // ── How long a dash is, in device pixels ──────────────────────────────────────────
 
 /// The runs of ink along the device row through the middle of a horizontal line.

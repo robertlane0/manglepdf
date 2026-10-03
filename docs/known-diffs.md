@@ -1286,13 +1286,13 @@ pattern at all.
 
 ## D13 — a two-point dash run drawn in the negative x direction becomes a bowtie
 
-**Severity: any dash run whose path segment runs in the negative x direction — which is half of
-all horizontal and vertical dashes. Open, found while diagnosing D12, and recorded rather than
-closed.**
+**Severity: was any dash run whose path segment did not run in the positive x direction — which
+is half of all horizontal and vertical dashes and every diagonal. Fixed; the measurements are
+below. Found while diagnosing D12.**
 
 `stroke_outline` offsets a polyline on both sides and joins the ends. For a **two-point** path —
 one `m` and one `l` — the two offset points at each end are supposed to pair up into a
-rectangle. They do not always.
+rectangle. They did not always.
 
 ### The evidence
 
@@ -1304,54 +1304,259 @@ render, `0` darkest and `.` paper, at 1 pixel per point:
 20 50 m 80 50 l S     ....................000000000000............000000000000...........
 ```
 
-The same line, the same dashes, drawn in the two directions. One is solid; the other is a
+The same line, the same dashes, drawn in the two directions. One is solid; the other was a
 **bowtie** — dark at the ends and hollow in the middle, every dash, every time. A horizontal
-dash drawn left-to-right is right and the same dash drawn right-to-left is wrong, which is
+dash drawn left-to-right was right and the same dash drawn right-to-left was wrong, which is
 enough to say the geometry and not the paint.
 
-It reproduces through `Device::stroke_polygon` with a plain `0 0 0 RG` stroke, so it predates
-D12 and is independent of it. It also reproduces only for the two-point path: the same line
-written as `80 50 m 70 50 l 60 50 l 50 50 l 40 50 l 30 50 l 20 50 l S` — six collinear points,
-so the offset sides have interior vertices to work with — draws every dash solid.
-
-And the outline says why. Asking `stroke_outline` for the two runs' polygons gives:
+It reproduced through `Device::stroke_polygon` with a plain `0 0 0 RG` stroke, so it predated
+D12 and was independent of it. And the outline said why. Asking `stroke_outline` for the two
+runs' polygons gave:
 
 ```
 80 50 m 20 50 l   [(80,49), (20,51), (20,49), (80,51)]     <- a bowtie
 20 50 m 80 50 l   [(20,51), (80,51), (80,49), (20,49)]     <- a rectangle
 ```
 
-### The root cause
+### The root cause, confirmed
 
-`offset_sides` asks for the normal of the segment *arriving* at each vertex:
+`offset_sides` asked for the normal of the segment *arriving* at each vertex:
 
 ```rust
 let before = normal_at(path, i.wrapping_sub(1), 0);
 ```
 
 `normal_at(points, index, after)` already means "the normal of the segment ending at `index`"
-when `after == 0` — it computes `(index - 1, index)` internally. So the call above asks for the
+when `after == 0` — it computes `(index - 1, index)` internally. So the call above asked for the
 segment ending at `i - 1`, **one segment too early**, and the correct call is
-`normal_at(path, i, 0)`. `add_joins` makes the same call and is wrong the same way.
+`normal_at(path, i, 0)`. `add_joins` made the same call and was wrong the same way.
 
-Two things follow, and only the first is visible on the two-point case:
+One refinement to what was recorded here before, because it changes which shapes the defect
+reached and so how it should have been described. The claim was that at the last vertex of
+*every* open path both lookups miss and the normal falls back to the fixed `(0, 1)`. They only
+both miss for a **two-point** path. At the last vertex of a longer open path `before` is `Some`
+— it is simply the normal of segment `i - 2` instead of `i - 1` — so the offset is taken along
+the wrong segment's normal with no fallback at all. That is a smaller error than the fallback
+but it is the same error, and it is why a three-point path did not come out hollow: it came out
+*kinked*, with a mitre taken against a direction the path never went in.
 
-- At the **last** vertex of every open path, `before` is `None` (the index is out of range) and
-  `after` is `None` too, so the normal falls back to the fixed `(0, 1)`. That happens to be right
-  for a segment running in the positive x direction and wrong for one running in the negative x
-  direction — which is exactly the l2r/r2l split above.
-- At an **interior** vertex, the bisector is taken between the normals of segments `i - 2` and
-  `i` rather than `i - 1` and `i`, so a genuine corner is mitred against the wrong direction and
-  the outline is wrong on every polyline with three or more points and a turn in it. That one is
-  not visible above only because the fixture's interior points are collinear.
+And the fallback was worse than "negative x". `(0, 1)` is the left normal of a segment running in
+the **positive** x direction and of nothing else, so every two-point path whose segment was
+vertical or diagonal was a bowtie *in both directions* — the entry's title understated it.
+
+### What else the same wrong argument reached
+
+Checking rather than assuming turned up three more places, all of them one index off in the same
+way, and all now fixed:
+
+- **The joins.** `add_joins` names `normal_at(path, i - 1, 0)` as the arriving normal, so both
+  the bevel test and the two bevel corners were computed from the wrong pair of segments.
+- **Both caps.** `stroke_outline` asked for `normal_at(path, len - 1, 1)` at the end point and
+  `normal_at(path, 0, 0)` at the start point — the segment *after* the last point and the one
+  *before* the first, neither of which exists. Both returned `None` and both caps were placed
+  against the same fixed `(0, 1)`. A cap is at the end of a stroke, so it has to be measured
+  against the segment that ends there: `normal_at(path, len - 1, 0)` and `normal_at(path, 0, 1)`.
+  Before the fix a round or projecting cap on a vertical line grew out of the *side* of the
+  stroke rather than out of its end.
+- **The seam of a ring.** A closed path's last point joins its first, so both of the seam's
+  points have a segment on each side like every other point, and the closing segment is the one
+  arriving at the first and the one leaving the last. Reading the ring as an open list — which is
+  what trimming the repeated final point leaves — gives each of them one neighbour and loses the
+  mitre at the seam, so the ring's outer boundary stopped short of that corner.
+
+The last of those is worth singling out because it is the one place where fixing the index
+*looked* like a regression. The three existing tests that measure a stroked square under a `cm`
+(`a_strokes_width_grows_with_the_page_scale` and the two beside it) failed the moment the index
+was corrected, with the ink box's left edge four pixels short. They were not wrong: the old
+seam offset was along a *different wrong* segment's normal, and for a square that segment's
+normal happened to point the way the mitre would have. The right answer needed the closing
+segment to be looked up, which is what `normals_at` now does.
+
+### The fix
+
+`normals_at(path, index, closed)` returns the two normals meeting at a point — the segment
+arriving and the segment leaving — and is the single place that knows about a ring's closing
+segment. `offset_sides` and `add_joins` both go through it, and both caps ask it for the
+segment at their own end point.
+
+### What the oracles draw, measured
+
+Against `mutool draw` at 150 DPI, page 1 of each file. The before column is the same code with
+this entry's fix reverted, measured in the same session, so it is a like-for-like pair and not a
+comparison against a figure recorded before the dash and pattern-stroke work.
+
+Page 1 of `corpus/wild/pdfjs__bug1795263.pdf`, 1240×1755:
+
+| | SSIM | RMS | pixels above tolerance | our ink | `mutool`'s |
+|---|---|---|---|---|---|
+| before | 0.98826 | 10.48991 | 14 320 | 87 612 | 90 115 |
+| after | **0.98826** | **10.48991** | **14 320** | **87 612** | 90 115 |
+
+**This page did not move, at all.** Every figure is identical to the last digit. That is worth
+saying plainly rather than dressing up: page 1 of this file carries no stroke that reaches the
+offset code, so there was nothing on it for this fix to change. Its 14 320 pixels above
+tolerance are something else, and the residual this entry used to be blamed for was never on
+this page.
+
+Page 1 of `corpus/wild/gov__irs-f1040.pdf`, 1275×1650:
+
+| | SSIM | RMS | pixels above tolerance | our ink | `mutool`'s |
+|---|---|---|---|---|---|
+| before | 0.97408 | 14.57954 | 111 459 | 1 121 543 | 1 123 089 |
+| after | **0.98250** | **12.74925** | **98 550** | **1 122 642** | 1 123 089 |
+
+SSIM by 0.0084, RMS down 1.83, and 12 909 fewer pixels above tolerance — 11.6% of them — on a
+form that is nearly all thin rules. Our ink came 1 099 pixels closer to `mutool`'s and is now
+447 away on a page with 1.12 million marks on it.
+
+This is the small movement that was expected and it is worth not over-reading. The fix changes
+every stroke on every page, but most strokes on this page are a point or two long and the bowtie
+was a few pixels, so a form of rules gains a fraction of a percent. What the measurement does
+say is that the direction of the error was real and systematic — the arrow points at the ink and
+not away from it — and that `pdfjs__bug1795263` was never evidence for this defect either way.
+
+### What is pinned now
+
+Five tests, all of which fail on the code above and pass on this one:
+
+- `a_dashed_line_drawn_right_to_left_is_not_a_bowtie` — the reproduction, both directions, at
+  pixel level, plus a sample in the middle of the middle dash.
+- `a_three_point_path_in_the_negative_direction_is_not_hollow` — a `V` opening right, five
+  samples on the path away from the corner, and reversal invariance.
+- `a_sharp_corner_in_the_negative_direction_has_no_notch` — the mitre on the outside of a right
+  angle six points off the path, walked from both ends.
+- `a_cap_lands_at_the_ends_of_a_negatively_drawn_path` — butt, round and projecting, on four
+  axis-aligned and two diagonal segments, the reach asserted from arithmetic and reversal
+  invariance asserted for all three cap styles.
+- `a_stroke_does_not_depend_on_which_end_the_path_was_written_from` — twelve fixtures across four
+  widths and three cap styles, plus a dash case, written as a loop so it covers shapes nobody
+  picked.
+
+**No existing test needed changing.** That is the check worth making explicitly, because three of
+them did fail on the first attempt and the reason was the ring seam rather than anything wrong
+with the fix.
+
+---
+
+## D14 — an open path of three or more points is stroked as a closed ring
+
+**Severity: high, and much wider than D13 — every stroked polyline that is not a single straight
+segment, which is most of them. Open, found while fixing D13, and recorded rather than closed.**
+
+`Device::stroke_outline` normalises a subpath before walking its dashes:
+
+```rust
+let closed: Vec<(f64, f64)> = if subpath.len() > 2 {
+    let mut c = subpath.clone();
+    if let (Some(first), Some(last)) = (c.first().copied(), c.last().copied())
+        && (first.0 != last.0 || first.1 != last.1)
+    {
+        c.push(first);
+    }
+    c
+} else {
+    subpath.clone()
+};
+```
+
+It pushes the first point onto the end of the subpath whenever the last point is not already the
+first — which is precisely the condition for the subpath being **open**. So every open subpath of
+three or more points is closed, and then stroked as a ring.
+
+`transform_path` already appends the first point itself when it meets `PathSegment::Close`, so a
+genuinely closed subpath arrives with `first == last` and the push is skipped. The branch is not
+doing what its comment-free shape suggests: it is doing the opposite.
+
+### The evidence
+
+A 100×100 page, `0 0 0 RG 6 w 20 20 m 80 20 l 80 80 l S` — an `L`, two segments, no `h`. The
+leftmost inked column of each device row, `#` for ink and `.` for paper at 1 pixel per point,
+against `mutool draw -r 72` on the same file:
+
+```
+ours                                 mutool
+rows 20..76: a band whose             rows 20..76: nothing at all
+left edge steps one column           rows 77..82: 20-82, the horizontal bar
+left per row, from column 76          rows 20..76: 77-82, the vertical bar
+at row 21 to column 21 at
+row 76 — a 45° band across the
+corner the path never asks for
+rows 77..82: 20-82, the bar
+```
+
+Ours has a 45° band running from device `(76, 21)` down to `(21, 76)` that the path does not
+contain, and it has no caps at the two ends the path does have. Both are the closing segment:
+the stroke runs from page `(80, 80)` back to `(20, 20)`, and the outline comes out as two rings
+rather than one open outline, so there is nowhere for a cap to go. Asking for the outline says
+the same thing in one line — two subpaths, and neither of them has a cap:
+
+```
+SUBPATH [(20,83), (83,83), (83,20)]
+SUBPATH [(77,20), (77,77), (20,77)]
+```
+
+which is the outer and the inner boundary of a ring whose four corners are mitred, drawn as a
+closed loop, for a path with two corners and two ends.
 
 ### What fixing it would mean
 
-One argument in one place, and its own measurements. It changes `stroke_outline`, which every
-stroked path on every page goes through, so it moves the corpus a second time and wants its own
-entry and its own run rather than a line inside D12's — the same reasoning
-[D11](#d11--a-strokes-width-is-one-number-where-a-non-uniform-cm-makes-it-an-ellipse) gives for
-why the non-uniform-`cm` compromise is not fixed in passing. It was found while diagnosing D12
-and is recorded here rather than fixed there, because D12 was the defect asked about and a second
-change to the stroke outline in the same commit would have been two defects with one
-measurement between them.
+Not deleting the branch but making it able to tell an open subpath from a closed one, which means
+the subpath has to say which it is — `transform_path`'s `Polygon` is `Vec<Vec<(f64, f64)>>` and
+the information is thrown away at `PathSegment::Close`. That is a change to the path
+representation rather than to the outline, and it moves every stroked path with three or more
+points on every page, so it wants its own entry, its own corpus run and probably its own
+fixtures for the cap and join work it unblocks. **It is the next thing on the stroke item.**
+
+### What it blocks
+
+`a_stroke_does_not_depend_on_which_end_the_path_was_written_from` deliberately leaves three-or-more
+point *open* paths out of its list, and says so: comparing two renderings of a ring is comparing
+two rings, which says nothing about the outline. The joins and caps of such a path are pinned
+geometrically instead, by the two tests above it, because a sample read off a ring's corner is
+measuring this defect and not D13.
+
+---
+
+## D15 — a bevel's corners are appended to the end of the assembled outline, not put at the corner
+
+**Severity: low on an open path, and only where the miter limit refuses. Open, found while fixing
+D13.**
+
+When the miter limit refuses a mitre, `add_joins` pushes the two offset corners onto the outline
+it was handed. For a **ring** that is the right place — the side's own point vector, and the
+outline closes back to its first point — except that it is the right place only for the seam, and
+the seam is the one vertex the loop skips. For an **open** path it is the wrong place outright:
+`outline` has already been assembled as left side, end cap, right side back, start cap, so a
+corner belonging at vertex `i` is appended after the start cap, where it draws a stray spike in
+the middle of nowhere.
+
+The loop also skips the seam on a ring (`first = usize::from(closed)`,
+`last = path.len() - usize::from(closed)`), which after D13's fix is now the one corner that is
+mitred but never bevelled.
+
+**Left open on purpose.** It is only reached when `/ML` is small enough to refuse a mitre, which
+is not the default, and fixing it means moving points inside a polygon that is already assembled
+rather than passing an index — a change to the shape of `add_joins`, not to an argument in it.
+
+---
+
+## D16 — the fill's coverage depends on where the polygon's edge list starts
+
+**Severity: very low — one boundary pixel, a few units out of 255. Open, found while fixing D13,
+and the reason `RENDERING_SLACK` is 32 and not 0.**
+
+Two renderings of the same stroke from opposite ends produce the same cycle of outline points,
+but not the same *first* point, and the rasteriser's coverage is not invariant to that. Measured
+across the fixtures in `a_stroke_does_not_depend_on_which_end_the_path_was_written_from`: a
+sixty-point diagonal `6 w` butt cap differs by **4** units on one pixel; a horizontal line with a
+round cap differs by **18** on the outermost pixel of the cap's sixteen-step arc; a two-point
+vertical and a closed square ring differ by **0**.
+
+The cause is in `accumulate_band`: crossings are sorted by `x` with a stable sort, so two edges
+crossing at the same `x` — which is what happens at a vertex on a band boundary — are ordered by
+their index in the edge list, and the pairing that follows reads the bottom of the band off
+whichever edge came first.
+
+`RENDERING_SLACK` in `tests/pages.rs` is 32 because of this, and the comment there says so. A
+bowtie is a difference of ninety on every dash of every run, so the slack costs the test nothing
+it needs.

@@ -583,7 +583,7 @@ pub fn stroke_outline(points: &[(f64, f64)], style: &StrokeStyle) -> Polygon {
         return Polygon::default();
     }
 
-    let offsets = offset_sides(path, half, style);
+    let offsets = offset_sides(path, half, style, closed);
     let mut subpaths = Vec::new();
     if closed {
         // The outer boundary and the inner one, wound opposite ways, so the non-zero rule
@@ -596,10 +596,12 @@ pub fn stroke_outline(points: &[(f64, f64)], style: &StrokeStyle) -> Polygon {
     } else {
         let (left, right) = offsets;
         let mut outline = left;
+        // The last segment, which is the one arriving at the end point: the cap is at that
+        // point, so it is that segment's normal it is measured against.
         cap(
             &mut outline,
             path.last().copied().unwrap_or((0.0, 0.0)),
-            normal_at(path, path.len() - 1, 1).unwrap_or((0.0, 1.0)),
+            normal_at(path, path.len() - 1, 0).unwrap_or((0.0, 1.0)),
             style.cap,
             half,
             true,
@@ -607,10 +609,11 @@ pub fn stroke_outline(points: &[(f64, f64)], style: &StrokeStyle) -> Polygon {
         let mut back = right;
         back.reverse();
         outline.extend_from_slice(&back);
+        // And the first segment, which is the one leaving the start point, for the same reason.
         cap(
             &mut outline,
             path.first().copied().unwrap_or((0.0, 0.0)),
-            normal_at(path, 0, 0).unwrap_or((0.0, 1.0)),
+            normal_at(path, 0, 1).unwrap_or((0.0, 1.0)),
             style.cap,
             half,
             false,
@@ -624,16 +627,34 @@ pub fn stroke_outline(points: &[(f64, f64)], style: &StrokeStyle) -> Polygon {
 /// The offset points on the two sides of a polyline.
 type Sides = (Vec<(f64, f64)>, Vec<(f64, f64)>);
 
+/// One segment's normal, or `None` where there is no segment to take it from.
+type MaybeNormal = Option<(f64, f64)>;
+
+/// The two normals meeting at a point: the segment arriving, and the one leaving.
+type Meeting = (MaybeNormal, MaybeNormal);
+
 /// The offset points on each side of a polyline, with the join corrections applied.
 ///
 /// Each point gets the *bisector* of its two adjacent segment normals, which is what turns
-/// two offsets that would otherwise leave a notch into one that meets at the corner.
-fn offset_sides(path: &[(f64, f64)], half: f64, style: &StrokeStyle) -> Sides {
+/// two offsets that would otherwise leave a notch into one that meets at the corner. `after`
+/// is the normal of the segment leaving the point and `before` of the one arriving at it, so a
+/// point with only one of them — either end of an *open* path — is offset along that one alone,
+/// which is what a butt cap at the end of a line wants.
+///
+/// A ring is the case where that is not good enough. Its last point joins its first, so both of
+/// the seam's points have a segment on each side like every other point on the ring, and the
+/// closing segment is the one arriving at the first and the one leaving the last. Reading the
+/// ring as an open list loses the mitre at the seam, which is a corner of the shape like any
+/// other, and the ring's outer boundary stops short of it.
+///
+/// The `(0, 1)` is for a point that has neither normal, which is a single point or two identical
+/// ones. It is a fixed direction and so is only right for a horizontal line running right, but
+/// there is no segment to measure against and no better guess to make.
+fn offset_sides(path: &[(f64, f64)], half: f64, style: &StrokeStyle, closed: bool) -> Sides {
     let mut left = Vec::with_capacity(path.len());
     let mut right = Vec::with_capacity(path.len());
     for i in 0..path.len() {
-        let before = normal_at(path, i.wrapping_sub(1), 0);
-        let after = normal_at(path, i, 1);
+        let (before, after) = normals_at(path, i, closed);
         let normal = match (before, after) {
             (Some(a), Some(b)) => bisector(a, b, half, style),
             (Some(a), None) | (None, Some(a)) => a,
@@ -646,6 +667,32 @@ fn offset_sides(path: &[(f64, f64)], half: f64, style: &StrokeStyle) -> Sides {
         right.push((p.0 - normal.0 * half, p.1 - normal.1 * half));
     }
     (left, right)
+}
+
+/// The normals of the two segments that meet at a point: the one arriving and the one leaving.
+///
+/// `closed` says whether the path's last point joins its first, which is what gives the seam a
+/// segment on each side. Without it the two seam points each have one neighbour, and the
+/// closing segment is the one that is missing.
+fn normals_at(path: &[(f64, f64)], index: usize, closed: bool) -> Meeting {
+    let last = path.len().saturating_sub(1);
+    let closing = || {
+        let (Some(&first), Some(&last)) = (path.first(), path.last()) else {
+            return None;
+        };
+        segment_normal(last, first)
+    };
+    let before = if closed && index == 0 {
+        closing()
+    } else {
+        normal_at(path, index, 0)
+    };
+    let after = if closed && index == last {
+        closing()
+    } else {
+        normal_at(path, index, 1)
+    };
+    (before, after)
 }
 
 /// The bisector of two segment normals, extended to the miter point where the miter limit
@@ -697,11 +744,9 @@ fn add_joins(
     let last = path.len().saturating_sub(usize::from(closed));
     let limit = style.miter_limit.max(1.0) * half;
     for i in first..last {
-        let (Some(p), Some(before), Some(after)) = (
-            path.get(i),
-            normal_at(path, i.wrapping_sub(1), 0),
-            normal_at(path, i, 1),
-        ) else {
+        let (Some(p), Some(before), Some(after)) =
+            (path.get(i), normal_at(path, i, 0), normal_at(path, i, 1))
+        else {
             continue;
         };
         let dot = before.0 * after.0 + before.1 * after.1;
@@ -730,18 +775,25 @@ fn cap(
     match kind {
         LineCap::Butt => {}
         LineCap::Square => {
-            // A square cap extends the stroke by its own half width.
+            // A square cap extends the stroke by its own half width, and it is a *square*: both
+            // of its outer corners, or the outline closes on a diagonal and the cap is a
+            // pentagon with a notch in it.
+            //
+            // The order is the whole of it. The outline is walked left side first and right
+            // side back, so it arrives at the end cap from the `+normal` side and at the start
+            // cap from the `-normal` one, and the corner it is standing next to has to come
+            // first. The other order draws a square with a bite taken out of it, and which of
+            // the two it draws depends on which way round the path was written.
             let extend = if at_end { 1.0 } else { -1.0 };
-            let (Some(last), Some(first)) = (outline.last().copied(), outline.first().copied())
-            else {
-                return;
-            };
-            let _ = (last, first);
             let along = (normal.1, -normal.0);
-            outline.push((
-                point.0 + along.0 * extend * half + normal.0 * half,
-                point.1 + along.1 * extend * half + normal.1 * half,
-            ));
+            let tip = (
+                point.0 + along.0 * extend * half,
+                point.1 + along.1 * extend * half,
+            );
+            let near = (tip.0 + normal.0 * half, tip.1 + normal.1 * half);
+            let far = (tip.0 - normal.0 * half, tip.1 - normal.1 * half);
+            outline.push(if at_end { near } else { far });
+            outline.push(if at_end { far } else { near });
         }
         LineCap::Round => {
             // A round cap is a semicircle, flattened finely enough that the chord error
@@ -772,8 +824,11 @@ fn normal_at(points: &[(f64, f64)], index: usize, after: u8) -> Option<(f64, f64
     } else {
         (index.wrapping_sub(1), index)
     };
-    let a = points.get(i)?;
-    let b = points.get(j)?;
+    segment_normal(*points.get(i)?, *points.get(j)?)
+}
+
+/// The unit normal to the left of the segment from one point to another.
+fn segment_normal(a: (f64, f64), b: (f64, f64)) -> Option<(f64, f64)> {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let length = (dx * dx + dy * dy).sqrt();
     if length <= 0.0 {

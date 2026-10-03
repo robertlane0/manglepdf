@@ -326,18 +326,35 @@ renderer that never has to ask the machine for a font.
    is 0.97348 → 0.97408 and `gov__arxiv-1512.03385` page 1 does not move, because most corpus
    dash patterns are sub-pixel or on another page. One case is left and recorded: an array that
    sums to zero is drawn solid here, where both oracles draw nothing at all.
-   **And the outline itself has a defect the dash work exposed**, now
+   **And the outline itself had a defect the dash work exposed**, now fixed and measured as
    [D13](docs/known-diffs.md): a **two-point** dash run — one `m` and one `l` — drawn in the
-   negative x direction comes out a **bowtie**, hollow in the middle, while the identical dash
-   drawn left to right is solid. `offset_sides` asks `normal_at(path, i - 1, 0)` for the normal of
-   the segment arriving at vertex `i`, but `normal_at(_, index, 0)` already means "the segment
-   ending at `index`", so the call is one segment too early; at a path's last vertex both
-   lookups miss and the normal falls back to a fixed `(0, 1)`, which is right for a segment
-   running in the positive x direction and wrong for one running in the negative x direction.
-   It predates D12 and reproduces with a plain `0 0 0 RG` stroke. It is **not fixed yet**, and it
-   is the next thing on this item: one argument in one place, but it changes `stroke_outline`,
-   which every stroked path on every page goes through, so it wants its own corpus measurement
-   rather than a second change inside a commit about a pattern colour.
+   negative x direction came out a **bowtie**, hollow in the middle, while the identical dash
+   drawn left to right was solid. `offset_sides` asked `normal_at(path, i - 1, 0)` for the normal
+   of the segment arriving at vertex `i`, but `normal_at(_, index, 0)` already means "the segment
+   ending at `index`", so the call was one segment too early; at a two-point path's last vertex
+   both lookups miss and the normal fell back to a fixed `(0, 1)`, which is right for a segment
+   running in the positive x direction and wrong for everything else. It predated D12 and
+   reproduced with a plain `0 0 0 RG` stroke. Checking rather than assuming found the same wrong
+   argument in three more places — the joins, both caps, and the seam of a ring — and correcting
+   the ring's seam is what stopped three existing stroke tests from failing, which is the check
+   that says the fix is right rather than merely different. Against `mutool` at 150 DPI,
+   `gov__irs-f1040` page 1 is **0.97408 → 0.98250**, RMS 14.58 → 12.75, and 12 909 fewer pixels
+   above tolerance; `pdfjs__bug1795263` page 1 **does not move at all**, to the last digit,
+   because it carries no stroke that reaches the offset code.
+   **What is left on this item is bigger than what was just fixed.**
+   [D14](docs/known-diffs.md): `Device::stroke_outline` pushes a subpath's first point onto its
+   end whenever the last point is not already the first — which is exactly the condition for the
+   subpath being **open** — so every open path of three or more points is stroked as a closed
+   ring. It then carries a stroke along its own closing segment and has no caps. `mutool` draws
+   `20 20 m 80 20 l 80 80 l S` as an `L`; this draws the `L` plus a diagonal across it. The fix is
+   in the path representation rather than in the outline, because `transform_path` throws away
+   whether a subpath was closed, and it moves every stroked path with three or more points on
+   every page — so it wants its own entry and its own corpus run, and it is what unblocks proper
+   cap and join work on a polyline. Two smaller things stand beside it and are left open: a
+   bevel's corners are appended to the end of the assembled outline rather than put at the corner
+   ([D15](docs/known-diffs.md)), and the fill's coverage depends on where a polygon's edge list
+   starts, which moves one boundary pixel by up to eighteen units out of 255
+   ([D16](docs/known-diffs.md)).
 3. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
    not going to be built.
 4. **Fill the Inspector's right-hand region** from the object model, which is the window work
@@ -543,8 +560,9 @@ findings dominate, in this order:
    pattern as the stroke colour is ordinary PDF, so a page whose ink is entirely patterned
    strokes rendered **blank**: 11 marks recorded, nothing composited. **Done** — see above, and
    see [D12](docs/known-diffs.md) for the four other explanations that were ruled out first, and
-   for the two further defects the same page exposed ([D13](docs/known-diffs.md) and the missing
-   `Do` of a form).
+   for the two further defects the same page exposed ([D13](docs/known-diffs.md), since fixed,
+   and the missing `Do` of a form). The third, [D14](docs/known-diffs.md), was found while fixing
+   D13 and is larger than the one that led to it.
 
 (1) is fixed, and it turned out to be the smaller of the two render defects. Re-measured with
 it fixed, 103 of 542 pages draw and 439 are still blank — 422 of those because of a font, 17
