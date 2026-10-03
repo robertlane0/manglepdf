@@ -684,3 +684,70 @@ The corpus test asserts nothing and the report is the output — the reasoning i
 of `crates/mangle-render/tests/wild_corpus.rs`. A threshold on a document nobody has read
 yet turns the first surprise into a permanent red build, and the response to a permanent red
 build is to raise the threshold, which is the one thing the corpus was for.
+
+### Four defects in one place, found by measuring the fax pages against an oracle
+
+`pdfbox__multitiff.pdf` page 1 is a page-sized CCITT G.4 scan. Against `mutool draw` at
+150 DPI it scored 0.38414 SSIM with 59% of the page's ink against the oracle's 8%, and it is
+the clearest single illustration in this project of a fixture-shaped blind spot: **the
+project's own fax fixtures all end on a white run**, and a defect that only shows on a row
+ending in black is invisible to every one of them.
+
+Four defects, in the order they had to be found:
+
+1. **A fax decoder's output was read as a packed bit stream.** `ccitt_decode` returns one
+   byte per pixel, and reading that as `/BitsPerComponent` claims — one bit — takes eight
+   pixels out of every byte and smears each row sideways by a factor of eight.
+   `mangle_syntax::stream::Decoded` now carries `one_byte_per_sample`, set by the decoder
+   rather than guessed by a consumer from the filter's name, because only the decoder knows
+   what it produced.
+
+2. **Then the same number was read as a value range, and the page went black.** Fixing the
+   first by passing `bits = 8` was right about layout and wrong about everything else:
+   `to_rgba` divides a sample by `2^bits − 1`, so the byte 1 — which is *white* in a fax
+   scan, and most of one — became 1/255, which is black. **Layout and value are two
+   different facts, and only one of them comes from the decoder.** Layout is how many bits of
+   each byte a sample occupies, and the decoder says that; value is what a sample is worth,
+   and `/BitsPerComponent` says that, because it is the file's statement of the range its
+   samples span. `image::decode` now carries the two apart in a `SampleRange`.
+
+   | | SSIM | RMS | above tol | ink ours / oracle |
+   |---|---|---|---|---|
+   | before (one number for both) | 0.38414 | 197.78 | 60.59% | 59.0% / 8.0% |
+   | **after (layout from the decoder, value from `/BitsPerComponent`)** | **0.91170** | **72.09** | **7.99%** | **0.0% / 8.0%** |
+
+3. **An `/ImageMask` painted the wrong bits, and with a colour nobody asked for.** `Do` names
+   no colour, so a mask's colour comes from the graphics state and has to travel with the
+   mark; the painter had been handed black unconditionally. Separately, the stencil test
+   compared a *normalised* sample against one half, so a CCITT mask's every sample read as
+   ≤ 1/255 and nothing distinguished a bit that paints from one that does not. A stencil's
+   sample is a bit however wide a byte the codec wrote it into, so it is now tested on the
+   stored bit. A pattern colour is reported rather than guessed at.
+
+4. **The CCITT decoder dropped a line's final run.** `Line::samples` fills up to each change
+   point and stops, but a change point says where a run *ends*, so everything after the last
+   one kept the row's opening colour: `white 3, black 5` decoded as eight white pixels. Every
+   fax fixture here ends on a white run, which is the one case where that looks right.
+
+### The T.6 two-dimensional path is still broken, and it is not this file
+
+Fixing 4 did **not** move the row-recovery figure. Decoding `pdfbox__multitiff.pdf` page 1
+with `DamagedRowsBeforeError = 1` recovers **7 of 287 rows before and after** the fix. That
+is the whole of the honest answer and it is not a win: **the T.6 two-dimensional path has a
+further defect and it is not fixed.**
+
+What is known. Rows 0–3 decode correctly as all white. Row 4 is a horizontal-mode pair, and
+`decode_line_2d` adds the two run lengths to `b1` — a position on the *reference* line — which
+for an all-white reference is the line width, 344. The black run therefore lands outside the
+row, no change point is recorded, and the line comes out blank; every later line is then read
+against a blank reference until the bit reader meets a sequence that is not a mode code, at
+bit 24 of 1768. The two runs really are the ones the file encodes: reading them out by hand
+against `libtiff`'s decode of the same image gives 199 white then 9 black, and `libtiff`'s
+row 4 is white to 199, black for 9, white after.
+
+This is not the PDFBox file being unusual. Our decoder recovers only **15 of 287 rows from
+`libtiff`'s own G.4 encoding of an image libtiff itself round-trips perfectly**. Group 3 1D
+is unaffected, which is why the fixtures never showed it and why the corpus has almost no
+Group 4 in it. Group 4 is the most common fax format in the wild, so this is the next thing
+in the image work — ahead of JBIG2 and JPEG 2000 — and it needs the specification read rather
+than the code guessed at.

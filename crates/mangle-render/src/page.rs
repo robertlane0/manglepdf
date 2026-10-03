@@ -880,14 +880,43 @@ fn draw_mark(
                 Err(reason) => notes.push(reason),
             },
         },
-        Mark::Image { name, .. } => match name.as_deref() {
+        Mark::Image { name, fill, .. } => match name.as_deref() {
             Some(name) => match images(name) {
                 Ok(raster) => {
                     // The image's own space is the unit square, so the mark's
-                    // transformation is all that is needed to place it. The fill colour is
-                    // what paints an image mask's zero bits.
-                    let fill = mangle_content::Colour::black().to_rgba(None);
-                    image::draw(device, &raster, to_device, record.fill_alpha, fill);
+                    // transformation is all that is needed to place it. A mask is painted in
+                    // the graphics state's non-stroking colour, which `Do` does not name and
+                    // so has to travel with the mark.
+                    let paint = if raster.is_stencil && fill.space.name == "Pattern" {
+                        // A pattern colour is a pattern, not a colour: painting the mask in
+                        // anything else would put a flat block where the page asked for a
+                        // shading or a tiling, and saying so beats drawing the wrong thing.
+                        notes.push(
+                            "an image mask painted in a pattern colour was found and not \
+                             drawn: a shading or tiling used as a pattern colour is not drawn \
+                             yet"
+                            .into(),
+                        );
+                        None
+                    } else {
+                        match fill.to_rgba(None) {
+                            Some(colour) => Some(colour),
+                            // An image that is not a mask paints its own samples, so a
+                            // colour this cannot convert is no reason to refuse it. For a
+                            // mask it was the only colour there was.
+                            None => {
+                                if raster.is_stencil {
+                                    notes.push(format!(
+                                        "an image mask painted in {} could not be converted, \
+                                         so it was not drawn",
+                                        fill.space.name
+                                    ));
+                                }
+                                None
+                            }
+                        }
+                    };
+                    image::draw(device, &raster, to_device, record.fill_alpha, paint);
                 }
                 Err(reason) => notes.push(reason),
             },

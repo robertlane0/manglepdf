@@ -92,6 +92,13 @@ pub enum Mark {
         matrix: Matrix,
         /// True when the image was inline, so the bytes are in the stream.
         inline: bool,
+        /// The fill colour current when the image was drawn, which is what paints an
+        /// `/ImageMask`'s zero bits.
+        ///
+        /// It travels with the mark for the same reason a glyph run's does: `Do` names no
+        /// colour, so a renderer that painted a mask in anything but this would paint every
+        /// mask on every page black and be right only where the page was.
+        fill: Colour,
     },
     /// A shading, filled into the current clip.
     Shading { name: String, matrix: Matrix },
@@ -766,6 +773,7 @@ impl Context<'_> {
                     .map(|n| String::from_utf8_lossy(n).into_owned()),
                 matrix: self.state.ctm,
                 inline: false,
+                fill: self.state.fill.clone(),
             },
             b"Tj" | b"TJ" | b"'" | b"\"" => {
                 self.record_text(op, operands, matches!(name, b"'" | b"\""));
@@ -779,6 +787,7 @@ impl Context<'_> {
                 name: None,
                 matrix: self.state.ctm,
                 inline: true,
+                fill: self.state.fill.clone(),
             },
             _ => return,
         };
@@ -2315,6 +2324,7 @@ mod tests {
             name,
             matrix,
             inline,
+            ..
         } = &rec.mark
         else {
             panic!("expected an image");

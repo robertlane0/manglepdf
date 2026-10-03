@@ -32,6 +32,17 @@ pub struct Decoded {
     pub encoded: bool,
     /// Human-readable notes about filters that were partial or unsupported.
     pub notes: Vec<String>,
+    /// `true` when the bytes in `data` are *samples*, one byte each, rather than a packed
+    /// bit stream — which is what `CCITTFaxDecode` produces.
+    ///
+    /// This is the decoder saying so, not a consumer guessing from the filter's name, and
+    /// the difference matters: a fax decoder expands every one-bit run into a whole byte, so
+    /// reading its output as packed bits takes eight pixels out of each byte and smears every
+    /// row of the image sideways by a factor of eight. Nor can a consumer work it out from
+    /// `/BitsPerComponent`, which describes the *encoded* data and is 1 for a fax stream
+    /// whatever the decoded samples look like. The one place that knows both answers is
+    /// here.
+    pub one_byte_per_sample: bool,
 }
 
 /// Decode a stream's data through its filter chain.
@@ -42,6 +53,7 @@ pub fn decode_stream(stream: &Stream) -> Decoded {
         complete: true,
         encoded: false,
         notes: Vec::new(),
+        one_byte_per_sample: false,
     };
     // Image and colour-space filters do not go through the generic chain.
     let filters = stream.filters();
@@ -111,7 +123,12 @@ pub fn decode_stream(stream: &Stream) -> Decoded {
             b"CCITTFaxDecode" | b"CCF" => {
                 let p = ccitt_params(stream.dict.get("DecodeParms"), parm, stream);
                 match ccitt_decode(&out.data, &p) {
-                    Ok(d) => Some(d),
+                    Ok(d) => {
+                        // The decoder hands back one byte per sample whatever the encoded
+                        // depth was, so that is what a consumer has to read it as.
+                        out.one_byte_per_sample = true;
+                        Some(d)
+                    }
                     Err(e) => {
                         out.notes.push(format!("CCITTFaxDecode: {e}"));
                         out.complete = false;

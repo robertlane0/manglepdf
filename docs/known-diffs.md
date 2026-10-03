@@ -414,20 +414,26 @@ that is worth being able to point at.
 
 ---
 
-## D5 — a page whose image comes from a multi-page TIFF is drawn as a full-page raster
+## D5 — the fax scan on a multi-page TIFF page rendered as a black rectangle
 
-**Severity: high. 0.36 SSIM, 54% of pixels wrong.**
+**Severity: was high — 0.38414 SSIM, 60.6% of pixels wrong. The black half is FIXED; the
+CCITT T.6 codec underneath it is not.**
 
-`pdfbox__multitiff.pdf`, all three pages: 0.3715 / 0.3685 / 0.3591, `max delta 255`, and
-1 174 623 of 2 176 714 pixels above tolerance on page 1.
+`pdfbox__multitiff.pdf` page 1, measured against `mutool draw` at 150 DPI after the fix:
+**0.91170 SSIM, RMS 72.09, 173 990 of 2 176 714 pixels above tolerance**, against the oracle's
+8% ink where this renderer now puts 0%. Before the fix the same page measured 0.38414 SSIM,
+RMS 197.78, 1 318 947 pixels above tolerance and 59% ink — the page was black.
 
-- `W035-p1-ours.png` — the whole page is a black-and-white striped raster.
-- `W035-p1-theirs.png` — a white page with the numeral "1" on it, and nothing else.
-- `W035-p1-diff.png` — black everywhere except a white silhouette of that "1".
+What was wrong is recorded in full in `docs/STATUS.md` and `PLAN.md`, because it is two
+defects with one cause and the second was created by fixing the first: a fax decoder hands
+back one byte per pixel, and *layout* (which byte a pixel lives in) and *value* (what a
+sample is worth) are two different facts that only one number was standing in for.
 
-`marks: 1` on our side: we draw exactly one thing, the raster, stretched over the page.
-`mutool` draws no image and puts a page number on the page. So the page-boundary handling for
-a multi-page TIFF is wrong, and the page label is missing.
+What is still wrong is the codec. Decoding this page's image with `DamagedRowsBeforeError =
+1` recovers **7 of 287 rows**, and our decoder recovers only 15 of 287 rows from `libtiff`'s
+own G.4 encoding of an image libtiff round-trips perfectly. The 8% of the oracle's ink this
+page still does not draw is the numeral, and it is that numeral — the only content on the
+page — that the two-dimensional CCITT path cannot decode.
 
 ---
 

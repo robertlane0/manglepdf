@@ -162,6 +162,7 @@ impl Page {
             complete: true,
             encoded: false,
             notes: Vec::new(),
+            one_byte_per_sample: false,
         };
         for (i, part) in parts.iter().enumerate() {
             let d = resolver.decoded_full(part);

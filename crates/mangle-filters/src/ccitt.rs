@@ -455,6 +455,14 @@ impl Line {
     }
 
     /// Expand to `width` samples, 1 = black.
+    ///
+    /// The list holds *change points* — where one run ends and the next begins — so it
+    /// says nothing about the end of the last run: a row coded `white 3, black 5` has one
+    /// change point, at three. Every sample up to a change point is filled from it, and
+    /// filling only to them leaves the whole tail at the row's opening colour. A line
+    /// whose last run is white comes out right by coincidence, which is why a corpus of
+    /// such lines hid this: the runs after the final change point have to be emitted from
+    /// the colour already in force when the list runs out.
     fn samples(&self, width: usize) -> Vec<u8> {
         let mut row = vec![0u8; width];
         let mut colour = false;
@@ -473,6 +481,9 @@ impl Line {
             if pos >= width {
                 break;
             }
+        }
+        for slot in row.iter_mut().skip(pos) {
+            *slot = u8::from(colour);
         }
         row
     }
@@ -847,5 +858,112 @@ mod tests {
         assert_eq!(out.len(), 14);
         assert_eq!(&out[..5], &[1, 1, 1, 1, 1]);
         assert_eq!(&out[5..], &[0; 9]);
+    }
+
+    // ── A line's last run ────────────────────────────────────────────────────────────
+    //
+    // Built from change points rather than from a stream, because a change point list is
+    // what `samples` is given and the point is what it does with one that ends early. Every
+    // fax fixture in the project ends on a white run, which is the one case where leaving
+    // the tail alone looks correct.
+
+    /// The defect: a change point says where a run *ends*, so a list whose last entry is
+    /// not at the row's edge describes a tail that `samples` used to leave at the row's
+    /// opening colour.
+    #[test]
+    fn a_line_that_ends_on_black_emits_its_last_run() {
+        // White three then black five, out of eight: one change point, at three.
+        let line = Line { changes: vec![3] };
+        assert_eq!(
+            line.samples(8),
+            vec![0, 0, 0, 1, 1, 1, 1, 1],
+            "the five black pixels after the last change point are the last run"
+        );
+    }
+
+    #[test]
+    fn a_line_of_one_run_is_entirely_that_run() {
+        // No change points at all: the whole row is the opening colour.
+        let white = Line::default();
+        assert_eq!(white.samples(6), vec![0; 6], "an all-white row");
+        // A change point at zero is the row opening on the other colour, so the single run
+        // is the whole of it in the other direction.
+        let black = Line { changes: vec![0] };
+        assert_eq!(black.samples(6), vec![1; 6], "an all-black row");
+    }
+
+    /// The case the existing fixtures cover, which must not move.
+    #[test]
+    fn a_line_that_ends_on_white_is_unchanged() {
+        // White three, black two, white three.
+        let line = Line {
+            changes: vec![3, 5],
+        };
+        assert_eq!(line.samples(8), vec![0, 0, 0, 1, 1, 0, 0, 0]);
+    }
+
+    /// A row is exactly as wide as it was asked to be, whatever its change points say.
+    #[test]
+    fn every_row_is_exactly_as_wide_as_it_was_asked_to_be() {
+        let lines = [
+            Line::default(),
+            Line { changes: vec![0] },
+            Line { changes: vec![1] },
+            Line {
+                changes: vec![0, 1],
+            },
+            Line {
+                changes: vec![3, 5],
+            },
+            // Past the edge: a change point beyond the row is clamped rather than ignored,
+            // and must not shorten the row.
+            Line {
+                changes: vec![3, 99],
+            },
+        ];
+        for width in [1usize, 2, 5, 8, 13, 344] {
+            for line in &lines {
+                let row = line.samples(width);
+                assert_eq!(row.len(), width, "{width} columns from {line:?} is {row:?}");
+            }
+        }
+    }
+
+    /// A change point at or beyond the row's width ends the row rather than wrapping it.
+    #[test]
+    fn a_change_point_at_the_edge_fills_the_whole_row() {
+        let line = Line {
+            changes: vec![0, 4],
+        };
+        assert_eq!(line.samples(4), vec![1, 1, 1, 1], "black to the edge");
+        let wider = Line {
+            changes: vec![0, 4],
+        };
+        assert_eq!(
+            wider.samples(9),
+            vec![1, 1, 1, 1, 0, 0, 0, 0, 0],
+            "and the tail after it is the colour now in force"
+        );
+    }
+
+    /// The same defect seen end to end: a Group 3 row whose black run reaches the right
+    /// margin, which the decoder reports as one change point and must still draw.
+    #[test]
+    fn a_decoded_line_that_ends_on_black_fills_its_last_run() {
+        // White three (`1000`) then black five (`0011`), with BlackIs1 so white is 0.
+        let bits = "1000".to_string() + "0011";
+        let p = CcittParams {
+            variant: Variant::G3_1D,
+            columns: 8,
+            rows: 1,
+            black_is_1: true,
+            ..Default::default()
+        };
+        let out = ccitt_decode(&pack(&bits), &p).expect("decode");
+        assert_eq!(
+            out,
+            vec![0, 0, 0, 1, 1, 1, 1, 1],
+            "three white then five black, the black reaching the right margin"
+        );
     }
 }

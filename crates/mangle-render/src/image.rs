@@ -329,8 +329,61 @@ fn apply_decode(space: Space, values: &[f64]) -> Space {
 
 /// Where an image's samples come from, once the outer filters have been undone.
 enum Source {
-    /// Already-decoded samples, at the given bit depth.
-    Samples(Vec<u8>, usize),
+    /// Already-decoded samples, with the two facts a consumer needs kept apart.
+    Samples { data: Vec<u8>, range: SampleRange },
+}
+
+/// How many bits a sample occupies, and how much it is worth.
+///
+/// These are two different questions and a codec can make them disagree, which is why
+/// they are kept apart rather than collapsed into one "bits per sample" number:
+///
+/// * **layout** is how many bits of each byte a sample takes, so it is what says which
+///   byte a pixel lives in. A codec that expands runs knows this: a fax decoder writes
+///   one byte per pixel whatever the stream said, and its output has to be read as eight
+///   bits per sample or eight pixels come out of every byte.
+/// * **value** is what a sample is worth, so it is what a sample is divided by to become
+///   a colour. That is `/BitsPerComponent`, because it is the file's statement of the
+///   range its samples span, and a decoder has no opinion about it.
+///
+/// Reading a fax decoder's output as both is what the two halves of the failure were.
+/// Read as the declared one bit per sample it is a barcode — the image smears sideways
+/// by a factor of eight. Read as eight bits and divided by 255 it is a black page — a
+/// fax scan is mostly white, its white sample is the byte 1, and 1/255 is black. Layout
+/// has to come from the decoder and value from the dictionary, and neither can stand in
+/// for the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SampleRange {
+    layout: usize,
+    value: usize,
+}
+
+impl SampleRange {
+    /// What a stream no codec expanded needs: the same answer to both questions.
+    fn declared(declared_bits: usize) -> Self {
+        Self {
+            layout: declared_bits,
+            value: declared_bits,
+        }
+    }
+
+    /// What a codec that wrote one byte per sample needs: laid out as eight bits, and
+    /// still worth whatever the dictionary said.
+    fn expanded(declared_bits: usize) -> Self {
+        Self {
+            layout: 8,
+            value: declared_bits,
+        }
+    }
+
+    /// A stencil's sample *is* a bit — zero paints, one does not — whatever its
+    /// dictionary says, so both answers are one unless a codec widened the layout.
+    fn stencil(expanded: bool) -> Self {
+        Self {
+            layout: if expanded { 8 } else { 1 },
+            value: 1,
+        }
+    }
 }
 
 /// Decode an image XObject into samples ready to place.
@@ -394,7 +447,15 @@ pub fn decode(
                      the JPEG's own size was used"
                 ));
             }
-            (Source::Samples(pixels, 8), space, w, h)
+            (
+                Source::Samples {
+                    data: pixels,
+                    range: SampleRange::declared(8),
+                },
+                space,
+                w,
+                h,
+            )
         }
         Some(b"JPXDecode") => {
             notes.push("a JPEG 2000 image was found but no decoder exists yet".into());
@@ -419,15 +480,33 @@ pub fn decode(
                     }
                 }
             };
-            let bits = if is_stencil { 1 } else { declared_bits };
+            let range = if decoded.one_byte_per_sample {
+                if is_stencil {
+                    SampleRange::stencil(true)
+                } else {
+                    SampleRange::expanded(declared_bits)
+                }
+            } else if is_stencil {
+                SampleRange::stencil(false)
+            } else {
+                SampleRange::declared(declared_bits)
+            };
             let w = declared_w as usize;
             let h = declared_h as usize;
-            (Source::Samples(decoded.data, bits), space, w, h)
+            (
+                Source::Samples {
+                    data: decoded.data,
+                    range,
+                },
+                space,
+                w,
+                h,
+            )
         }
     };
 
-    let (samples, bits) = match source {
-        Source::Samples(s, b) => (s, b),
+    let (samples, range) = match source {
+        Source::Samples { data, range } => (data, range),
     };
 
     let total = width.checked_mul(height)?;
@@ -438,16 +517,27 @@ pub fn decode(
         ));
         return None;
     }
-    if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
+    // Both numbers are checked because they can come apart, and `/BitsPerComponent 7`
+    // under a codec that widened the layout is laid out as eight and worth seven.
+    if !matches!(range.layout, 1 | 2 | 4 | 8 | 16) {
         notes.push(format!(
-            "an image claims {bits} bits per component, which is not a thing, and was not drawn"
+            "an image lays its samples out {} bits at a time, which is not a thing, and \
+             was not drawn",
+            range.layout
+        ));
+        return None;
+    }
+    if !matches!(range.value, 1 | 2 | 4 | 8 | 16) {
+        notes.push(format!(
+            "an image claims {} bits per component, which is not a thing, and was not drawn",
+            range.value
         ));
         return None;
     }
 
     let components = space.components();
     let space = apply_decode(space, &read_decode(dict.get("Decode"), components));
-    let pixels = to_rgba(&samples, &space, width, height, bits, components);
+    let pixels = to_rgba(&samples, &space, width, height, range, components);
     let _ = space.name();
 
     let soft_mask = dict
@@ -504,29 +594,38 @@ fn jpeg(data: &[u8], notes: &mut Vec<String>) -> Option<(Vec<u8>, usize, usize)>
 }
 
 /// Turn packed samples into RGBA.
+///
+/// `range` answers the two questions separately: `layout` says which byte a sample is
+/// in, and `value` says what that sample is worth. A stencil asks neither — see below.
 fn to_rgba(
     samples: &[u8],
     space: &Space,
     width: usize,
     height: usize,
-    bits: usize,
+    range: SampleRange,
     components: usize,
 ) -> Vec<u8> {
-    let max = f64::from((1u32 << bits.min(16)) - 1);
+    let max = f64::from((1u32 << range.value.min(16)) - 1);
     let mut out = Vec::with_capacity(width.saturating_mul(height).saturating_mul(4));
     for y in 0..height {
         for x in 0..width {
             let raw = |c: usize| -> f64 {
-                let v = sample_at(samples, x, y, width, components, bits, c);
+                let v = sample_at(samples, x, y, width, components, range.layout, c);
                 if max > 0.0 { f64::from(v) / max } else { 0.0 }
             };
             let (r, g, b, a): (f64, f64, f64, f64) = match space {
                 Space::Stencil => {
                     // Zero paints and one does not, which is a stencil and not a picture.
-                    if raw(0) > 0.5 {
-                        (0.0, 0.0, 0.0, 0.0)
-                    } else {
+                    // The test is on the *stored bit*, not on the value it normalises to,
+                    // because a stencil's sample is a bit however many bits of byte the
+                    // codec that expanded it chose to write that bit into: a fax decoder
+                    // writes the byte 1 for "do not paint", and comparing 1/255 against
+                    // one half decides that byte 0 paints and byte 1 paints too.
+                    let painted = sample_at(samples, x, y, width, components, range.layout, 0) == 0;
+                    if painted {
                         (0.0, 0.0, 0.0, 1.0)
+                    } else {
+                        (0.0, 0.0, 0.0, 0.0)
                     }
                 }
                 Space::Gray { decode } => {
@@ -676,7 +775,9 @@ impl Raster {
 /// Draw an image through a transformation.
 ///
 /// `matrix` maps the unit square onto the page. `fill` is the graphics state's fill colour,
-/// which is what paints an image mask's zero bits. Returns whether anything was drawn.
+/// which is what paints an image mask's *zero* bits; `None` means there is no colour to paint
+/// in, which for a stencil draws nothing rather than guessing one — an image that is not a
+/// stencil paints its own samples and ignores it. Returns whether anything was drawn.
 pub fn draw(
     device: &mut Device,
     raster: &Raster,
@@ -728,13 +829,21 @@ pub fn draw(
                 continue;
             }
             let mut px = raster.sample(u, v);
-            // A stencil's painted bits take the graphics state's colour, not the data's.
-            if raster.is_stencil && px[3] == 0 {
-                let colour = fill.unwrap_or(Rgba::BLACK);
-                px = colour.to_rgba8(alpha);
-            } else if let Some(colour) = fill
-                && raster.is_stencil
-            {
+            // A stencil's painting bits take the graphics state's colour and its other bits
+            // leave the paper alone. `to_rgba` gave the first an alpha of 255 and the second
+            // an alpha of 0, so the alpha is what says which is which — painting the bits
+            // *without* colour turns a mask into a solid block, which is the opposite of what
+            // a stencil is for.
+            if raster.is_stencil {
+                if px[3] == 0 {
+                    continue;
+                }
+                let Some(colour) = fill else {
+                    // No colour to paint in — a pattern fill, or a colour in a space this
+                    // cannot convert. Nothing is drawn rather than something arbitrary, and
+                    // the caller has already said why.
+                    return false;
+                };
                 px = colour.to_rgba8(alpha);
             }
             // The soft mask multiplies whatever alpha the samples had.
@@ -790,6 +899,79 @@ mod tests {
         dict.set("BitsPerComponent", Object::Int(8));
         dict.set("ColorSpace", Object::name("DeviceRGB"));
         Stream::new(dict, data)
+    }
+
+    /// A CCITT Group 3 fax image, one row of which is `bits`.
+    ///
+    /// Group 3 1D rather than Group 4 because its codes are written out by hand in the tests
+    /// below and there is nothing to generate them. `/K 0` is what selects it; `/Columns` is
+    /// what the runs are counted against, and the sample width follows it.
+    fn fax_image(w: usize, bits: &str) -> Stream {
+        let mut dict = Dict::new();
+        dict.set("Width", Object::Int(w as i64));
+        dict.set("Height", Object::Int(1));
+        // A fax stream's encoded depth is one bit, whatever its decoded samples look like.
+        dict.set("BitsPerComponent", Object::Int(1));
+        dict.set("ColorSpace", Object::name("DeviceGray"));
+        dict.set("Filter", Object::name("CCITTFaxDecode"));
+        dict.set(
+            "DecodeParms",
+            Object::Dict({
+                let mut p = Dict::new();
+                p.set("K", Object::Int(0));
+                p.set("Columns", Object::Int(w as i64));
+                p.set("Rows", Object::Int(1));
+                p
+            }),
+        );
+        Stream::new(dict, pack(bits))
+    }
+
+    /// A one-byte-per-pixel `/ImageMask` whose row is a fax stream of `bits`.
+    ///
+    /// `/BlackIs1 true` so the decoder's samples come through unchanged — a zero stays a
+    /// zero — which is what makes the mask's two kinds of bit distinguishable. `/K 0` is
+    /// Group 3 1D, whose codes are written out by hand in the tests that use this.
+    fn fax_mask(w: usize, bits: String) -> Stream {
+        let mut dict = Dict::new();
+        dict.set("Width", Object::Int(w as i64));
+        dict.set("Height", Object::Int(1));
+        dict.set("ImageMask", Object::Bool(true));
+        dict.set("BitsPerComponent", Object::Int(1));
+        dict.set("Filter", Object::name("CCITTFaxDecode"));
+        dict.set(
+            "DecodeParms",
+            Object::Dict({
+                let mut p = Dict::new();
+                p.set("K", Object::Int(0));
+                p.set("BlackIs1", Object::Bool(true));
+                p.set("Columns", Object::Int(w as i64));
+                p.set("Rows", Object::Int(1));
+                p
+            }),
+        );
+        Stream::new(dict, pack(&bits))
+    }
+
+    /// A string of `0` and `1` as bytes, most significant bit first, which is the order a
+    /// fax code is written in.
+    fn pack(bits: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        for chunk in bits.as_bytes().chunks(8) {
+            let mut byte = 0u8;
+            for (i, b) in chunk.iter().enumerate() {
+                byte |= u8::from(*b == b'1') << (7 - i);
+            }
+            out.push(byte);
+        }
+        out
+    }
+
+    /// One row of grey as the raster holds it, for a single-column-per-pixel image.
+    fn row_of(raster: &Raster) -> Vec<u8> {
+        (0..raster.width)
+            .map(|x| raster.at(x, 0)[0])
+            .collect::<Vec<u8>>()
     }
 
     /// Decode with a resolver that hands back the object it is given, which is what a
@@ -992,6 +1174,250 @@ mod tests {
         assert_eq!(raster.pixels.get(11).copied(), Some(0), "the last does not");
     }
 
+    /// The bug this guards, in both halves. A fax decoder hands back one byte per pixel,
+    /// and that byte is a *value* as well as a *place*: read as packed bits it is a
+    /// barcode, and read as eight bits and normalised by 255 it is a black page, because a
+    /// fax scan is mostly white and its white sample is the byte 1.
+    #[test]
+    fn a_fax_stream_is_read_one_sample_per_byte_at_its_declared_value() {
+        // White 3, black 3, white 2, as three Group 3 1D terminating codes: `1000`, `10`
+        // and `011`. Every run is written down rather than left to the end of the row,
+        // because the decoder's last run of a line is a separate matter from this one.
+        let (raster, notes) = decode_ok(&fax_image(8, "100010011"));
+        assert_eq!((raster.width, raster.height), (8, 1), "{notes:?}");
+        assert_eq!(
+            row_of(&raster),
+            vec![255, 255, 255, 0, 0, 0, 255, 255],
+            "each pixel is the byte the decoder wrote for it, read over the range \
+             /BitsPerComponent declares rather than over 255"
+        );
+    }
+
+    /// A width of eight is the width at which a packed misreading looks least wrong — the
+    /// bytes land in the right row and the wrong pixels come out of them — so thirteen is
+    /// the width that shows it.
+    #[test]
+    fn a_fax_stream_whose_width_is_not_a_multiple_of_eight_still_reads_one_per_byte() {
+        // White 4, black 5, white 4, out of thirteen: `1011`, `0011`, `1011`. Read as
+        // packed bits, thirteen columns would come out of two bytes of a thirteen-byte row,
+        // which is the smear this guards.
+        let (raster, notes) = decode_ok(&fax_image(13, "101100111011"));
+        assert_eq!((raster.width, raster.height), (13, 1), "{notes:?}");
+        assert_eq!(
+            row_of(&raster),
+            vec![255, 255, 255, 255, 0, 0, 0, 0, 0, 255, 255, 255, 255]
+        );
+    }
+
+    /// The other side of the same decision: a stream the decoder did *not* expand is still
+    /// packed, and reading it as one byte per pixel would undo the codec's own packing.
+    #[test]
+    fn a_packed_one_bit_image_still_unpacks() {
+        // Width eight of unfiltered one-bit data: `0b1010_0101` is five samples.
+        let (raster, _) = decode_ok(&grey_image(8, 1, vec![0b1010_0101], 1));
+        assert_eq!(
+            row_of(&raster),
+            vec![255, 0, 255, 0, 0, 255, 0, 255],
+            "eight one-bit samples out of one byte, most significant first"
+        );
+    }
+
+    // ── Layout and value are different facts ─────────────────────────────────────────
+
+    /// What a decoder says about layout and what the dictionary says about value, and what
+    /// each of them does when the other is wrong. A buffer of one byte per pixel whose
+    /// samples are a bilevel 0 and 1 is the shape a fax decoder hands back.
+    #[test]
+    fn a_one_byte_per_pixel_bilevel_buffer_renders_black_and_white() {
+        let gray = Space::Gray { decode: [0.0, 1.0] };
+        // Laid out a byte apiece and worth one bit, which is what a fax image is: the
+        // samples are zero and one and zero means black.
+        let pixels = to_rgba(
+            &[0, 1],
+            &gray,
+            2,
+            1,
+            SampleRange {
+                layout: 8,
+                value: 1,
+            },
+            1,
+        );
+        assert_eq!(
+            &pixels[..4],
+            &[0, 0, 0, 255],
+            "a zero sample is black, because zero is the bottom of the declared range"
+        );
+        assert_eq!(
+            &pixels[4..],
+            &[255, 255, 255, 255],
+            "and a sample of one is the top of that range, not one 255th of the way up it"
+        );
+    }
+
+    /// The same bytes read as eight-bit samples instead, which is what happens when the
+    /// decoder's layout signal is ignored: the sample 1 is then worth 1/255 and a white
+    /// fax page comes out black.
+    #[test]
+    fn the_same_bytes_normalised_over_255_are_the_black_page_they_were() {
+        let gray = Space::Gray { decode: [0.0, 1.0] };
+        let pixels = to_rgba(&[0, 1], &gray, 2, 1, SampleRange::declared(8), 1);
+        assert_eq!(&pixels[..4], &[0, 0, 0, 255]);
+        assert_eq!(
+            &pixels[4..8],
+            &[1, 1, 1, 255],
+            "one over 255 is black: this is what the value range has to stop"
+        );
+    }
+
+    /// A sample of 255 in a buffer whose declared range is one bit is still the top of that
+    /// range, so a decoder that wrote a full byte rather than a bare bit cannot make a page
+    /// black either.
+    #[test]
+    fn a_full_byte_in_a_one_bit_range_is_still_white() {
+        let gray = Space::Gray { decode: [0.0, 1.0] };
+        let pixels = to_rgba(
+            &[255, 0, 255],
+            &gray,
+            3,
+            1,
+            SampleRange {
+                layout: 8,
+                value: 1,
+            },
+            1,
+        );
+        assert_eq!(
+            &pixels[..4],
+            &[255, 255, 255, 255],
+            "255 is past the top, and clamps"
+        );
+        assert_eq!(&pixels[4..8], &[0, 0, 0, 255]);
+        assert_eq!(&pixels[8..], &[255, 255, 255, 255]);
+    }
+
+    /// The layout half on its own: the same thirteen bytes read as a packed bit stream
+    /// have to come out of it exactly as they always did, or the split has broken the case
+    /// it was supposed to leave alone.
+    #[test]
+    fn the_same_bytes_read_as_a_packed_bit_stream_are_unchanged() {
+        let gray = Space::Gray { decode: [0.0, 1.0] };
+        let bytes = [0b1010_1010u8, 0b0101_0101];
+        let packed = to_rgba(&bytes, &gray, 13, 1, SampleRange::declared(1), 1);
+        let grey = row_of(&decode_ok(&grey_image(13, 1, bytes.to_vec(), 1)).0);
+        for (x, got) in packed.chunks_exact(4).enumerate() {
+            assert_eq!(got[0], grey[x], "column {x} of thirteen");
+        }
+        assert_eq!(
+            packed.chunks_exact(4).map(|p| p[0]).collect::<Vec<u8>>(),
+            vec![255, 0, 255, 0, 255, 0, 255, 0, 0, 255, 0, 255, 0],
+            "and those are the thirteen bits of the two bytes, most significant first"
+        );
+    }
+
+    /// A real eight-bit image has to be untouched by any of this: its samples really do
+    /// span 0..255, and dividing them by 1 or by 15 would flatten it.
+    #[test]
+    fn a_genuine_eight_bit_image_is_unaffected() {
+        let (raster, notes) = decode_ok(&grey_image(4, 1, vec![0, 1, 128, 255], 8));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(
+            row_of(&raster),
+            vec![0, 1, 128, 255],
+            "four grey levels, still four grey levels"
+        );
+        assert_eq!(
+            raster.pixels,
+            vec![
+                0, 0, 0, 255, //
+                1, 1, 1, 255, //
+                128, 128, 128, 255, //
+                255, 255, 255, 255
+            ]
+        );
+    }
+
+    /// And a 2- or 4-bit image, whose declared range is neither 1 nor 255.
+    #[test]
+    fn a_two_bit_image_still_spans_its_own_range() {
+        let (raster, _) = decode_ok(&grey_image(4, 1, vec![0b00_01_10_11], 2));
+        assert_eq!(
+            row_of(&raster),
+            vec![0, 85, 170, 255],
+            "four two-bit samples over the range zero to three"
+        );
+    }
+
+    /// A one-byte-per-pixel `/ImageMask`. The zero bits paint and the one bits do not,
+    /// which is the whole of a stencil and neither half of it may be decided by dividing
+    /// the byte by a hundred and fifty-five.
+    #[test]
+    fn a_one_byte_per_pixel_mask_paints_its_zero_bits_and_leaves_the_ones() {
+        let (raster, notes) = decode_ok(&fax_mask(8, "1000".to_owned() + "0011"));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(raster.is_stencil);
+        assert_eq!((raster.width, raster.height), (8, 1));
+        // `/BlackIs1 true` leaves the decoder's zero as zero: three white, then five black.
+        // A mask paints its *zeros*, so the left three columns paint and the rest is paper.
+        let painted = |x: usize| raster.at(x, 0)[3] == 255;
+        assert!((0..3).all(painted), "the zero bits paint");
+        assert!(
+            (3..8).all(|x| !painted(x)),
+            "and the one bits are not painted, which a comparison against one half over \
+             255 would have got backwards"
+        );
+        // And drawn, in a colour of the graphics state's choosing.
+        let paper = draw_on_paper(&raster, Some(Rgba::BLACK));
+        for x in 0..8 {
+            let want = if x < 3 {
+                [0, 0, 0, 255]
+            } else {
+                [255, 255, 255, 255]
+            };
+            assert_eq!(paper.get(x, 0), Some(want), "column {x}");
+        }
+    }
+
+    /// Every width a fax mask can be, so the width does not decide which bits paint.
+    #[test]
+    fn a_one_byte_per_pixel_mask_of_odd_width_still_separates_its_bits() {
+        // White four (`1011`) then black nine (`000100`), thirteen columns in all, so the
+        // row is thirteen bytes and no two of them share a byte the way packed bits would.
+        let (raster, notes) = decode_ok(&fax_mask(13, "1011".to_owned() + "000100"));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!((raster.width, raster.height), (13, 1), "{notes:?}");
+        for x in 0..13 {
+            assert_eq!(
+                raster.at(x, 0)[3] == 255,
+                x < 4,
+                "column {x}: four zeros then nine ones, one byte each"
+            );
+        }
+    }
+
+    #[test]
+    fn a_packed_one_bit_row_of_odd_width_starts_on_its_own_byte() {
+        // Thirteen columns of one bit is thirteen bits, so a row is two bytes and row one
+        // starts at byte two rather than at bit thirteen of byte one. Row zero is all ones
+        // across its thirteen bits, and row one starts with a one.
+        let (raster, _) = decode_ok(&grey_image(
+            13,
+            2,
+            vec![0b1010_1010, 0b1010_1000, 0b1100_0000],
+            1,
+        ));
+        assert_eq!((raster.width, raster.height), (13, 2));
+        assert_eq!(
+            row_of(&raster),
+            vec![255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255]
+        );
+        assert_eq!(
+            raster.at(0, 1)[0],
+            255,
+            "row one starts at byte two, where the padding put it"
+        );
+    }
+
     #[test]
     fn an_indexed_image_reads_its_palette() {
         let mut dict = Dict::new();
@@ -1103,6 +1529,106 @@ mod tests {
         let mut notes = Vec::new();
         assert!(decode(&Stream::new(dict, vec![0u8; 16]), &|_| None, &mut notes).is_none());
         assert!(notes.iter().any(|n| n.contains("JBIG2")), "{notes:?}");
+    }
+
+    // ── Stencils on a page ────────────────────────────────────────────────────────────
+
+    /// An eight-by-eight mask whose painting bits are the four-by-four block at its top
+    /// left. One byte per row, one bit per pixel, so each row's own byte says everything
+    /// about it.
+    fn corner_mask() -> Raster {
+        let mut dict = Dict::new();
+        dict.set("Width", Object::Int(8));
+        dict.set("Height", Object::Int(8));
+        dict.set("ImageMask", Object::Bool(true));
+        dict.set("BitsPerComponent", Object::Int(1));
+        let mut data = vec![0b1111_1111u8; 8];
+        for row in data.iter_mut().take(4) {
+            *row = 0b0000_1111;
+        }
+        decode_ok(&Stream::new(dict, data)).0
+    }
+
+    /// Draw a raster over an eight-by-eight sheet of paper, one raster pixel to one pixel.
+    fn draw_on_paper(raster: &Raster, fill: Option<Rgba>) -> crate::Image {
+        let mut device = Device::new(crate::Image::filled(8, 8, [255, 255, 255, 255]));
+        let unit_square = Matrix::new(8.0, 0.0, 0.0, 8.0, 0.0, 0.0);
+        draw(&mut device, raster, &unit_square, 1.0, fill);
+        device.into_image()
+    }
+
+    #[test]
+    fn a_mask_paints_its_zero_bits_in_the_fill_colour_and_leaves_the_ones_as_paper() {
+        let paper = draw_on_paper(&corner_mask(), Some(Rgba::BLACK));
+        for y in 0..8 {
+            for x in 0..8 {
+                let want = if x < 4 && y < 4 {
+                    [0, 0, 0, 255]
+                } else {
+                    [255, 255, 255, 255]
+                };
+                assert_eq!(paper.get(x, y), Some(want), "at ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn two_fill_colours_both_take_effect_on_a_mask() {
+        let red = Rgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let blue = Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        let one = draw_on_paper(&corner_mask(), Some(red));
+        let other = draw_on_paper(&corner_mask(), Some(blue));
+        assert_eq!(one.get(1, 1), Some([255, 0, 0, 255]), "painted red");
+        assert_eq!(other.get(1, 1), Some([0, 0, 255, 255]), "painted blue");
+        assert_eq!(
+            other.get(6, 6),
+            Some([255, 255, 255, 255]),
+            "and the one bits are still paper in both"
+        );
+    }
+
+    /// A stencil with no colour to paint in draws nothing, rather than a block in some
+    /// arbitrary ink: the caller has said why, and guessing would be the wrong answer.
+    #[test]
+    fn a_mask_with_no_paint_colour_draws_nothing() {
+        let raster = corner_mask();
+        let paper = draw_on_paper(&raster, None);
+        assert!(
+            paper
+                .pixels
+                .chunks_exact(4)
+                .all(|p| p == [255, 255, 255, 255]),
+            "the page is untouched"
+        );
+    }
+
+    #[test]
+    fn an_image_that_is_not_a_mask_paints_its_own_samples() {
+        // Half black, half white, in DeviceGray, with a red fill colour in force: an image
+        // is not a stencil, so the fill colour has no say in what it draws.
+        let (raster, _) = decode_ok(&grey_image(2, 1, vec![0, 255], 8));
+        let red = Rgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let mut device = Device::new(crate::Image::filled(2, 1, [255, 255, 255, 255]));
+        let unit_square = Matrix::new(2.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+        draw(&mut device, &raster, &unit_square, 1.0, Some(red));
+        let image = device.into_image();
+        assert_eq!(image.get(0, 0), Some([0, 0, 0, 255]), "its own black");
+        assert_eq!(image.get(1, 0), Some([255, 255, 255, 255]), "its own white");
     }
 
     #[test]

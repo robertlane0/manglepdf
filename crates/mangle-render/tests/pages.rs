@@ -1570,6 +1570,151 @@ fn image_page() -> Vec<u8> {
     out
 }
 
+/// A 100 by 100 point page whose only content is an eight-by-eight `/ImageMask` scaled to
+/// fill the whole page, painted in the colour `colour` names.
+///
+/// The mask's painting bits — the zeros — are the left half of it, so a renderer that
+/// paints the whole of a mask paints the right half too, and one that paints the wrong
+/// bits paints nothing at all. Either shows up in the regions below.
+///
+/// `pattern` makes the fill a pattern rather than a colour, which is the case that must be
+/// reported rather than guessed at.
+fn mask_page(colour: &str, pattern: bool) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 7];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] \
+          /Resources << /XObject << /Im0 5 0 R >> /Pattern << /P0 6 0 R >> >> >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    let fill = if pattern {
+        "/Pattern cs /P0 scn".to_owned()
+    } else {
+        format!("{colour} rg")
+    };
+    let content = format!("q {fill} 100 0 0 100 0 0 cm /Im0 Do Q");
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content.as_bytes());
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    // Eight by eight one-bit samples, one byte per row. The four zero bits at the bottom
+    // of each byte are the left four pixels, and they are the ones that paint.
+    at[5] = out.len();
+    let samples = [0b0000_1111u8; 8];
+    let mut image = format!(
+        "5 0 obj\n<< /Type /XObject /Subtype /Image /ImageMask true /Width 8 /Height 8 \
+         /BitsPerComponent 1 /Length {} >>\nstream\n",
+        samples.len()
+    )
+    .into_bytes();
+    image.extend_from_slice(&samples);
+    image.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&image);
+    // A shading pattern, which the page only names when it is the fill colour in force. It
+    // is never painted — the point is that a mask painted in one is reported instead — but a
+    // file that names one names a real one.
+    at[6] = out.len();
+    out.extend_from_slice(
+        b"6 0 obj\n<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 \
+          /ColorSpace /DeviceGray /Coords [0 0 1 0] /Function << /FunctionType 2 \
+          /Domain [0 1] /C0 [0] /C1 [1] /N 1 /Range [0 1] >> /Extend [false false] >> \
+          /Matrix [100 0 0 100 0 0] >>\nendobj\n",
+    );
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 6\n");
+    for offset in at.iter().take(7).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// An image mask paints its zero bits in the graphics state's colour and leaves its one
+/// bits as paper.
+#[test]
+fn an_image_mask_paints_its_zero_bits_and_leaves_the_rest_as_paper() {
+    let render = render(mask_page("1 0 0", false), 1.0);
+    assert!(
+        render.notes.is_empty(),
+        "a mask in a colour this can read should draw without complaint: {:?}",
+        render.notes
+    );
+    // The zero bits are the left half of every row, and in device space that is the left
+    // half of the page: image row zero is the top, so the shape runs the full height.
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.45, 0.95, [255, 0, 0]),
+        "the mask's zero bits are painted in the fill colour"
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.55, 0.05, 0.95, 0.95, [255, 255, 255]),
+        "and its one bits are paper, not ink in the fill colour"
+    );
+}
+
+/// `Do` names no colour, so the fill colour has to travel with the mark: two pages that
+/// differ only in it must differ in what they paint.
+#[test]
+fn an_image_mask_takes_the_fill_colour_the_graphics_state_set() {
+    let red = render(mask_page("1 0 0", false), 1.0);
+    let blue = render(mask_page("0 0 1", false), 1.0);
+    for (name, render, want) in [("red", &red, [255, 0, 0]), ("blue", &blue, [0, 0, 255])] {
+        assert!(
+            region_is_fraction(&render.image, 0.05, 0.05, 0.45, 0.95, want),
+            "the mask is painted {name}"
+        );
+        assert!(
+            region_is_fraction(&render.image, 0.55, 0.05, 0.95, 0.95, [255, 255, 255]),
+            "and the {name} does not reach the one bits"
+        );
+    }
+}
+
+/// A pattern colour is a pattern, not a colour. Drawing the mask in anything else puts a
+/// flat block where the page asked for a shading, so the answer is to say so.
+#[test]
+fn an_image_mask_in_a_pattern_colour_is_reported_rather_than_drawn() {
+    let render = render(mask_page("", true), 1.0);
+    assert!(
+        render
+            .notes
+            .iter()
+            .any(|n| n.contains("pattern colour") && n.contains("not drawn")),
+        "the pattern colour is reported: {:?}",
+        render.notes
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
+        "and no block of any colour is drawn in its place"
+    );
+}
+
+/// An image that is not a mask carries its own colour and is not affected by any of this.
+#[test]
+fn an_image_that_is_not_a_mask_is_unaffected_by_the_fill_colour() {
+    let render = render(image_page(), 1.0);
+    assert!(
+        render.notes.is_empty(),
+        "a plain image should draw without complaint: {:?}",
+        render.notes
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.45, 0.95, [255, 0, 0]),
+        "it paints its own red samples"
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.55, 0.05, 0.95, 0.95, [255, 255, 255]),
+        "and leaves the rest of the page alone"
+    );
+}
+
 /// A page whose content scales the coordinate system by two, clips to a quarter of that
 /// space, and then fills the whole of it.
 ///

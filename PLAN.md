@@ -291,6 +291,60 @@ renderer that never has to ask the machine for a font.
 Tier B is now standing — see "The wild corpus found" below — and it has overtaken everything
 else on this list, because nothing else in the project can see the problems it can see.
 
+## A fax image is two facts, not one (settled for layout and value; the codec is next)
+
+The wild corpus found four defects in one place, and they are written down together because
+each of them was invisible until the one before it was fixed, and because two of the four
+are the same mistake made twice.
+
+**Layout and value are different facts.** How many bits of each byte a sample occupies —
+which decides which byte a pixel lives in — is not the same question as what a sample is
+worth, which decides what a sample is divided by to become a colour. For every image without
+a codec the two answers coincide, which is why collapsing them into one "bits per sample"
+number looks harmless. A codec that expands runs makes them disagree: `ccitt_decode` writes
+one byte per pixel while `/BitsPerComponent` is still 1, and only the decoder knows the
+first while only the dictionary knows the second. Conflating them produced a defect, then its
+successor:
+
+| | SSIM vs `mutool` | RMS | above tol | ink ours / oracle |
+|---|---|---|---|---|
+| read as the declared one bit per sample | 0.38414 | 197.78 | 60.59% | 59.0% / 8.0% |
+| read as eight bits and divided by 255 | 0.38414 | 197.78 | 60.59% | 59.0% / 8.0% |
+| **layout from the decoder, value from `/BitsPerComponent`** | **0.91170** | **72.09** | **7.99%** | **0.0% / 8.0%** |
+
+(`pdfbox__multitiff.pdf` page 1 at 150 DPI.) The first row is a barcode — eight pixels come
+out of every byte and the image smears sideways by a factor of eight. The second is a black
+page — a fax scan is mostly white, its white sample is the byte 1, and 1/255 is black. Same
+one number, two ways of being wrong. `Decoded::one_byte_per_sample` is now how the decoder
+says which layout it produced, and `image::decode` carries layout and value apart through a
+`SampleRange` rather than as one `bits`. A stencil is the same split again: its sample *is* a
+bit however wide the byte a codec wrote it into, so it is tested on the stored bit and never
+on a value normalised over 255.
+
+**An `/ImageMask` painted nothing.** `Do` names no colour, so the graphics state's fill
+colour has to travel with the mark, and the painter had been given black unconditionally —
+which is right only where the page was black. The mark now carries the colour it was drawn
+with; a pattern colour is reported rather than guessed at.
+
+**The CCITT decoder dropped a line's last run.** `Line::samples` fills up to each change
+point and stops, and a change point says where a run *ends*, so everything after the last
+one was left at the row's opening colour: a row coded `white 3, black 5` came out as eight
+white pixels. Every fax fixture in the project ended on a white run, which is the one case
+where leaving the tail alone looks right.
+
+**The T.6 two-dimensional path still has a further defect, and is not fixed.** Decoding
+`pdfbox__multitiff.pdf` page 1's image with `DamagedRowsBeforeError = 1` recovers **7 of 287
+rows, before and after the last-run fix** — the last-run defect does not move that figure,
+because on this file the row that trips the decoder is a horizontal-mode pair whose black run
+is being placed relative to `b1`, a position on the *reference* line, which for an all-white
+reference line is the line width: the run lands outside the row, the line decodes as blank,
+and every later line is then read against a blank reference until the bit reader meets a
+sequence that is not a mode code, at bit 24. This is not the PDFBox file being odd: our
+decoder recovers only **15 of 287 rows from libtiff's own G.4 encoding of an image libtiff
+itself round-trips perfectly**. Group 3 1D is unaffected, which is why the fixtures never
+showed it. This is the next thing in the image work, ahead of JBIG2 and JPEG 2000, because
+every fax scan in the corpus goes through it.
+
 ## The wild corpus found
 
 `corpus/wild/` holds 77 real files from pdf.js, PDFBox, NIST, the IRS, the USGS and arXiv,
