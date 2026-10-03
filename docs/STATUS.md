@@ -484,19 +484,13 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    6 or 7, or a pattern needs a tiling loop, and each is reported as a note against the mark
    rather than skipped silently, so a page that used one is visibly incomplete instead of
    quietly wrong.
-7. **`image::draw` puts an image in the wrong rows.** It rebases each write to the origin of
-   the clipped area while its bounds and its sampling stay in absolute device pixels, and it
-   reads `v = 0` as the raster's first row when the placement matrix puts `v = 0` at the
-   bottom. Every image not at the page origin is drawn at the page origin, upside down. The
-   cause and its measurements are D5b in `docs/known-diffs.md`; it is recorded rather than
-   patched.
-8. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
+7. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the marks the content layer produces.
-9. **An object that came out of an object stream cannot keep its original bytes**,
+8. **An object that came out of an object stream cannot keep its original bytes**,
    because it had none: it was compressed with everything else in its container. A full
    save writes it as a direct object, which every reader accepts but which is a
    re-serialisation rather than a copy.
-10. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
+9. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
 
 ## Metric-compatible aliases
 
@@ -723,15 +717,16 @@ the fourth was fixed:
    |---|---|---|---|---|
    | before (one number for both) | 0.38414 | 197.78 | 60.59% | 59.0% / 8.0% |
    | layout from the decoder, value from `/BitsPerComponent` | 0.91170 | 72.09 | 7.99% | 0.0% / 8.0% |
-   | **and the T.6 codec reading the coding line's coordinates** | **0.86317** | **88.84** | **12.14%** | **7.98% / 8.0%** |
+   | and the T.6 codec reading the coding line's coordinates | 0.86317 | 88.84 | 12.14% | 7.98% / 8.0% |
+   | **and the image placed where its matrix says** | **0.99747** | **4.72** | **0.03%** | **7.99% / 8.0%** |
 
-   The third row scores *lower* than the second and the page is closer to right. 0.91170 was
-   the score for drawing nothing at all, and a page with no ink on it agrees very well with a
-   page that is 92% paper. The third row draws the oracle's amount of ink in the oracle's
-   horizontal band and puts it in the wrong rows, because `image::draw` rebases its writes to
-   the origin of the clipped area and mirrors its samples about the horizontal axis. That is a
-   placement defect in the image path, it predates every defect on this page, and it is
-   recorded with its evidence as D5b in `docs/known-diffs.md`.
+   The third row scores *lower* than the second and the page is much closer to right. 0.91170
+   was the score for drawing nothing at all, and a page with no ink on it agrees very well with
+   a page that is 92% paper. The third row draws the whole scan — the oracle's amount of ink, in
+   the oracle's horizontal band — and puts it in the wrong rows, because `image::draw` rebased
+   its writes to the origin of the clipped area and mirrored its samples about the horizontal
+   axis. That was a placement defect in the image path; it predated every defect on this page,
+   and it is now fixed with its evidence as D5b in `docs/known-diffs.md`.
 
 3. **An `/ImageMask` painted the wrong bits, and with a colour nobody asked for.** `Do` names
    no colour, so a mask's colour comes from the graphics state and has to travel with the
@@ -807,3 +802,66 @@ and its encoder writes that line as a vertical zero where T.4 requires the horiz
 Its encoder and decoder agree with each other and with neither T.4 nor anything else, so
 freezing a fixture from them would freeze the disagreement. That path is still checked against
 hand-written bit strings in `src/ccitt.rs`, with every code named in the comment above it.
+
+### The placement, which put a decoded scan in the wrong rows
+
+The codec being right is not the image being right, and the page that proved it is the one
+where the two differ: the whole page is the scan, so if the placement is right then the two
+renderings agree to within antialiasing, and if it is wrong then a decoded scan is still in the
+wrong rows. `image::draw` had two independent errors, either of which alone puts an image in
+the wrong place:
+
+1. **The write was rebased and the bounds were not.** `bounds` comes from `matrix.apply` in
+   absolute device pixels and `area.pixels()` keeps it there, so the loop walked absolute
+   coordinates and then wrote at `x - x0, y - y0` — where `x0`/`y0` are the *clipped area's*
+   origin. Every image not at the page origin was drawn at the page origin. `x0`/`y0` are
+   deleted rather than left at zero: a binding named for an origin that is no longer subtracted
+   is the same mistake one refactor away.
+2. **The vertical axis was mirrored.** `placement.matrix` inverts y, so the unit square's
+   `v = 0` is the placement's *bottom*, while `Raster::sample` reads `v = 0` as raster row 0 —
+   the scan's *top*. Every image was upside down. The flip now goes into the **mapping**:
+
+   ```rust
+   let to_image = matrix.concat(Matrix::new(1.0, 0.0, 0.0, -1.0, 0.0, 1.0));
+   ```
+
+   and not into the raster's buffer. That is the part a fix by inspection gets wrong: a flipped
+   buffer gives identical pixels for every image drawn square to the page — all of the corpus's
+   and all of the old fixtures — and different ones the moment the image is turned, because the
+   turn belongs to the placement and a flipped buffer is not carried by one. `mutool draw`
+   settles it: `0 200 -200 0 200 0 cm` over a four-coloured quadranted image puts the image's
+   top-left in the page's **lower** left, which is where a counter-clockwise quarter turn takes
+   that corner; the buffer-flip version puts it in the upper left.
+
+**What the two compose into, and why the SSIM could not see it.** A rebase and a mirror are a
+*mirror about the middle of the placement rectangle*, not a shift, so the best pure vertical
+translation explained only **0.6270** of the oracle's ink at 650 rows. That figure is now
+**0.9972 at no shift at all**, and the two intermediates are what make the check worth having:
+
+| | best shift | translation explains | SSIM |
+|---|---|---|---|
+| both defects | 650 rows up | 0.6270 | 0.86317 |
+| mirror fixed, rebase not | 719 rows up | 0.9972 | — |
+| rebase fixed, mirror not | 650 rows up | 0.6270 | — |
+| **both fixed** | **none** | **0.9972** | **0.99747** |
+
+**A fraction cannot see a rebase** — with the mirror fixed and the rebase not, the translation
+explains 0.9972 of the oracle's ink while the image sits 719 rows in the wrong place, because a
+shift absorbs a constant displacement exactly. **A shift cannot see a mirror**, because a mirror
+is not a shift. So the test asserts the figure *and* the shift. SSIM says neither: 0.91170 was
+this page's score for drawing nothing at all, because a blank page agrees with a page that is
+92% paper.
+
+**Why nothing caught either.** The five image tests in `crates/mangle-render/tests/pages.rs`
+drew a 2 × 2 of pure red and `0b0000_1111` repeated on all eight of its rows — neither has
+vertical structure, so a mirror is invisible — through `cm`s whose translation is 0, so the
+clipped area's origin is the page's own and the rebase subtracts nothing. Every assertion was on
+columns. What is there now, each confirmed to fail on the code before it: a banded image at a
+non-zero `cm` translate, asserted pixel by pixel at three scales; the same image at two
+translations, each checked to leave the other's rows bare; a quarter-turned four-quadrant image
+asserting the *oracle's* orientation, which is the test a buffer-flip fix fails and a mapping
+fix passes; a full-page image at the origin, which must not regress; and the corpus page
+itself, where every candidate vertical shift is tried over per-row bitmaps and both the best
+one and the fraction it explains are asserted. Three more of the same shape are unit tests in
+`image.rs` over a two-by-two raster of four colours, so the placement is pinned at the pixel and
+not only through a page.

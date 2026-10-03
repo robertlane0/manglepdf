@@ -416,8 +416,8 @@ that is worth being able to point at.
 
 ## D5 — the fax scan on a multi-page TIFF page rendered as a black rectangle
 
-**Severity: was high — 0.38414 SSIM, 60.6% of pixels wrong. FIXED as a codec defect. What is
-left on this page is D5b, which is a placement defect and not this one.**
+**Severity: was high — 0.38414 SSIM, 60.6% of pixels wrong. FIXED, as a codec defect and then
+as the placement defect D5b that sat on top of it. The page is now at 0.99747.**
 
 `pdfbox__multitiff.pdf` page 1, measured against `mutool draw` at 150 DPI:
 
@@ -425,13 +425,14 @@ left on this page is D5b, which is a placement defect and not this one.**
 |---|---|---|---|---|
 | before any of the image work | 0.38414 | 197.78 | 1 318 947 | 59.0% / 8.0% |
 | layout and value split apart | 0.91170 | 72.09 | 173 990 | 0.0% / 8.0% |
-| **and the T.6 codec reading the coding line's coordinates** | **0.86317** | **88.84** | **264 199** | **7.98% / 8.0%** |
+| and the T.6 codec reading the coding line's coordinates | 0.86317 | 88.84 | 264 199 | 7.98% / 8.0% |
+| **and the image placed where its matrix says, the right way up** | **0.99747** | **4.72** | **746** | **7.99% / 8.0%** |
 
-The last row scores lower than the one above it and the page is closer to right, which is
-worth being explicit about rather than leaving to be misread: 0.91170 was the score for
-drawing nothing at all, and a page with no ink on it agrees very well with a page that is 92%
-paper. The renderer now decodes the whole scan and puts 173 595 pixels of ink where the
-oracle has 173 990.
+The third row scores lower than the one above it, and that was worth being explicit about
+rather than leaving to be misread: 0.91170 was the score for drawing nothing at all, and a page
+with no ink on it agrees very well with a page that is 92% paper. The third row draws the whole
+scan — 173 595 pixels of ink against the oracle's 173 990 — into the oracle's horizontal band
+and into the wrong rows, which is D5b and the whole of the gap to 0.99747.
 
 What was wrong is recorded in full in `docs/STATUS.md` and `PLAN.md`. There were four defects
 in one place, and each was invisible until the one before it was fixed, because a fax decoder
@@ -449,18 +450,18 @@ so every element was labelled with the colour it changes away from; and three of
 `0000001` among them — missing or wrong. Against the frozen `libtiff` ground truth, **all 15
 cases now match byte for byte**, 896 of 896 rows.
 
-What is still wrong on this page is **not** the codec and never was. The page's content is a
-full-page colour scan — object 12 is 344 by 287 samples covering the whole 595.28 by 496.64
-point width and height the content stream gives it, not a numeral, and it is fully decoded.
-It lands in the wrong device rows, for the reason in D5b.
+What was left on this page after the codec work was **not** the codec and never was. The page's
+content is a full-page colour scan — object 12 is 344 by 287 samples covering the whole 595.28
+by 496.64 point width and height the content stream gives it, not a numeral, and it is fully
+decoded. It landed in the wrong device rows, for the reason in D5b, which is now fixed.
 
 ---
 
-## D5b — `image::draw` rebases its writes to the page origin and mirrors its samples
+## D5b — `image::draw` rebased its writes to the page origin and mirrored its samples
 
-**Severity: high, and every image on every page is affected. Not fixed — the cause is
-recorded here rather than patched, because a placement bug in the image path is worth
-understanding rather than correcting by inspection.**
+**Severity: was high, and every image on every page was affected. FIXED — both errors, and the
+axis is fixed in the mapping rather than in the buffer, which is the part a fix by inspection
+gets wrong.**
 
 `crates/mangle-render/src/image.rs`, in `draw`. Two independent errors, either of which alone
 puts an image in the wrong place.
@@ -492,6 +493,11 @@ Reproduced without the corpus at all: a 100 by 100 point page whose only mark is
 `40 0 0 40 60 10 cm /Im1 Do`, so the image belongs at device rows 50..90 and columns 60..100.
 Its ink is at rows **0..39** and columns **0..39**.
 
+The fix is to write at the coordinate the pixel was computed for. `x0` and `y0` are gone rather
+than left at zero, because a binding named for an origin that is no longer subtracted is a
+second defect waiting: `columns.start` and `rows.start` are still the clipped area's, and
+reading them as a device origin is exactly the mistake that was just fixed.
+
 **2. The vertical axis is mirrored.** `to_device` is `placement.matrix.concat(record.ctm)`,
 and `placement.matrix` inverts y because a canvas counts down and a page counts up. So the
 unit square's `(0, 0)` is the placement's *bottom* and `inverse.apply(..)` returns `v = 0`
@@ -508,16 +514,60 @@ Reproduced without the corpus: a 100 by 100 point page with `100 0 0 100 0 0 cm 
 8 by 8 image whose top half is red and bottom half blue. The top quarter of the page renders
 `[0, 0, 255]` and the bottom quarter `[255, 0, 0]`.
 
-**Why it is not a clean translation, and why the row count looks wrong.** The two errors
-compose into a mirror about the middle of the placement rectangle rather than a shift, and a
-mirror is not something a vertical shift can explain: the best pure vertical shift accounts
-for 62.7% of the oracle's ink, and the rest is the part of the scan that is not near-symmetric
-about the band. The ink *band* also moves by 127 rows rather than by 0 or by 719, because the
-band's extent is set by the first and last inked source rows and a mirror puts the top row at
-the bottom: content spanning source rows 4 to 248 renders at rows 860..1739 where the oracle
-has 733..1612, both bands exactly 879 rows tall.
+The fix folds the flip into the transformation rather than turning the raster's buffer over,
+and the distinction is the whole of it:
 
-**Why nothing caught it.** `crates/mangle-render/tests/pages.rs` has five tests that draw an
+```rust
+let to_image = matrix.concat(Matrix::new(1.0, 0.0, 0.0, -1.0, 0.0, 1.0));
+let Some(inverse) = to_image.inverse() else { … };
+```
+
+**The mapping, not the buffer.** A raster's row zero is its *top* row and an image's unit square
+puts row zero at `v = 1`, so the inverse has to yield `v = 0` at the placement's *top* edge. A
+flipped raster buffer gives the same pixels as this mapping for every image drawn square to the
+page — which is all of the corpus's images, and all of the fixtures — and gives different ones
+the moment the image is turned, because the turn belongs to the placement and a flipped buffer
+is not carried by one. `mutool draw` agrees with the mapping and not with the buffer: a
+200-point page carrying `0 200 -200 0 200 0 cm` over an image whose four quadrants are four
+colours puts the image's top-left — red — in the page's **lower** left, which is where a
+counter-clockwise quarter turn takes the top-left corner of a picture. The buffer-flip version
+puts red in the page's upper left. `a_quarter_turned_image_samples_the_right_way_round` asserts
+the oracle's answer, pixel by pixel.
+
+**Why it is not a clean translation, and why the row count looked wrong.** The two errors
+compose into a mirror about the middle of the placement rectangle rather than a shift, and a
+mirror is not something a vertical shift can explain. The ink *band* also moved by 127 rows
+rather than by 0 or by 719, because the band's extent is set by the first and last inked source
+rows and a mirror puts the top row at the bottom: content spanning source rows 4 to 248
+rendered at rows 860..1739 where the oracle had 733..1612, both bands exactly 879 rows tall.
+
+## D5b, measured
+
+`pdfbox__multitiff.pdf` page 1 against `mutool draw` at 150 DPI, and how much of the oracle's
+ink a **pure vertical translation** accounts for at its best. Every shift is tried, over
+per-row bitmaps, because a figure that depends on which shifts were considered cannot tell a
+mirror from a displacement. Ink is "at least half dark" on luma; the oracle's page has 173 990
+inked pixels and ours has 173 764 (99.87%).
+
+| | SSIM | RMS | above tolerance | ink ours / oracle | best shift | translation explains |
+|---|---|---|---|---|---|---|
+| both defects | 0.86317 | 88.84 | 264 199 | 7.98% / 8.0% | 650 rows up | **0.6270** |
+| mirror fixed, rebase not | — | — | — | 7.99% / 8.0% | 719 rows up | 0.9972 |
+| rebase fixed, mirror not | — | — | — | 7.98% / 8.0% | 650 rows up | 0.6270 |
+| **both fixed** | **0.99747** | **4.72** | **746** | **7.99% / 8.0%** | **none** | **0.9972** |
+
+Two things in that table are worth more than the SSIM. First, **a fraction on its own cannot see
+the rebase**: with the mirror fixed and the rebase not, the translation explains 0.9972 of the
+oracle's ink while the image sits 719 rows in the wrong place, because a shift absorbs a
+constant displacement completely. Only the *shift* sees that defect. Second, **a shift on its
+own cannot see the mirror**, because a mirror is not a shift. So the test asserts both, and
+neither is the SSIM — a score cannot say what kind of difference a page has, and 0.91170 was
+this page's score for drawing nothing at all.
+
+`pdfjs__issue13372.pdf` page 1 is **unchanged at 0.74347**, and it was always going to be: that
+page draws nothing, for the unrelated reason below.
+
+**Why nothing caught it.** `crates/mangle-render/tests/pages.rs` had five tests that draw an
 image — `an_image_is_drawn_through_the_resources`, the three `an_image_mask_…` tests, and
 `an_image_that_is_not_a_mask_is_unaffected_by_the_fill_colour` — and neither of their two
 fixture images has any vertical structure in it: one is a 2 by 2 of pure red, the other is
@@ -525,16 +575,37 @@ fixture images has any vertical structure in it: one is a 2 by 2 of pure red, th
 drawn by a `cm` whose translation is 0, so the clipped area's origin is the page's own and
 the rebase subtracts nothing. A mirror and a rebase are both invisible to all five.
 
+Four tests now cover what they did not, and each was confirmed to fail on the old code — all
+four on the original, and one or two on each defect reverted alone:
+
+| test | axis only reverted | rebase only reverted |
+|---|---|---|
+| `an_image_with_vertical_structure_lands_the_right_way_up_at_a_translation` | fails | fails |
+| `the_same_image_at_two_translations_lands_in_the_two_places` | fails | fails |
+| `a_quarter_turned_image_samples_the_right_way_round` | fails | passes |
+| `an_image_at_the_page_origin_is_still_where_the_page_put_it` | fails | passes |
+| `the_whole_page_scan_is_the_oracles_scan_and_not_a_mirror_of_it` | fails | fails |
+
+The table is the reason each test is written the way it is. A fixture with **vertical
+structure** is needed to see a mirror at all; a fixture with a **non-zero translation** is
+needed to see a rebase; a fixture with **both** is needed to see them *compose*, since each one
+alone looks like the other. And the two quarter-turn tests pass with a rebase defect but fail
+with a mirror defect, which is the division of labour between the vertical axis and the
+placement. Three more of the same shape are unit tests in `image.rs` itself, over a two-by-two
+raster whose four samples are four colours, so the placement is pinned at the pixel rather than
+only through a page.
+
 **Also unresolved, and a separate defect: `pdfjs__issue13372.pdf` page 1 draws nothing at
-all.** It is not this one. Object 18 is a 646 by 761 CCITT G.4 `/ImageMask`, and the content
-stream draws it in a *pattern* colour — `/R9` is a `PatternType 2` axial shading over
-`/DeviceRGB`. `page.rs` declines to draw an image mask whose fill colour space is `Pattern`
-and records `an image mask painted in a pattern colour was found and not drawn`. The
-placement rectangle is right (device rows 329..1530 against the oracle's ink at 329..1529),
-so nothing is misplaced; there is simply nothing drawn. The cause is that pattern colours
-are not implemented as fills. It is not caused by, and does not cause, the placement defect
-above — and when pattern colours are implemented, this page will be subject to it, because its
-rectangle starts at row 329 rather than at 0.
+all.** It is not this one, and the fix above did not move it: the page is still **0.74347**,
+because it draws zero ink pixels and drew zero before. Object 18 is a 646 by 761 CCITT G.4
+`/ImageMask`, and the content stream draws it in a *pattern* colour — `/R9` is a `PatternType 2`
+axial shading over `/DeviceRGB`. `page.rs` declines to draw an image mask whose fill colour
+space is `Pattern` and records `an image mask painted in a pattern colour was found and not
+drawn`. The placement rectangle is right (device rows 329..1530 against the oracle's ink at
+329..1529), so nothing is misplaced; there is simply nothing drawn. The cause is that pattern
+colours are not implemented as fills. It is not caused by, and does not cause, the placement
+defect above — and when pattern colours are implemented, this page will be subject to it, because
+its rectangle starts at row 329 rather than at 0.
 
 ---
 

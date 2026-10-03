@@ -310,7 +310,8 @@ successor:
 | read as the declared one bit per sample | 0.38414 | 197.78 | 60.59% | 59.0% / 8.0% |
 | read as eight bits and divided by 255 | 0.38414 | 197.78 | 60.59% | 59.0% / 8.0% |
 | layout from the decoder, value from `/BitsPerComponent` | 0.91170 | 72.09 | 7.99% | 0.0% / 8.0% |
-| **and the T.6 codec reading the coding line's coordinates** | **0.86317** | **88.84** | **12.14%** | **7.98% / 8.0%** |
+| and the T.6 codec reading the coding line's coordinates | 0.86317 | 88.84 | 12.14% | 7.98% / 8.0% |
+| **and the image placed where its matrix says** | **0.99747** | **4.72** | **0.03%** | **7.99% / 8.0%** |
 
 (`pdfbox__multitiff.pdf` page 1 at 150 DPI.) The first row is a barcode — eight pixels come
 out of every byte and the image smears sideways by a factor of eight. The second is a black
@@ -321,14 +322,63 @@ says which layout it produced, and `image::decode` carries layout and value apar
 bit however wide the byte a codec wrote it into, so it is tested on the stored bit and never
 on a value normalised over 255.
 
-**The last row scores lower than the one above it, and the page is much closer to right.** The
-third row's 0.91170 was the score for drawing *nothing*: a blank page agrees with a page that
-is 92% paper, which is a flattering number for a page with no content on it. The fourth row
-draws the right amount of ink (7.98% against the oracle's 7.99%) in the right horizontal band,
-in the wrong rows — `image::draw` rebases its writes to the origin of the clipped area and
-mirrors its samples about the horizontal axis. That is a placement defect in the image path
-rather than a codec one, it predates everything on this page, and it is recorded with its
-evidence in `docs/known-diffs.md` as D5b. The codec is settled; the placement is not.
+**The fourth row scores lower than the one above it, and the page is much closer to right.**
+The third row's 0.91170 was the score for drawing *nothing*: a blank page agrees with a page
+that is 92% paper, which is a flattering number for a page with no content on it. The fourth
+row draws the whole scan — the right amount of ink (7.98% against the oracle's 7.99%) in the
+right horizontal band — and puts it in the wrong rows, because `image::draw` rebased its
+writes to the origin of the clipped area and mirrored its samples about the horizontal axis.
+That was a placement defect in the image path rather than a codec one, it predated everything
+on this page, and it is fixed with its evidence in `docs/known-diffs.md` as D5b. **The codec
+was settled before the placement was, and nothing said so until both were measured.**
+
+**The placement, which put a decoded scan in the wrong rows — now done.** A decoded image and
+a correctly *placed* image are two different facts, and the page above is where the first was
+true while the second was not: the whole page is the scan, so a right codec and a wrong
+placement disagree by an amount no codec work could reach.
+
+1. **The write was rebased and the bounds were not.** `area.pixels()` yields absolute device
+   rows and columns, and the loop then wrote at `x - x0, y - y0`, which is the *clipped area's*
+   origin subtracted from them. Every image not at the page origin was drawn at the page
+   origin. `x0`/`y0` are deleted rather than left at zero, because a binding named for an
+   origin that is no longer subtracted is the same mistake one refactor away.
+2. **The vertical axis was mirrored.** `placement.matrix` inverts y, so `v = 0` is the
+   placement's bottom, and `Raster::sample` reads `v = 0` as raster row 0 — the scan's top.
+   Every image was upside down. The flip now goes into the **mapping**
+   (`matrix.concat(Matrix::new(1.0, 0.0, 0.0, -1.0, 0.0, 1.0))`) rather than into the raster's
+   buffer, and that distinction is the whole of the fix: a flipped buffer produces identical
+   pixels for every image drawn square to the page — all of the corpus's, all of the old
+   fixtures — and different ones as soon as the image is turned, because the turn belongs to the
+   placement and a flipped buffer is not carried by one. `mutool draw` settles which is which.
+
+**What the two compose into, and why the SSIM could not see it.** A rebase and a mirror are a
+*mirror about the middle of the placement rectangle*, not a shift, so the best pure vertical
+translation explained only **0.6270** of the oracle's ink at 650 rows. It is now **0.9972 at no
+shift**, and the intermediate figures say why both halves of the check are needed:
+
+| | best shift | translation explains | SSIM |
+|---|---|---|---|
+| both defects | 650 rows up | 0.6270 | 0.86317 |
+| mirror fixed, rebase not | 719 rows up | 0.9972 | — |
+| rebase fixed, mirror not | 650 rows up | 0.6270 | — |
+| **both fixed** | **none** | **0.9972** | **0.99747** |
+
+A **fraction cannot see a rebase** — with the mirror fixed and the rebase not, the translation
+still explains 0.9972 of the oracle's ink with the image 719 rows in the wrong place, because a
+shift absorbs a constant displacement exactly. A **shift cannot see a mirror**, because a mirror
+is not a shift. SSIM says neither: 0.91170 was this page's score for drawing nothing at all.
+
+**Why nothing caught either, and what is there now.** The five image tests in `pages.rs` drew a
+2 × 2 of pure red and `0b0000_1111` repeated on all eight of its rows — neither has vertical
+structure, so a mirror is invisible — through `cm`s whose translation is 0, so the rebase
+subtracted nothing. Every assertion was on columns. Now, each confirmed to fail on the code
+before it: a banded image at a non-zero translate, asserted pixel by pixel at three scales; the
+same image at two translations, each leaving the other's rows bare; a quarter-turned
+four-quadrant image asserting the *oracle's* orientation, which a buffer-flip fix fails and a
+mapping fix passes; a full-page image at the origin, which must not regress; and the corpus page,
+where every candidate vertical shift is tried over per-row bitmaps and both the shift and the
+fraction it explains are asserted. Three more are unit tests in `image.rs` over a two-by-two
+raster of four colours.
 
 **An `/ImageMask` painted nothing.** `Do` names no colour, so the graphics state's fill
 colour has to travel with the mark, and the painter had been given black unconditionally —

@@ -1473,6 +1473,156 @@ fn a_rotated_page_puts_its_ink_where_the_rotation_says() {
     );
 }
 
+/// A file from the wild corpus, if it has been fetched.
+///
+/// `cargo xtask corpus fetch` is what puts it there, and the corpus is not in the repository.
+fn wild_file(name: &str) -> Option<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)?;
+    let path = root.join("corpus/wild").join(name);
+    path.is_file().then_some(path)
+}
+
+/// The pixels of `image` that are ink, as one bitmap per row.
+///
+/// Ink is "at least half dark", on luma rather than on one channel, because a black-and-white
+/// fax scan is bimodal and the answer has to be the same whichever channel a producer happened
+/// to put the black in. Rows are bitmaps rather than bytes so that every candidate shift can be
+/// tried exactly: aligning two rows of bitmaps and counting the bits both of them have set is
+/// the whole of a vertical translation's overlap, and there are thousands of shifts to try.
+fn ink_rows(image: &mangle_render::Image) -> (Vec<Vec<u64>>, usize) {
+    let words = image.width.div_ceil(64);
+    let mut rows = vec![vec![0u64; words]; image.height];
+    let mut count = 0usize;
+    for (y, row) in rows.iter_mut().enumerate() {
+        for x in 0..image.width {
+            if darkness(image, x, y) >= 128 {
+                row[x / 64] |= 1u64 << (x % 64);
+                count += 1;
+            }
+        }
+    }
+    (rows, count)
+}
+
+/// How much of the oracle's ink a *pure vertical translation* of ours accounts for, at its
+/// best: the shift, and the fraction of the oracle's inked pixels our inked pixels then cover.
+///
+/// Every shift is tried — an exhaustive search rather than a search over the plausible ones,
+/// because a figure that depends on which shifts were considered cannot tell a mirror from a
+/// displacement. It is affordable because the search is over bitmaps: 1754 rows of twenty
+/// words each, once per shift.
+///
+/// Both placement defects this file fixes compose into a **mirror** about the middle of the
+/// placement rectangle, and a mirror is not a translation: the scan's ink lies a different
+/// distance from the top of the page from the distance the mirror puts it at, so no shift
+/// aligns more than part of it.
+fn best_vertical_shift(ours: &[Vec<u64>], theirs: &[Vec<u64>], theirs_ink: usize) -> (i64, f64) {
+    let h = theirs.len();
+    let mut best = (0i64, 0.0f64);
+    for d in -(h as i64)..=(h as i64) {
+        // The rows both images have: those whose `y` is in the oracle and whose `y + d` is in
+        // ours. A shift past either edge simply has no rows, which is not a crash.
+        let first = 0.max(-d) as usize;
+        let last = ((h as i64 - d).min(h as i64)).max(0) as usize;
+        let mut matched = 0u64;
+        for (y, row) in theirs.iter().enumerate().take(last).skip(first) {
+            let moved = (y as i64 + d) as usize;
+            for (wa, wb) in row.iter().zip(&ours[moved]) {
+                matched += u64::from((wa & wb).count_ones());
+            }
+        }
+        let fraction = matched as f64 / theirs_ink.max(1) as f64;
+        if fraction > best.1 {
+            best = (d, fraction);
+        }
+    }
+    best
+}
+
+/// The whole-page fax scan on `pdfbox__multitiff.pdf` page 1 is the oracle's own scan, in the
+/// oracle's own rows.
+///
+/// This is the page both placement defects were found on, and it is the page that says whether
+/// both of them are fixed: the image is 344 by 287 samples of `libtiff`'s own encoding, decoded
+/// byte for byte, and it covers the whole 595 by 497 point page — so everything on the page
+/// *is* the image, and if the image is in the right rows the right way up then the two
+/// renderings differ by antialiasing and nothing else.
+///
+/// Before the fix the best pure vertical translation explained **62.70%** of the oracle's ink,
+/// at 650 rows, because the two defects composed into a mirror rather than a shift. The two
+/// assertions say different things and both are needed, which is what the intermediate figures
+/// show:
+///
+/// | | best shift | fraction of the oracle's ink |
+/// |---|---|---|
+/// | both defects | 650 rows up | 0.6270 |
+/// | the mirror fixed, the rebase not | 719 rows up | 0.9972 |
+/// | the rebase fixed, the mirror not | 650 rows up | 0.6270 |
+/// | both fixed | none | 0.9972 |
+///
+/// A fraction on its own cannot see the rebase, because a shift *can* absorb it: the fraction
+/// is 0.9972 with the image 719 rows in the wrong place. And a shift of its own cannot see the
+/// mirror, because the mirror is not a shift. So the figure is asserted *and* the shift, and
+/// neither is the SSIM: a score cannot say *what kind* of difference a page has, and this
+/// page's SSIM was higher when it drew nothing at all.
+#[test]
+fn the_whole_page_scan_is_the_oracles_scan_and_not_a_mirror_of_it() {
+    let Some(pdf) = wild_file("pdfbox__multitiff.pdf") else {
+        eprintln!("skipped: the wild corpus has not been fetched");
+        return;
+    };
+    if mutool().is_none() {
+        eprintln!("skipped: mutool is not installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join("mangle-render-oracle");
+    std::fs::create_dir_all(&dir).expect("a place to work");
+    let bytes = std::fs::read(&pdf).expect("the corpus file");
+
+    let scale = 150.0 / 72.0;
+    let ours = render(bytes, scale);
+    let Some(data) = mutool_render(&pdf, scale, &dir.join("multitiff.pam")) else {
+        eprintln!("skipped: mutool could not render the page");
+        return;
+    };
+    let Some((w, h, depth, body)) = read_pam(&data) else {
+        eprintln!("skipped: could not read mutool's output");
+        return;
+    };
+    let theirs = flatten_onto_paper(&pam_to_image(w, h, depth, body));
+    assert_eq!(
+        (ours.image.width, ours.image.height),
+        (w, h),
+        "the two renderings are not the same size, so there is nothing to compare"
+    );
+
+    let (ours_ink, ours_count) = ink_rows(&ours.image);
+    let (theirs_ink, theirs_count) = ink_rows(&theirs);
+    assert!(
+        theirs_count > 100_000,
+        "the oracle's page has only {theirs_count} inked pixels, which is not a full-page scan"
+    );
+    eprintln!("multitiff page 1: ink ours {ours_count} oracle {theirs_count}");
+
+    let (shift, fraction) = best_vertical_shift(&ours_ink, &theirs_ink, theirs_count);
+    eprintln!(
+        "the best vertical translation is {shift} rows and it explains {fraction:.4} of the \
+         oracle's ink"
+    );
+    assert!(
+        fraction >= 0.98,
+        "a pure vertical translation explains only {fraction:.4} of the oracle's ink, and a \
+         mirror is not a translation: the page is still upside down, still displaced, or both"
+    );
+    assert!(
+        shift.abs() <= 1,
+        "and it is {shift} rows, which is not a translation of nothing: the scan belongs on the \
+         rows its matrix names"
+    );
+}
+
 /// A rectangle read straight out of the document model, which is what a caller building
 /// its own canvas needs.
 #[test]
@@ -1790,6 +1940,378 @@ fn an_image_is_drawn_through_the_resources() {
     assert!(
         region_is_fraction(&render.image, 0.55, 0.05, 0.95, 0.95, [255, 255, 255]),
         "and the right half is untouched paper"
+    );
+}
+
+/// A square page of `points` carrying one eight-by-eight `/DeviceRGB` XObject, drawn by
+/// `content`.
+///
+/// `samples` is the image's 8 × 8 × 3 bytes in raster order — the first three bytes are its
+/// top-left sample, which is the order a scan is stored in and the order a page's y axis runs
+/// *against*. That is the whole reason this fixture exists: an image with no structure along
+/// its rows is the same picture upside down, so a renderer that mirrors it cannot be told
+/// apart from one that does not.
+///
+/// `content` is written verbatim rather than generated, because the matrix is the thing under
+/// test and a matrix this file assembled would only test the assembly.
+fn placed_image_page(points: i64, content: &str, samples: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 5];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        format!(
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 {points} {points}] \
+             /Resources << /XObject << /Im0 5 0 R >> >> >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content.as_bytes());
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    let mut image = format!(
+        "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 8 /Height 8 \
+         /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n",
+        samples.len()
+    )
+    .into_bytes();
+    image.extend_from_slice(samples);
+    image.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&image);
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 5\n");
+    // Five objects after the free one, which is `at[1]` to `at[5]`.
+    for offset in at.iter().skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// Eight by eight, red above and blue below, and nothing else.
+///
+/// The plainest image with vertical structure there is: two colours, one boundary, and no way
+/// to confuse the boundary with anything.
+fn half_red_samples() -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 * 8 * 3);
+    for _ in 0..4 {
+        out.extend_from_slice(&[255, 0, 0].repeat(8));
+    }
+    for _ in 0..4 {
+        out.extend_from_slice(&[0, 0, 255].repeat(8));
+    }
+    out
+}
+
+/// Eight by eight with a different colour in each of its four quadrants: red and green across
+/// the top, blue and yellow across the bottom.
+///
+/// Four colours where [`half_red_samples`] has two, and the difference is what a quarter turn
+/// has to survive: one boundary can be put in the wrong place and still look like *an*
+/// orientation, while four distinct quadrants say which of them is which.
+fn quadrant_samples() -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 * 8 * 3);
+    // Row by row from the top, and each row a left half and then a right half, which is the
+    // order a raster is stored in.
+    for (left, right) in [([255u8, 0, 0], [0, 255, 0]), ([0, 0, 255], [255, 255, 0])] {
+        for _ in 0..4 {
+            out.extend_from_slice(&left.repeat(4));
+            out.extend_from_slice(&right.repeat(4));
+        }
+    }
+    out
+}
+
+/// Is this pixel within two of the colour?
+fn close_to(got: [u8; 3], want: [u8; 3]) -> bool {
+    (0..3).all(|c| (i32::from(got[c]) - i32::from(want[c])).abs() <= 2)
+}
+
+/// The row inside `rows` at which a rectangle's colour changes, and the two colours either
+/// side of it, read down one column.
+///
+/// A single column rather than a row count, because the question a placement defect answers is
+/// *which rows hold which colour* and a count cannot tell a mirror from a translation: a
+/// mirrored image has exactly as much red as an upright one. The column is the middle one so
+/// that the answer does not depend on what is happening at an edge.
+#[must_use]
+fn colour_change_down(
+    image: &mangle_render::Image,
+    fx0: f64,
+    fy0: f64,
+    fx1: f64,
+    fy1: f64,
+) -> (usize, [u8; 3], [u8; 3]) {
+    let (x0, y0, x1, y1) = region(image, fx0, fy0, fx1, fy1);
+    let x = x0.midpoint(x1);
+    let colour = |y: usize| -> [u8; 3] {
+        let [r, g, b, _] = image.get(x, y).unwrap_or([255, 255, 255, 255]);
+        [r, g, b]
+    };
+    let first = colour(y0);
+    let mut row = y1;
+    for y in y0..y1 {
+        if !close_to(colour(y), first) {
+            row = y;
+            break;
+        }
+    }
+    let before = colour(row.saturating_sub(1));
+    (row, before, colour(row))
+}
+
+/// Assert that a rectangle of the page, in page proportions, is `upper` above its middle and
+/// `lower` below it.
+///
+/// Every pixel of both halves is checked, two pixels in from each edge so that the antialiased
+/// boundary of the placement is not mistaken for a misplaced band, and the change of colour is
+/// pinned to the middle of the rectangle to within a row — the row a rounding difference can
+/// move it by, and no further. Both statements are about *rows*: a mirror and a displacement
+/// are indistinguishable in every other respect.
+#[track_caller]
+fn assert_halves(
+    image: &mangle_render::Image,
+    fx0: f64,
+    fy0: f64,
+    fx1: f64,
+    fy1: f64,
+    upper: [u8; 3],
+    lower: [u8; 3],
+    what: &str,
+) {
+    let (x0, y0, x1, y1) = region(image, fx0, fy0, fx1, fy1);
+    assert!(
+        x1 > x0 + 4 && y1 > y0 + 4,
+        "{what}: the rectangle is {} by {} pixels, which cannot say anything",
+        x1 - x0,
+        y1 - y0
+    );
+    let (change, before, after) = colour_change_down(image, fx0, fy0, fx1, fy1);
+    assert!(
+        close_to(before, upper) && close_to(after, lower),
+        "{what}: the rectangle reads {before:?} above row {change} and {after:?} below it, \
+         and it should read {upper:?} and {lower:?}"
+    );
+    let mid = y0 + (y1 - y0) / 2;
+    assert!(
+        (change as i64 - mid as i64).abs() <= 1,
+        "{what}: the colour changes at row {change} and the middle of the rectangle is row {mid}"
+    );
+    for y in y0 + 2..y1 - 2 {
+        let want = if y < change { upper } else { lower };
+        for x in x0 + 2..x1 - 2 {
+            let [r, g, b, _] = image.get(x, y).unwrap_or([0, 0, 0, 0]);
+            let got = [r, g, b];
+            assert!(
+                close_to(got, want),
+                "{what}: device ({x}, {y}) is {got:?} and should be {want:?}, the {} half",
+                if y < change { "upper" } else { "lower" }
+            );
+        }
+    }
+}
+
+/// The unit square scaled into the page's middle, reached by a `cm` whose translation is not
+/// zero. On a 200 point page that is columns 60..160 and rows 60..120.
+const BANDED_CM: &str = "q 100 0 0 60 60 80 cm /Im0 Do Q";
+
+/// The same band, forty points taller up the page than [`BANDED_CM`]: page y 100..140, which
+/// is device rows 60..100 and touches nothing of the other one.
+fn banded_page(page_y: i64) -> Vec<u8> {
+    placed_image_page(
+        200,
+        &format!("q 100 0 0 40 60 {page_y} cm /Im0 Do Q"),
+        &half_red_samples(),
+    )
+}
+
+/// An image with vertical structure, at a `cm` whose translation is not zero, lands the right
+/// way up in the rows the matrix names.
+///
+/// Both halves of this test were needed and neither was enough on its own. An image with no
+/// structure along its rows is the same picture upside down, so the mirror this fixes was
+/// invisible to every fixture that had one; and an image at the page origin has nothing to be
+/// displaced by, so the rebase this fixes was invisible to every fixture whose `cm` translated
+/// by zero. One image with both, at three scales, is what each of them needed and neither
+/// could supply.
+#[test]
+fn an_image_with_vertical_structure_lands_the_right_way_up_at_a_translation() {
+    for scale in [1.0, 2.0, 150.0 / 72.0] {
+        let render = render(
+            placed_image_page(200, BANDED_CM, &half_red_samples()),
+            scale,
+        );
+        assert!(
+            render.notes.is_empty(),
+            "an image at scale {scale} should draw without complaint: {:?}",
+            render.notes
+        );
+        assert_halves(
+            &render.image,
+            0.30,
+            0.30,
+            0.80,
+            0.60,
+            [255, 0, 0],
+            [0, 0, 255],
+            &format!("an image at scale {scale}"),
+        );
+        // The band is where the matrix says and nowhere else: a page above it and a page below
+        // it are both paper, which is where a rebase would have put a second copy.
+        assert!(
+            region_is_fraction(&render.image, 0.35, 0.10, 0.75, 0.28, [255, 255, 255]),
+            "at scale {scale}: the page above the image is paper"
+        );
+        assert!(
+            region_is_fraction(&render.image, 0.35, 0.62, 0.75, 0.90, [255, 255, 255]),
+            "at scale {scale}: and so is the page below it"
+        );
+    }
+}
+
+/// The same image at two translations lands in two different places.
+///
+/// This is the rebase on its own. A defect that displaces every image by the origin of the
+/// clipped area draws two images at two translations in the *same* place, so asking where
+/// each of them is — rather than what either of them looks like — is what separates the two
+/// answers.
+#[test]
+fn the_same_image_at_two_translations_lands_in_the_two_places() {
+    // Two bands forty rows tall, sharing a page and touching nothing: device rows 20..60 and
+    // 60..100, from page y 140 and page y 100.
+    let higher = render(banded_page(140), 1.0);
+    let lower = render(banded_page(100), 1.0);
+    for (render, fy0, fy1, what) in [
+        (&higher, 0.10, 0.30, "the image drawn at page y 140"),
+        (&lower, 0.30, 0.50, "the image drawn at page y 100"),
+    ] {
+        assert_halves(
+            &render.image,
+            0.30,
+            fy0,
+            0.80,
+            fy1,
+            [255, 0, 0],
+            [0, 0, 255],
+            what,
+        );
+    }
+    // And each one leaves the other's rows bare, which is the part a rebase cannot survive: it
+    // drew both images in the same rows.
+    for (render, fy0, fy1, what) in [
+        (&higher, 0.30, 0.50, "the image drawn at page y 140"),
+        (&lower, 0.10, 0.30, "the image drawn at page y 100"),
+    ] {
+        assert!(
+            region_is_fraction(&render.image, 0.35, fy0, 0.75, fy1, [255, 255, 255]),
+            "{what} leaves the other one's rows bare, and it should"
+        );
+    }
+}
+
+/// A quarter turn carries the image's own top row to the side it names.
+///
+/// This is the test that a fix which turned the raster buffer upside down would fail. Such a
+/// fix is right for every image on the page that is drawn square to the page — the flip and
+/// the mapping give the same pixels there — and wrong the moment the image is turned, because
+/// the turn is applied to the placement while the flip was not. So the assertion is on an
+/// image whose four quadrants are four different colours, turned by a `cm` of `0 200 -200 0
+/// 200 0`, which maps the unit square onto the whole page: the unit square's `x` is the
+/// page's `y` and its `y` is the page's `x` turned over.
+///
+/// In device rows and columns, with the page's own y axis pointing up and the device's down:
+///
+/// | device quadrant | which of the image's quadrants |
+/// |---|---|
+/// | lower left | the image's top left — red |
+/// | upper left | the image's top right — green |
+/// | lower right | the image's bottom left — blue |
+/// | upper right | the image's bottom right — yellow |
+#[test]
+fn a_quarter_turned_image_samples_the_right_way_round() {
+    let render = render(
+        placed_image_page(
+            200,
+            "q 0 200 -200 0 200 0 cm /Im0 Do Q",
+            &quadrant_samples(),
+        ),
+        1.0,
+    );
+    assert!(
+        render.notes.is_empty(),
+        "a turned image should draw without complaint: {:?}",
+        render.notes
+    );
+    // The upper left, read down its own middle column: red below green.
+    assert_halves(
+        &render.image,
+        0.30,
+        0.05,
+        0.45,
+        0.95,
+        [0, 255, 0],
+        [255, 0, 0],
+        "the upper left of a quarter-turned image",
+    );
+    // The lower right, the same way down: blue below yellow.
+    assert_halves(
+        &render.image,
+        0.55,
+        0.05,
+        0.70,
+        0.95,
+        [255, 255, 0],
+        [0, 0, 255],
+        "the lower right of a quarter-turned image",
+    );
+    // And the two off-diagonal quadrants are each a single colour, which is what says the turn
+    // is a turn: an image mirrored top to bottom would put red in the *upper* left and blue in
+    // the lower right the other way round from this, and these two assertions pin both.
+    assert!(
+        region_is_fraction(&render.image, 0.55, 0.55, 0.95, 0.95, [0, 0, 255]),
+        "the image's bottom left is blue, in the lower right of the page"
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.45, 0.45, [0, 255, 0]),
+        "and its top right is green, in the upper left"
+    );
+}
+
+/// An image drawn at the page origin with a `cm` that translates by zero is where the page put
+/// it, right way up.
+///
+/// The two placement defects this fixes were both invisible here, which is why nothing caught
+/// them: a `cm` with no translation leaves the clipped area's origin at the page's own, so
+/// there was nothing to subtract, and the earlier image fixtures have no vertical structure
+/// for a mirror to show. This is the fixture those five could not be, and it must not regress.
+#[test]
+fn an_image_at_the_page_origin_is_still_where_the_page_put_it() {
+    let render = render(
+        placed_image_page(200, "q 200 0 0 200 0 0 cm /Im0 Do Q", &half_red_samples()),
+        1.0,
+    );
+    assert!(
+        render.notes.is_empty(),
+        "a full-page image should draw without complaint: {:?}",
+        render.notes
+    );
+    assert_halves(
+        &render.image,
+        0.02,
+        0.02,
+        0.98,
+        0.98,
+        [255, 0, 0],
+        [0, 0, 255],
+        "an image filling the page",
     );
 }
 

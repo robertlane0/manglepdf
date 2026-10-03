@@ -774,10 +774,15 @@ impl Raster {
 
 /// Draw an image through a transformation.
 ///
-/// `matrix` maps the unit square onto the page. `fill` is the graphics state's fill colour,
+/// `matrix` maps the unit square onto the device. `fill` is the graphics state's fill colour,
 /// which is what paints an image mask's *zero* bits; `None` means there is no colour to paint
 /// in, which for a stencil draws nothing rather than guessing one — an image that is not a
 /// stencil paints its own samples and ignores it. Returns whether anything was drawn.
+///
+/// Every write is at the device coordinate it was computed for, and every sample is read
+/// through the transformation with its vertical axis the way an image's is: row zero at the
+/// top. Both are stated because both were once wrong, and each put an image in the wrong
+/// place on its own — see D5b in `docs/known-diffs.md`.
 pub fn draw(
     device: &mut Device,
     raster: &Raster,
@@ -813,11 +818,21 @@ pub fn draw(
     };
     // Each pixel is mapped back through the inverse to find its sample. Going backwards
     // rather than forwards is what makes a rotated image come out the right shape.
-    let Some(inverse) = matrix.inverse() else {
+    //
+    // The vertical axis is flipped in the mapping rather than in the buffer, because the two
+    // are the same answer only until the image is turned. A raster's row zero is its *top*
+    // row, and an image's unit square puts row zero at `v = 1` — the matrix that reaches
+    // here has already turned the page's y axis over, because a canvas counts down and a
+    // page counts up, so `v = 0` is the placement's bottom edge and its *last* raster row.
+    // Reading `v` straight off the inverse therefore draws every image upside down. Folding
+    // the flip into the transformation is what puts `v = 0` at the placement's top, and it
+    // carries a quarter turn with it: the image's top edge ends up on the left or the right
+    // according to the direction of the turn, where a flipped buffer would put it at the
+    // bottom in both.
+    let to_image = matrix.concat(Matrix::new(1.0, 0.0, 0.0, -1.0, 0.0, 1.0));
+    let Some(inverse) = to_image.inverse() else {
         return false;
     };
-    let x0 = columns.start;
-    let y0 = rows.start;
 
     let mut drawn = 0usize;
     // `rows` is consumed by the outer loop and `columns` by the inner one, and a range is
@@ -861,7 +876,12 @@ pub fn draw(
             if px.get(3).copied().unwrap_or(0) == 0 {
                 continue;
             }
-            device.put(x - x0, y - y0, px);
+            // The device position is the one the pixel was computed for. `area` is in
+            // absolute device coordinates, so there is nothing to subtract: the clipped
+            // area's origin is where the placement happens to start, not where the device
+            // starts, and subtracting it drew every image not at the page origin at the
+            // page origin.
+            device.put(x, y, px);
             drawn += 1;
         }
     }
@@ -1550,9 +1570,14 @@ mod tests {
     }
 
     /// Draw a raster over an eight-by-eight sheet of paper, one raster pixel to one pixel.
+    ///
+    /// The matrix is the one a page produces — the unit square scaled to the sheet with its
+    /// vertical axis turned over, because a canvas counts down and a page counts up — and not
+    /// a bare scale. A matrix with no turn is not a placement any page can ask for, and
+    /// drawing through one would say an image's first row is its *last* one.
     fn draw_on_paper(raster: &Raster, fill: Option<Rgba>) -> crate::Image {
         let mut device = Device::new(crate::Image::filled(8, 8, [255, 255, 255, 255]));
-        let unit_square = Matrix::new(8.0, 0.0, 0.0, 8.0, 0.0, 0.0);
+        let unit_square = Matrix::new(8.0, 0.0, 0.0, -8.0, 0.0, 8.0);
         draw(&mut device, raster, &unit_square, 1.0, fill);
         device.into_image()
     }
@@ -1702,6 +1727,161 @@ mod tests {
         const {
             assert!(MAX_IMAGE_PIXELS == 64 * 1024 * 1024);
             assert!(MAX_IMAGE_PIXELS > 1_000_000, "room for a real photograph");
+        }
+    }
+
+    /// A two-by-two raster whose four samples are four different colours, so every corner of it
+    /// is distinguishable from the other three.
+    fn four_colours() -> Raster {
+        Raster {
+            width: 2,
+            height: 2,
+            // Row zero is the raster's *first* row, which is the top of the image.
+            pixels: vec![
+                255, 0, 0, 255, // top left: red
+                0, 255, 0, 255, // top right: green
+                0, 0, 255, 255, // bottom left: blue
+                255, 255, 0, 255, // bottom right: yellow
+            ],
+            interpolate: false,
+            soft_mask: None,
+            key_range: None,
+            is_stencil: false,
+        }
+    }
+
+    fn blank(width: usize, height: usize) -> crate::Image {
+        crate::Image::filled(width, height, [255, 255, 255, 255])
+    }
+
+    /// An image is written at the device position its matrix names, not at the origin of the
+    /// area it was clipped to.
+    ///
+    /// The clipped area of an image that does not start at the page's own corner starts
+    /// somewhere else, and subtracting that is what put every translated image at the page
+    /// origin. The matrix here names a square in the middle of a larger sheet, and every
+    /// pixel of it has to appear on the sheet at the four device positions the square covers.
+    #[test]
+    fn an_image_is_written_where_its_matrix_says() {
+        let mut device = Device::new(blank(6, 6));
+        // The unit square onto device rows 2..4 and columns 2..4, with the canvas's y axis
+        // counting down: `f` is the row the unit square's *bottom* edge lands on.
+        let square = Matrix::new(2.0, 0.0, 0.0, -2.0, 2.0, 4.0);
+        assert!(draw(&mut device, &four_colours(), &square, 1.0, None));
+        let paper = device.into_image();
+        for y in 0..6 {
+            for x in 0..6 {
+                let inside = (2..=3).contains(&x) && (2..=3).contains(&y);
+                let want = if !inside {
+                    [255, 255, 255, 255]
+                } else if y < 3 {
+                    if x < 3 {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 255, 0, 255]
+                    }
+                } else if x < 3 {
+                    [0, 0, 255, 255]
+                } else {
+                    [255, 255, 0, 255]
+                };
+                assert_eq!(paper.get(x, y), Some(want), "at ({x}, {y})");
+            }
+        }
+    }
+
+    /// A quarter turn carries the raster's first row to the side the matrix names.
+    ///
+    /// This is the case that a fix which turned the raster buffer over would get wrong: the
+    /// buffer and the mapping agree on every image drawn square to the page, and they disagree
+    /// here, because the turn belongs to the placement and a flipped buffer is not carried by
+    /// one.
+    ///
+    /// The matrix maps the unit square onto the whole sheet with its x axis along the device's
+    /// y and its y axis along the device's x turned over, so `v = 0` — the raster's first row
+    /// — is the sheet's leftmost column and `u = 0` is the sheet's topmost row. Every corner
+    /// of the raster is therefore in a different quadrant of the sheet, and each of the four
+    /// is asserted by name.
+    #[test]
+    fn a_turned_image_samples_the_right_way_round() {
+        const RED: [u8; 4] = [255, 0, 0, 255];
+        const GREEN: [u8; 4] = [0, 255, 0, 255];
+        const BLUE: [u8; 4] = [0, 0, 255, 255];
+        const YELLOW: [u8; 4] = [255, 255, 0, 255];
+        let mut device = Device::new(blank(4, 4));
+        let turned = Matrix::new(0.0, 4.0, -4.0, 0.0, 4.0, 0.0);
+        assert!(draw(&mut device, &four_colours(), &turned, 1.0, None));
+        let paper = device.into_image();
+        for y in 0..4 {
+            for x in 0..4 {
+                // `v` is the device's x and `u` the device's y, so the raster's four quadrants
+                // are the sheet's four quadrants with the two axes exchanged: red — the
+                // raster's top left — is the sheet's upper left, and the raster's first row
+                // runs down the sheet's left column from its top.
+                let want = match (x < 2, y < 2) {
+                    (true, true) => RED,
+                    (false, true) => BLUE,
+                    (true, false) => GREEN,
+                    (false, false) => YELLOW,
+                };
+                assert_eq!(paper.get(x, y), Some(want), "at ({x}, {y})");
+            }
+        }
+    }
+
+    /// The same image drawn through two translations lands in two places.
+    ///
+    /// One image at one translation could be put in the wrong place by a defect that displaces
+    /// every image by the same amount; two translations cannot, because the displacement would
+    /// have to be the same for both and these are four rows apart.
+    #[test]
+    fn two_translations_land_in_two_places() {
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255];
+        let paper = [255, 255, 255, 255];
+        let mut drawn = Vec::new();
+        for f in [2.0, 6.0] {
+            let mut device = Device::new(blank(8, 8));
+            let square = Matrix::new(2.0, 0.0, 0.0, -2.0, 2.0, f);
+            assert!(draw(&mut device, &four_colours(), &square, 1.0, None));
+            drawn.push(device.into_image());
+        }
+        let (first, second) = (&drawn[0], &drawn[1]);
+        assert_eq!(
+            first.get(2, 0),
+            Some(red),
+            "the upper image's top row is its first"
+        );
+        assert_eq!(
+            first.get(2, 1),
+            Some(blue),
+            "and its next row is its second"
+        );
+        assert_eq!(
+            second.get(2, 4),
+            Some(red),
+            "the lower image's top row is its first"
+        );
+        assert_eq!(
+            second.get(2, 5),
+            Some(blue),
+            "and its next row is its second"
+        );
+        // And neither one is where the other one is, which is the part a displacement of every
+        // image by the same amount cannot produce.
+        for x in 0..8 {
+            for y in 0..4 {
+                assert_eq!(
+                    second.get(x, y),
+                    Some(paper),
+                    "({x}, {y}) is paper in the second"
+                );
+                assert_eq!(
+                    first.get(x, y + 2),
+                    Some(paper),
+                    "({x}, {y}) is paper in the first"
+                );
+            }
         }
     }
 }
