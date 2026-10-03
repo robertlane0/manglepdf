@@ -28,7 +28,7 @@ use crate::image::{self, Raster};
 use crate::shading::{self, Shading};
 use crate::{
     ClipRegion, ClipShape, Device, FillRule, Image, LineCap, LineJoin, Polygon, Rect, StrokeStyle,
-    Viewport, transform_path,
+    Subpath, Viewport, transform_path,
 };
 
 /// The furthest a page may be scaled from its printed size.
@@ -1441,7 +1441,15 @@ pub fn line_style_of(cap: mangle_content::LineCap, join: mangle_content::LineJoi
 #[must_use]
 pub fn rect_polygon(x0: f64, y0: f64, x1: f64, y1: f64) -> Polygon {
     Polygon {
-        subpaths: vec![vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]],
+        // Closed, because a rectangle's border is a ring: a stroked rectangle is an outline
+        // with a hole in it rather than a loop of ink.
+        subpaths: vec![Subpath::closed(vec![
+            (x0, y0),
+            (x1, y0),
+            (x1, y1),
+            (x0, y1),
+            (x0, y0),
+        ])],
     }
 }
 

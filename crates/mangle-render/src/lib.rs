@@ -200,18 +200,54 @@ pub fn cubic_at(
     )
 }
 
+/// One subpath of a path: its points in device space, and whether it was closed.
+///
+/// Whether a subpath is closed is not a question its points can answer. A path that draws back
+/// to exactly where it started without a `closepath` operator is **open**: it has two ends, and
+/// it is stroked with caps at both of them rather than as a ring. So the operator is carried
+/// here, from the segment list that had it, rather than guessed from the coordinates — which is
+/// also the only way a stroked `L` can come out without a band across the gap.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Subpath {
+    /// The points, with no repeated closing point: a ring's closing edge is the one from the
+    /// last point back to the first.
+    pub points: Vec<(f64, f64)>,
+    /// Did a `closepath` operator end this subpath?
+    pub closed: bool,
+}
+
+impl Subpath {
+    /// An open subpath, which is every one a path does not close.
+    #[must_use]
+    pub fn open(points: Vec<(f64, f64)>) -> Self {
+        Self {
+            points,
+            closed: false,
+        }
+    }
+
+    /// A closed subpath, which is every one a `closepath` operator ends.
+    #[must_use]
+    pub fn closed(points: Vec<(f64, f64)>) -> Self {
+        Self {
+            points,
+            closed: true,
+        }
+    }
+}
+
 /// A flattened path: subpaths of points, in device space.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Polygon {
-    /// Each subpath's points, without a repeated closing point.
-    pub subpaths: Vec<Vec<(f64, f64)>>,
+    /// The subpaths, each carrying whether a `closepath` operator ended it.
+    pub subpaths: Vec<Subpath>,
 }
 
 impl Polygon {
     /// Is there anything here?
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.subpaths.iter().all(|s| s.len() < 2)
+        self.subpaths.iter().all(|s| s.points.len() < 2)
     }
 
     /// The edges, with the winding each contributes.
@@ -219,18 +255,20 @@ impl Polygon {
     pub fn edges(&self) -> Vec<Edge> {
         let mut out = Vec::new();
         for sub in &self.subpaths {
-            if sub.len() < 2 {
+            if sub.points.len() < 2 {
                 continue;
             }
-            for pair in sub.windows(2) {
+            for pair in sub.points.windows(2) {
                 let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
                     continue;
                 };
                 out.push(Edge::new(a.0, a.1, b.0, b.1));
             }
-            // A subpath that was not explicitly closed is closed implicitly, which is
-            // what the fill operators do and what a fill rule depends on.
-            if let (Some(first), Some(last)) = (sub.first(), sub.last())
+            // Every subpath is closed implicitly, whether a `closepath` operator said so or
+            // not, because that is what the fill operators do and what a fill rule depends
+            // on. The flag on the subpath is about *stroking* it, which is a different
+            // question, and it is answered there.
+            if let (Some(first), Some(last)) = (sub.points.first(), sub.points.last())
                 && (first.0 != last.0 || first.1 != last.1)
             {
                 out.push(Edge::new(last.0, last.1, first.0, first.1));
@@ -254,16 +292,16 @@ impl Polygon {
     pub fn signed_area(&self) -> f64 {
         self.subpaths
             .iter()
-            .filter(|s| s.len() >= 3)
+            .filter(|s| s.points.len() >= 3)
             .map(|sub| {
                 let mut total = 0.0;
-                for pair in sub.windows(2) {
+                for pair in sub.points.windows(2) {
                     if let (Some(a), Some(b)) = (pair.first(), pair.get(1)) {
                         total += a.0 * b.1 - b.0 * a.1;
                     }
                 }
                 // Close the loop.
-                if let (Some(first), Some(last)) = (sub.first(), sub.last()) {
+                if let (Some(first), Some(last)) = (sub.points.first(), sub.points.last()) {
                     total += last.0 * first.1 - first.0 * last.1;
                 }
                 total * 0.5
@@ -283,8 +321,13 @@ impl Polygon {
         for sub in &self.subpaths {
             // Each subpath is closed implicitly: the segment from the last point back to
             // the first is what makes a square a square rather than three sides of one.
-            let closing = sub.last().zip(sub.first()).map(|(&a, &b)| (a, b));
+            let closing = sub
+                .points
+                .last()
+                .zip(sub.points.first())
+                .map(|(&a, &b)| (a, b));
             let segments = sub
+                .points
                 .windows(2)
                 .filter_map(|w| Some((*w.first()?, *w.get(1)?)))
                 .chain(closing);
@@ -318,20 +361,21 @@ impl Polygon {
 ///
 /// Curves are flattened here, with the control points transformed first so the segment
 /// count reflects the device-space error rather than the user-space one.
+///
+/// A `closepath` operator is recorded as a flag on the subpath rather than as a repeated
+/// first point. Repeating it says nothing the stroker can use: a path that draws back to where
+/// it started without one has the same points and is still open, and it gets caps rather than a
+/// ring. Repeating the point would also leave a subpath looking closed to every reader.
 #[must_use]
 pub fn transform_path(segments: &[PathSegment], to_device: &mangle_content::Matrix) -> Polygon {
-    let mut subpaths: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut subpaths: Vec<Subpath> = Vec::new();
     let mut current: Vec<(f64, f64)> = Vec::new();
     let mut cursor = (0.0, 0.0);
 
     for segment in segments {
         match *segment {
             PathSegment::Move(x, y) => {
-                if current.len() > 1 {
-                    subpaths.push(std::mem::take(&mut current));
-                } else {
-                    current.clear();
-                }
+                take(&mut subpaths, &mut current, false);
                 cursor = to_device.apply(x, y);
                 current.push(cursor);
             }
@@ -347,28 +391,32 @@ pub fn transform_path(segments: &[PathSegment], to_device: &mangle_content::Matr
                 cursor = end;
             }
             PathSegment::Close => {
-                if let Some(first) = current.first().copied() {
-                    current.push(first);
-                }
-                if current.len() > 1 {
-                    subpaths.push(std::mem::take(&mut current));
-                } else {
-                    current.clear();
-                }
+                take(&mut subpaths, &mut current, true);
+                // The current point after a `closepath` is the subpath's starting point.
                 cursor = first_of(&subpaths);
             }
         }
     }
-    if current.len() > 1 {
-        subpaths.push(current);
-    }
+    take(&mut subpaths, &mut current, false);
     Polygon { subpaths }
 }
 
-fn first_of(subpaths: &[Vec<(f64, f64)>]) -> (f64, f64) {
+/// End the subpath being built, if it has enough points to be one.
+fn take(subpaths: &mut Vec<Subpath>, current: &mut Vec<(f64, f64)>, closed: bool) {
+    if current.len() > 1 {
+        subpaths.push(Subpath {
+            points: std::mem::take(current),
+            closed,
+        });
+    } else {
+        current.clear();
+    }
+}
+
+fn first_of(subpaths: &[Subpath]) -> (f64, f64) {
     subpaths
         .last()
-        .and_then(|s| s.first().copied())
+        .and_then(|s| s.points.first().copied())
         .unwrap_or((0.0, 0.0))
 }
 
@@ -554,24 +602,32 @@ impl Default for StrokeStyle {
 /// path offset by that distance on both sides and joined at the corners. The offset is
 /// computed per segment and the joins are added explicitly, which is how a stroked path
 /// is built without needing a full offset-curve algorithm.
+///
+/// `closed` is the subpath's own flag — whether a `closepath` operator ended it — and not
+/// something read off the points. It decides everything about the shape here: an open path
+/// is one outline with a cap at each end, and a closed one is a ring with an inner boundary.
+/// A path that draws back to where it started without the operator is open, so it is capped
+/// and has no ink along the segment back.
 #[must_use]
-pub fn stroke_outline(points: &[(f64, f64)], style: &StrokeStyle) -> Polygon {
+pub fn stroke_outline(points: &[(f64, f64)], closed: bool, style: &StrokeStyle) -> Polygon {
     let half = (style.width / 2.0).abs();
     if half <= 0.0 || points.len() < 2 {
         return Polygon::default();
     }
 
-    // Whether the path comes back to where it started. A closed path's stroke is a *ring*,
-    // and a ring has an inner boundary: drawing it as one loop would enclose the middle
-    // and fill it, which is the difference between a stroked rectangle and a solid one.
-    let closed = points
-        .first()
-        .zip(points.last())
-        .is_some_and(|(a, b)| a.0 == b.0 && a.1 == b.1)
-        && points.len() > 2;
-    // A closed path's last point repeats its first, and offsetting it again would close
-    // the loop twice over.
-    let path: &[(f64, f64)] = if closed {
+    // Whether this is a ring. A closed path's stroke is a *ring*, and a ring has an inner
+    // boundary: drawing it as one loop would enclose the middle and fill it, which is the
+    // difference between a stroked rectangle and a solid one.
+    let ring = closed && points.len() > 2;
+    // A ring's closing edge is the one from the last point back to the first, so it is not
+    // in `points`. A caller that spelled the closing point out anyway — which is how a
+    // dashed walk walks the seam — has it as a repeated point here, and a repeated point has
+    // no direction to offset along, so it goes.
+    let path: &[(f64, f64)] = if ring
+        && points
+            .first()
+            .is_some_and(|f| points.last().is_some_and(|l| f.0 == l.0 && f.1 == l.1))
+    {
         match points.get(..points.len().saturating_sub(1)) {
             Some(trimmed) => trimmed,
             None => return Polygon::default(),
@@ -583,16 +639,20 @@ pub fn stroke_outline(points: &[(f64, f64)], style: &StrokeStyle) -> Polygon {
         return Polygon::default();
     }
 
-    let offsets = offset_sides(path, half, style, closed);
-    let mut subpaths = Vec::new();
-    if closed {
+    let offsets = offset_sides(path, half, style, ring);
+    let mut subpaths: Vec<Subpath> = Vec::new();
+    if ring {
         // The outer boundary and the inner one, wound opposite ways, so the non-zero rule
         // leaves the middle empty.
         let (left, right) = offsets;
-        subpaths.push(loop_with_joins(&left, path, style, half, true));
+        subpaths.push(Subpath::closed(loop_with_joins(
+            &left, path, style, half, true,
+        )));
         let mut inner = right;
         inner.reverse();
-        subpaths.push(loop_with_joins(&inner, path, style, half, false));
+        subpaths.push(Subpath::closed(loop_with_joins(
+            &inner, path, style, half, false,
+        )));
     } else {
         let (left, right) = offsets;
         let mut outline = left;
@@ -619,7 +679,7 @@ pub fn stroke_outline(points: &[(f64, f64)], style: &StrokeStyle) -> Polygon {
             false,
         );
         add_joins(&mut outline, path, style, half, false);
-        subpaths.push(outline);
+        subpaths.push(Subpath::open(outline));
     }
     Polygon { subpaths }
 }
@@ -1277,18 +1337,24 @@ impl Device {
         let pairs = dash_pairs(&style.dash);
         let mut out = Vec::new();
         for subpath in &polygon.subpaths {
-            let closed: Vec<(f64, f64)> = if subpath.len() > 2 {
-                let mut c = subpath.clone();
-                if let (Some(first), Some(last)) = (c.first().copied(), c.last().copied())
-                    && (first.0 != last.0 || first.1 != last.1)
-                {
-                    c.push(first);
+            // Whether the subpath was closed is the flag a `closepath` operator set, and it
+            // is the whole of what an open path and a ring differ by: an open subpath is
+            // stroked with caps at its two ends and gets no stroke along a segment back, a
+            // closed one is a ring. It is not read off the points, because a subpath that
+            // draws back to where it started has the same points and is still open.
+            let closed = subpath.closed;
+            // A ring's edges include the one from its last point back to its first, and the
+            // walk is over a list of points, so that point goes on the end for the walk.
+            let walk: Vec<(f64, f64)> = if closed && subpath.points.len() > 2 {
+                let mut walk = subpath.points.clone();
+                if let Some(first) = walk.first().copied() {
+                    walk.push(first);
                 }
-                c
+                walk
             } else {
-                subpath.clone()
+                subpath.points.clone()
             };
-            if closed.len() < 2 {
+            if walk.len() < 2 {
                 continue;
             }
             let mut outline = Polygon::default();
@@ -1296,11 +1362,14 @@ impl Device {
             // which; drawing the off runs as well fills the gaps back in and turns every
             // pattern into a solid line, which is why a dashed line's length was once
             // measured as the whole line. A gap is not a thinner stroke, it is no stroke.
-            walk_dashes(&closed, &pairs, style.dash.phase, |on, run| {
+            walk_dashes(&walk, &pairs, style.dash.phase, |on, run| {
                 if !on {
                     return;
                 }
-                let piece = stroke_outline(run, style);
+                // A dash run has ends, so it is stroked as an open path however it was
+                // drawn; only a run that covers the whole of a closed subpath is a ring,
+                // because that is the one whose ends meet and are not ends at all.
+                let piece = stroke_outline(run, closed && run.len() == walk.len(), style);
                 outline.subpaths.extend(piece.subpaths);
             });
             if !outline.is_empty() {
@@ -1333,16 +1402,34 @@ mod tests {
 
     fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Polygon {
         Polygon {
-            subpaths: vec![vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]],
+            subpaths: vec![Subpath::closed(vec![
+                (x0, y0),
+                (x1, y0),
+                (x1, y1),
+                (x0, y1),
+                (x0, y0),
+            ])],
         }
     }
 
     fn hole_ring() -> Polygon {
         Polygon {
             subpaths: vec![
-                vec![(0.0, 0.0), (8.0, 0.0), (8.0, 8.0), (0.0, 8.0), (0.0, 0.0)],
+                Subpath::closed(vec![
+                    (0.0, 0.0),
+                    (8.0, 0.0),
+                    (8.0, 8.0),
+                    (0.0, 8.0),
+                    (0.0, 0.0),
+                ]),
                 // The other way round, which is what makes a hole under the non-zero rule.
-                vec![(2.0, 2.0), (2.0, 6.0), (6.0, 6.0), (6.0, 2.0), (2.0, 2.0)],
+                Subpath::closed(vec![
+                    (2.0, 2.0),
+                    (2.0, 6.0),
+                    (6.0, 6.0),
+                    (6.0, 2.0),
+                    (2.0, 2.0),
+                ]),
             ],
         }
     }
@@ -1399,9 +1486,10 @@ mod tests {
 
     #[test]
     fn an_open_polygon_still_encloses_when_filled() {
-        // Three sides: a fill closes it, which is what the fill operators do.
+        // Three sides: a fill closes it, which is what the fill operators do — so the flag
+        // on the subpath, which is about stroking, changes nothing here.
         let p = Polygon {
-            subpaths: vec![vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0)]],
+            subpaths: vec![Subpath::open(vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0)])],
         };
         assert_eq!(p.edges().len(), 3, "the closing edge is implicit");
         assert!(p.contains(3.0, 1.0, FillRule::NonZero), "inside");
@@ -1438,8 +1526,20 @@ mod tests {
     fn the_two_rules_disagree_about_same_wound_sub_paths() {
         let nested = Polygon {
             subpaths: vec![
-                vec![(0.0, 0.0), (8.0, 0.0), (8.0, 8.0), (0.0, 8.0), (0.0, 0.0)],
-                vec![(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.0, 2.0)],
+                Subpath::closed(vec![
+                    (0.0, 0.0),
+                    (8.0, 0.0),
+                    (8.0, 8.0),
+                    (0.0, 8.0),
+                    (0.0, 0.0),
+                ]),
+                Subpath::closed(vec![
+                    (2.0, 2.0),
+                    (6.0, 2.0),
+                    (6.0, 6.0),
+                    (2.0, 6.0),
+                    (2.0, 2.0),
+                ]),
             ],
         };
         let non_zero = rasterise(&nested.edges(), clip(10.0, 10.0), FillRule::NonZero);
@@ -1466,7 +1566,13 @@ mod tests {
         let filled = Polygon {
             subpaths: vec![
                 hole.subpaths[0].clone(),
-                vec![(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.0, 2.0)],
+                Subpath::closed(vec![
+                    (2.0, 2.0),
+                    (6.0, 2.0),
+                    (6.0, 6.0),
+                    (2.0, 6.0),
+                    (2.0, 2.0),
+                ]),
             ],
         };
         let cov = rasterise(&filled.edges(), clip(10.0, 10.0), FillRule::NonZero);
@@ -1509,6 +1615,56 @@ mod tests {
         assert_eq!((b.x0, b.y0, b.x1, b.y1), (5.0, 5.0, 25.0, 25.0));
     }
 
+    /// A `closepath` operator survives the conversion to a polygon, which is the only place it can
+    /// be lost.
+    ///
+    /// Three paths with the same corners: an `L` that stops, one that comes back with a `h` and one
+    /// that comes back with a `l`. The last two have a last point equal to their first, so nothing
+    /// about their coordinates can say which of them is a ring — and a stroker that asks rather than
+    /// being told calls both of them rings, which is how a stroked `L` came out with a band across
+    /// the gap and no caps at either end.
+    #[test]
+    fn a_closepath_is_carried_through_to_the_polygon() {
+        let l_shape = [
+            PathSegment::Move(20.0, 20.0),
+            PathSegment::Line(80.0, 20.0),
+            PathSegment::Line(80.0, 80.0),
+        ];
+        let with_h = [l_shape[0], l_shape[1], l_shape[2], PathSegment::Close];
+        let back_with_a_line = [
+            l_shape[0],
+            l_shape[1],
+            l_shape[2],
+            PathSegment::Line(20.0, 20.0),
+        ];
+        let m = Matrix::IDENTITY;
+        let open = transform_path(&l_shape, &m);
+        let ring = transform_path(&with_h, &m);
+        let coincident = transform_path(&back_with_a_line, &m);
+
+        assert_eq!(open.subpaths.len(), 1);
+        assert!(!open.subpaths[0].closed, "the path stops, so it is open");
+        assert!(ring.subpaths[0].closed, "the `h` closed it");
+        assert!(
+            !coincident.subpaths[0].closed,
+            "and a path that gets back to its start without the operator is still open, however \
+             equal the two points are"
+        );
+        assert_eq!(
+            coincident.subpaths[0].points.last().copied(),
+            coincident.subpaths[0].points.first().copied(),
+            "which is the whole problem: the coordinates really do coincide"
+        );
+        // A `h` adds an edge and not a point: the closing edge is from the last point back to
+        // the first, and it is in `edges()` for a fill and in the stroker's seam for a stroke.
+        assert_eq!(ring.subpaths[0].points.len(), 3);
+        assert_eq!(
+            ring.edges().len(),
+            open.edges().len(),
+            "and a fill closes both of them the same way"
+        );
+    }
+
     #[test]
     fn a_curve_is_transformed_before_it_is_flattened() {
         // A quarter turn: a curve along the x axis becomes one along the y axis. If the
@@ -1520,7 +1676,10 @@ mod tests {
         ];
         let flat = transform_path(&segments, &Matrix::IDENTITY);
         let turned = transform_path(&segments, &Matrix::rotate(90.0));
-        assert_eq!(flat.subpaths[0].len(), turned.subpaths[0].len());
+        assert_eq!(
+            flat.subpaths[0].points.len(),
+            turned.subpaths[0].points.len()
+        );
         let b = turned.bounds().expect("bounds");
         assert!(near(b.x0, -30.0) && near(b.x1, 0.0), "got {b:?}");
     }
@@ -1532,7 +1691,7 @@ mod tests {
             width: 4.0,
             ..StrokeStyle::default()
         };
-        let outline = stroke_outline(&points, &style);
+        let outline = stroke_outline(&points, false, &style);
         let b = outline.bounds().expect("bounds");
         assert!(
             near(b.y0, -2.0) && near(b.y1, 2.0),
@@ -1547,15 +1706,16 @@ mod tests {
             width: 0.0,
             ..StrokeStyle::default()
         };
-        assert!(stroke_outline(&[(0.0, 0.0), (10.0, 0.0)], &style).is_empty());
+        assert!(stroke_outline(&[(0.0, 0.0), (10.0, 0.0)], false, &style).is_empty());
     }
 
     #[test]
     fn a_butt_cap_stops_at_the_end_and_a_square_cap_does_not() {
         let points = [(0.0, 0.0), (10.0, 0.0)];
-        let butt = stroke_outline(&points, &StrokeStyle::default());
+        let butt = stroke_outline(&points, false, &StrokeStyle::default());
         let square = stroke_outline(
             &points,
+            false,
             &StrokeStyle {
                 width: 2.0,
                 cap: LineCap::Square,
@@ -1580,6 +1740,7 @@ mod tests {
         let points = [(0.0, 0.0), (10.0, 0.0), (0.1, 0.0)];
         let outline = stroke_outline(
             &points,
+            false,
             &StrokeStyle {
                 width: 2.0,
                 miter_limit: 1.0,
@@ -1598,6 +1759,7 @@ mod tests {
         let points = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
         let mut outline = stroke_outline(
             &points,
+            false,
             &StrokeStyle {
                 width: 2.0,
                 miter_limit: 10.0,
@@ -1612,6 +1774,66 @@ mod tests {
         );
         outline.subpaths.clear();
         assert!(outline.is_empty());
+    }
+
+    /// An open subpath is stroked as an open path, and the same three points closed as a ring.
+    ///
+    /// The outline says it more plainly than a count of inked pixels can: an open path's stroke
+    /// is **one** subpath with a cap at each end, and a ring's is **two** — the outer boundary
+    /// and the inner one, wound opposite ways so the middle is left empty. Both of these have
+    /// the same area to within a cap, so an ink count cannot tell them apart; the shape of the
+    /// outline can, and this is the level at which the closed flag has to have arrived.
+    #[test]
+    fn an_open_subpath_is_one_outline_and_a_ring_is_two() {
+        let device = paper(120, 120);
+        let style = StrokeStyle {
+            width: 6.0,
+            ..StrokeStyle::default()
+        };
+        let l_shape = vec![(20.0, 20.0), (80.0, 20.0), (80.0, 80.0)];
+        let open = device.stroke_outline(
+            &Polygon {
+                subpaths: vec![Subpath::open(l_shape.clone())],
+            },
+            &style,
+        );
+        let ring = device.stroke_outline(
+            &Polygon {
+                subpaths: vec![Subpath::closed(l_shape)],
+            },
+            &style,
+        );
+        assert_eq!(open.len(), 1, "one subpath stroked is one shape");
+        assert_eq!(ring.len(), 1, "and one ring is one shape too");
+        assert_eq!(
+            open[0].subpaths.len(),
+            1,
+            "an open path's stroke is one outline, capped at both ends and with no stroke along \
+             a segment back: {:?}",
+            open[0].subpaths
+        );
+        assert_eq!(
+            ring[0].subpaths.len(),
+            2,
+            "a ring's stroke is its outer boundary and its inner one: {:?}",
+            ring[0].subpaths
+        );
+        // And where the ink is. An open path's stroke stays inside the path's own box grown by
+        // half the width, because every point of it is within that distance of the path. The
+        // ring's does not: its corners at (20, 20) and (80, 80) are corners of a closed shape
+        // and mitre out past the box on either side, to (12.76, 17) and (83, 87.24). Those are
+        // the spikes a stroked `L` was drawing across the gap it was never given.
+        let b = open[0].bounds().expect("open bounds");
+        assert!(
+            b.x0 >= 17.0 && b.y0 >= 17.0 && b.x1 <= 83.0 && b.y1 <= 83.0,
+            "an open stroke reaches half the width past the path and no further: {b:?}"
+        );
+        let r = ring[0].bounds().expect("ring bounds");
+        assert!(
+            r.x0 < 17.0 && r.y1 > 83.0,
+            "the ring mitres its corners out past the box on both sides, which the open path \
+             does not: {r:?}"
+        );
     }
 
     #[test]
@@ -1722,7 +1944,7 @@ mod tests {
             ..StrokeStyle::default()
         };
         let line = Polygon {
-            subpaths: vec![vec![(10.0, 50.0), (30.0, 50.0)]],
+            subpaths: vec![Subpath::open(vec![(10.0, 50.0), (30.0, 50.0)])],
         };
         let mut device = paper(60, 100);
         device.stroke_polygon(&line, &style, BLACK);
@@ -1908,7 +2130,7 @@ mod tests {
         // apart.
         let mut device = paper(100, 100);
         let clip = Polygon {
-            subpaths: vec![vec![(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)]],
+            subpaths: vec![Subpath::open(vec![(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)])],
         };
         device.clip_to_path(&clip, FillRule::NonZero);
         device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
@@ -2175,7 +2397,7 @@ mod tests {
         let mut device = paper(100, 100);
         device.clip_to_path(
             &Polygon {
-                subpaths: vec![vec![(0.0, 0.0), (30.0, 0.0), (0.0, 30.0)]],
+                subpaths: vec![Subpath::open(vec![(0.0, 0.0), (30.0, 0.0), (0.0, 30.0)])],
             },
             FillRule::NonZero,
         );
@@ -2220,7 +2442,7 @@ mod tests {
     fn stroking_a_line_draws_along_it_and_not_beside_it() {
         let mut device = Device::new(Image::filled(40, 40, [255, 255, 255, 255]));
         let line = Polygon {
-            subpaths: vec![vec![(5.0, 20.0), (35.0, 20.0)]],
+            subpaths: vec![Subpath::open(vec![(5.0, 20.0), (35.0, 20.0)])],
         };
         device.stroke_polygon(
             &line,

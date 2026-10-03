@@ -4409,6 +4409,319 @@ fn a_cap_lands_at_the_ends_of_a_negatively_drawn_path() {
     }
 }
 
+/// The reproduction for
+/// [D14](#d14--an-open-path-of-three-or-more-points-is-stroked-as-a-closed-ring): an `L` drawn
+/// with two segments and no `h`.
+///
+/// A hundred point page, a six point stroke, butt caps, and the path `20 20 m 80 20 l 80 80 l
+/// S`. The two bars are the whole of what the file asks for. The band this test is about is the
+/// one segment it does **not** have — the diagonal from `(80, 80)` back to `(20, 20)` — so every
+/// pixel whose centre lies on that diagonal is ink nobody asked for, and the samples are the
+/// centres, not "less ink than before": a stroke along that diagonal covers them whole.
+///
+/// The two ends are capped too, and a butt cap stops at the endpoint, so one pixel beyond each
+/// of them is paper.
+#[test]
+fn an_open_path_of_three_points_is_not_stroked_as_a_ring() {
+    let r = render(
+        page_with("0 0 0 RG 6 w 0 J 20 20 m 80 20 l 80 80 l S", 100),
+        1.0,
+    );
+    assert!(
+        r.notes.is_empty(),
+        "the path should draw without complaint: {:?}",
+        r.notes
+    );
+    for (x, y) in [(50, 20), (80, 50)] {
+        assert!(
+            on_page(&r.image, x, y) >= 128,
+            "({}, {}) is the middle of a bar the path does ask for, so it is ink (pixel {})",
+            x,
+            y,
+            on_page(&r.image, x, y)
+        );
+    }
+    for d in [30, 40, 50, 60, 70] {
+        assert!(
+            on_page(&r.image, d, d) < 128,
+            "({}, {}) is on the diagonal from (80, 80) back to (20, 20), and this path has no \
+             such segment: a band across it is ink the file never asked for (pixel {})",
+            d,
+            d,
+            on_page(&r.image, d, d)
+        );
+    }
+    for (x, y) in [(19, 20), (80, 81)] {
+        assert!(
+            on_page(&r.image, x, y) < 128,
+            "({}, {}) is one pixel beyond an end of the path, and a butt cap stops at the \
+             endpoint (pixel {})",
+            x,
+            y,
+            on_page(&r.image, x, y)
+        );
+    }
+}
+
+/// The same coordinates with a `h`, which is the half of the pair that a heuristic cannot get.
+///
+/// Nothing else about the two renderings differs: same points, same stroke, same operators but
+/// for the `h`. So the pixels on the diagonal are the *only* thing that can tell carrying the
+/// subpath's closed flag from reading it off its coordinates — and reading it off the
+/// coordinates is what these coordinates are chosen to expose.
+///
+/// A triangle ring is mitred at each of its three corners, and the mitre at `(80, 20)` reaches
+/// `(77, 17)`: three points out on each axis, because a right angle's bisector is at forty-five
+/// degrees. That corner is ink on the ring and paper on the open path.
+#[test]
+fn a_closepath_on_the_same_path_draws_the_triangle() {
+    let open = render(
+        page_with("0 0 0 RG 6 w 0 J 20 20 m 80 20 l 80 80 l S", 100),
+        1.0,
+    );
+    let ring = render(
+        page_with("0 0 0 RG 6 w 0 J 20 20 m 80 20 l 80 80 l h S", 100),
+        1.0,
+    );
+    assert!(
+        ring.notes.is_empty() && open.notes.is_empty(),
+        "both paths should draw without complaint: {:?} {:?}",
+        ring.notes,
+        open.notes
+    );
+    for (x, y) in [(50, 20), (80, 50), (77, 17)] {
+        assert!(
+            on_page(&ring.image, x, y) >= 128,
+            "({}, {}) is on the ring the `h` asks for, so it is ink (pixel {})",
+            x,
+            y,
+            on_page(&ring.image, x, y)
+        );
+    }
+    for d in [30, 40, 50, 60, 70] {
+        assert!(
+            on_page(&ring.image, d, d) >= 128,
+            "({}, {}) is on the closing edge the `h` asks for, so it is ink (pixel {})",
+            d,
+            d,
+            on_page(&ring.image, d, d)
+        );
+        assert!(
+            on_page(&open.image, d, d) < 128,
+            "({}, {}) is on the same diagonal, and without the `h` it is not part of the path \
+             at all: one operator is the whole difference between ink and paper here (pixel {} \
+             with, {} without)",
+            d,
+            d,
+            on_page(&ring.image, d, d),
+            on_page(&open.image, d, d)
+        );
+    }
+}
+
+/// A ring of four points with a `h`, which is the common case and must not change.
+///
+/// This one is a guard rather than a reproduction: it passes on the code with
+/// [D14](#d14--an-open-path-of-three-or-more-points-is-stroked-as-a-closed-ring) in it and on
+/// the code without, because a stroked ring is a ring either way. What it pins is that the flag
+/// is *carried* rather than inferred from the last point equalling the first — this subpath's
+/// last point is its first and it is closed — and that a ring's stroke is an annulus: the
+/// middle of the square is paper, and drawing it as one loop would fill it.
+#[test]
+fn a_ring_of_four_points_is_stroked_as_a_ring() {
+    let r = render(
+        page_with("0 0 0 RG 6 w 25 25 m 75 25 l 75 75 l 25 75 l h S", 100),
+        1.0,
+    );
+    assert!(
+        r.notes.is_empty(),
+        "the ring should draw without complaint: {:?}",
+        r.notes
+    );
+    for (x, y) in [(50, 25), (50, 75), (25, 50), (75, 50)] {
+        assert!(
+            on_page(&r.image, x, y) >= 128,
+            "({}, {}) is the middle of a side of the square, so it is ink (pixel {})",
+            x,
+            y,
+            on_page(&r.image, x, y)
+        );
+    }
+    assert!(
+        on_page(&r.image, 50, 50) < 128,
+        "the middle of a stroked ring is paper, and a ring filled as one loop would be a solid \
+         square (pixel {})",
+        on_page(&r.image, 50, 50)
+    );
+    assert!(
+        on_page(&r.image, 22, 22) >= 128,
+        "(22, 22) is the mitre at the corner (25, 25), which reaches three points out on each \
+         axis, so a ring whose corners are not joined leaves it as paper (pixel {})",
+        on_page(&r.image, 22, 22)
+    );
+}
+
+/// A subpath that draws back to where it started is open unless it says otherwise.
+///
+/// `20 20 m 80 20 l 80 80 l 20 20 l S` and `20 20 m 80 20 l 80 80 l h S` are the same three
+/// edges — the third one runs to `(20, 20)` either way — and they are not the same drawing. The
+/// first has two ends that meet at a point, and it is capped at both of them; the second is a
+/// ring, and it is mitred at the vertex they share.
+///
+/// The sample is that mitre. The outer boundary there is the two edges' offset lines — `y = 17`
+/// and `x + y = 35.76`, three points out from each — meeting at `(12.76, 17)`, so the pixel at
+/// page `(18, 19)` is inside the ring's stroke, every square inch of it. The open path has
+/// nothing there: its two butt caps are the planes `x = 20` and `x + y = 40`, and the pixel is
+/// outside both. A renderer that asked "does the last point equal the first?" calls this a ring
+/// and gets it wrong, which is the whole reason the flag is carried rather than guessed.
+#[test]
+fn a_path_that_returns_to_its_start_without_closepath_is_open() {
+    let open = render(
+        page_with("0 0 0 RG 6 w 0 J 20 20 m 80 20 l 80 80 l 20 20 l S", 100),
+        1.0,
+    );
+    let ring = render(
+        page_with("0 0 0 RG 6 w 0 J 20 20 m 80 20 l 80 80 l h S", 100),
+        1.0,
+    );
+    assert!(
+        open.notes.is_empty() && ring.notes.is_empty(),
+        "both paths should draw without complaint: {:?} {:?}",
+        open.notes,
+        ring.notes
+    );
+    for (x, y) in [(50, 20), (80, 50), (50, 50)] {
+        assert!(
+            on_page(&open.image, x, y) >= 128,
+            "({}, {}) is on one of the three edges, which both drawings have, so it is ink \
+             either way (pixel {})",
+            x,
+            y,
+            on_page(&open.image, x, y)
+        );
+    }
+    assert!(
+        on_page(&open.image, 18, 19) < 128,
+        "(18, 19) is inside the mitre at (20, 20), which a ring has and an open path does not: \
+         its two butt caps are the planes x = 20 and x + y = 40, and this pixel is outside both \
+         (pixel {})",
+        on_page(&open.image, 18, 19)
+    );
+    assert!(
+        on_page(&ring.image, 18, 19) >= 128,
+        "the same pixel is ink on the ring, whose mitre at (20, 20) reaches (12.76, 17): one \
+         operator, the same coordinates, the opposite answer (pixel {})",
+        on_page(&ring.image, 18, 19)
+    );
+    // And the two ends are capped rather than joined, which at a shared vertex means a round
+    // cap painted at that point and nothing a pixel further out than three.
+    let round = render(
+        page_with("0 0 0 RG 6 w 2 J 20 20 m 80 20 l 80 80 l 20 20 l S", 100),
+        1.0,
+    );
+    assert!(
+        on_page(&round.image, 19, 19) >= 128,
+        "with a round cap, (19, 19) is inside the three point disc at (20, 20), so the two ends \
+         that share that vertex are capped (pixel {})",
+        on_page(&round.image, 19, 19)
+    );
+    assert!(
+        on_page(&round.image, 18, 16) < 128,
+        "and (18, 16) is 3.8 points from that vertex, which a cap on a six point stroke cannot \
+         reach (pixel {})",
+        on_page(&round.image, 18, 16)
+    );
+}
+
+/// One stroke to check, and what it is expected to put on the page.
+///
+/// The three fields are the cap operator to draw the path with, the samples expected at the
+/// **start** end of the stroke, and the samples expected at its **end** — each sample a page
+/// `(x, y)` and whether that pixel is ink or paper. Naming the two slices is the point: they are
+/// measured against different segments of the same path, so a table that only said "two lists of
+/// points" would hide exactly what the test is about.
+type ExpectedStroke<'a> = (&'a str, &'a [(i64, i64, bool)], &'a [(i64, i64, bool)]);
+
+/// Caps at both ends of an open path of three points, and nowhere else.
+///
+/// The cap half of
+/// [D13](#d13--a-two-point-dash-run-drawn-in-the-negative-x-direction-becomes-a-bowtie) is
+/// about a cap that lands out of the side of the stroke, and it pinned two point paths because
+/// that was all there was to pin. Three points is the case it could not reach — the subpath was
+/// stroked as a ring, so it had no caps at all — which makes it the one worth pinning here.
+///
+/// The reach is arithmetic: a butt cap stops at the endpoint, a projecting cap extends half the
+/// width past it and a round cap draws a half disc of that radius, so on a six point stroke each
+/// of them reaches three points and one pixel beyond three is paper under all three. The last
+/// two samples are about direction: `(84, 50)` is a pixel beside the middle of the vertical bar
+/// and `(85, 85)` is a pixel diagonally past the end of it, and a cap measured against the wrong
+/// segment puts ink in one or both of them.
+#[test]
+fn an_open_path_of_three_points_is_capped_at_both_ends() {
+    let caps: &[ExpectedStroke<'_>] = &[
+        (
+            "0 J",
+            &[(20, 20, true), (19, 20, false)],
+            &[(79, 79, true), (80, 81, false)],
+        ),
+        (
+            "1 J",
+            &[(17, 20, true), (16, 20, false)],
+            &[(80, 82, true), (80, 84, false)],
+        ),
+        (
+            "2 J",
+            &[(19, 19, true), (18, 16, false)],
+            &[(80, 81, true), (80, 84, false)],
+        ),
+    ];
+    for (cap, start, end) in caps {
+        let r = render(
+            page_with(
+                &format!("0 0 0 RG 6 w {cap} 20 20 m 80 20 l 80 80 l S"),
+                100,
+            ),
+            1.0,
+        );
+        assert!(
+            r.notes.is_empty(),
+            "a {cap} path should draw without complaint: {:?}",
+            r.notes
+        );
+        for (x, y, ink) in start.iter().chain(end.iter()) {
+            assert_eq!(
+                on_page(&r.image, *x, *y) >= 128,
+                *ink,
+                "{cap} on an open three point path: page ({x}, {y}) should be {} — the start cap \
+                 is measured against the horizontal bar and the end cap against the vertical \
+                 one, so a cap measured against anything else puts ink beside the stroke or \
+                 misses its own end (pixel {})",
+                if *ink { "ink" } else { "paper" },
+                on_page(&r.image, *x, *y)
+            );
+        }
+        for (x, y) in [(50, 20), (80, 50)] {
+            assert!(
+                on_page(&r.image, x, y) >= 128,
+                "({}, {}) is the middle of a bar the path asks for whatever the cap (pixel {})",
+                x,
+                y,
+                on_page(&r.image, x, y)
+            );
+        }
+        for (x, y) in [(84, 50), (85, 85)] {
+            assert!(
+                on_page(&r.image, x, y) < 128,
+                "({}, {}) is off the side of the vertical bar, beside its middle and past its \
+                 end, and a cap measured against the wrong segment lands there (pixel {})",
+                x,
+                y,
+                on_page(&r.image, x, y)
+            );
+        }
+    }
+}
+
 /// Reversal invariance, over shapes rather than over one of them.
 ///
 /// Each case below is drawn forwards and backwards and compared, and they are written as a loop

@@ -369,7 +369,23 @@ fn accumulate_band(
     if crossings.len() < 2 {
         return;
     }
-    crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Ties — two edges meeting at a vertex that lands on the band's top — are broken by
+    // which of them is leftmost at the band's *bottom*, because that is the order the
+    // span below is built in: `bottom_left` is read off the first crossing' edge. Sorting
+    // on x alone leaves the order to be whichever edge the list happened to hold first,
+    // which makes the coverage depend on the order the outline was walked from rather than
+    // on the outline.
+    crossings.sort_by(|a, b| {
+        let by_top = a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal);
+        let by_bottom = match edges.get(a.2).zip(edges.get(b.2)) {
+            Some((ea, eb)) => ea
+                .x_at(yb)
+                .partial_cmp(&eb.x_at(yb))
+                .unwrap_or(std::cmp::Ordering::Equal),
+            None => std::cmp::Ordering::Equal,
+        };
+        by_top.then(by_bottom)
+    });
 
     // Walk the crossings in pairs. Within a band the ordering is fixed, so the winding
     // at each pair is the same at both ends of the band.
