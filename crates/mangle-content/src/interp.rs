@@ -12,7 +12,8 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use mangle_syntax::object::{Object, Stream};
+use mangle_syntax::object::{Dict, Object, Stream};
+use mangle_syntax::stream::decode_stream;
 
 use crate::matrix::Matrix;
 use crate::ops;
@@ -161,6 +162,16 @@ pub struct Record {
     pub dash: Dash,
     /// The marked-content tag, if the mark was inside a `/BMC` or `/BDC` group.
     pub tag: Option<String>,
+    /// The form XObject this mark was drawn inside, if any.
+    ///
+    /// A form carries its own `/Resources`, and every name in it — `/F1`, `/Im0`, `/Sh0` —
+    /// resolves against those rather than against the page's. This says which table, so a
+    /// consumer can find it without guessing: two forms may each name `/F1` and mean
+    /// different fonts, and a lookup that fell back to the page's table would draw the
+    /// wrong glyphs with no way to see that it had.
+    ///
+    /// `None` is a mark on the page itself, and that is the only thing it means.
+    pub form: Option<String>,
 }
 
 impl Record {
@@ -293,31 +304,52 @@ pub fn run(stream: &ContentStream) -> PageContent {
 
 /// Run a content stream against the page's resources.
 ///
-/// A form XObject is executed with the *form's* resources and the *page's* graphics
-/// state, which is the same call with different arguments, so this is the only entry
-/// point.
+/// The page is itself a nested run: a form XObject's content executes the same way, from a
+/// state that has already had the form's `/Matrix` and `/BBox` applied to it and against
+/// the form's own resources, so [`run_with_state`] is the entry point and this is the call
+/// with the default state.
 #[must_use]
 pub fn run_with(stream: &ContentStream, resources: &crate::Resources) -> PageContent {
+    run_with_state(stream, &GraphicsState::new(), resources)
+}
+
+/// Run a content stream from a given state, against a given set of resources.
+///
+/// A form XObject is executed as though its content were wrapped in `q` … `Q`: it starts in
+/// the state its `/Matrix` and `/BBox` have already been composed into, and the state it
+/// leaves behind is the one it started in. That is why this takes a state rather than
+/// making one, and why the page's own run is the same call with the default.
+#[must_use]
+pub fn run_with_state(
+    stream: &ContentStream,
+    state: &GraphicsState,
+    resources: &crate::Resources,
+) -> PageContent {
     let mut ctx = Context {
-        state: GraphicsState::new(),
+        state: state.clone(),
         stack: StateStack::new(),
         out: PageContent::default(),
         clip_pending: false,
         path_start: None,
         resources,
+        depth: 0,
+        form: None,
+        prior: 0,
     };
-    for op in stream.operations() {
-        ctx.step(&op);
-        if ctx.out.records.len() >= MAX_RECORDS {
-            ctx.out.notes.push(format!(
-                "stopped after {MAX_RECORDS} marks; the rest of this page was not executed"
-            ));
-            break;
-        }
-    }
+    ctx.execute(stream);
     ctx.out.state = ctx.state;
     ctx.out
 }
+
+/// The deepest a form XObject may be executed, counting the page itself as depth zero.
+///
+/// A form that draws itself is a real thing in the wild — a producer that flattened a
+/// template into the page and left the template behind does exactly that, and a chain of
+/// two forms each naming the other is no rarer — and a reader that follows it without a
+/// bound is a stack overflow, which is a crash rather than a note. Twelve is well past any
+/// nesting a file *means*: office output routinely nests three deep and a template library
+/// six.
+pub const MAX_FORM_DEPTH: usize = 12;
 
 struct Context<'a> {
     state: GraphicsState,
@@ -330,11 +362,39 @@ struct Context<'a> {
     /// painting operator, because those are the bytes that have to change together for
     /// the mark to change at all.
     path_start: Option<usize>,
-    /// The page's resource tables, which is where `gs` names are looked up.
+    /// The resource tables the names in this run resolve against: the page's, or a form's
+    /// own while that form is executing.
     resources: &'a crate::Resources,
+    /// How many form XObjects deep this run is. The page is zero.
+    depth: usize,
+    /// The form this run is executing, for the records it produces.
+    form: Option<String>,
+    /// How many records the enclosing runs had already produced, so that the mark limit is
+    /// the page's rather than each run's own.
+    prior: usize,
 }
 
 impl Context<'_> {
+    /// Run the operations of one stream into this context.
+    ///
+    /// One loop for every run — the page's own and each form's — because a form *is* a
+    /// nested content stream and the only things that differ are the state it starts in
+    /// and the resources its names resolve against.
+    fn execute(&mut self, stream: &ContentStream) {
+        for op in stream.operations() {
+            self.step(&op);
+            // The limit is the page's, not this run's: `prior` is what the enclosing runs
+            // had already recorded, so a page that draws one form a thousand times stops
+            // in the same place a page with a thousand paths does.
+            if self.prior + self.out.records.len() >= MAX_RECORDS {
+                self.out.notes.push(format!(
+                    "stopped after {MAX_RECORDS} marks; the rest of this page was not executed"
+                ));
+                break;
+            }
+        }
+    }
+
     /// Execute one operation.
     fn step(&mut self, op: &Operation) {
         let name = op.operator.operator().unwrap_or_default().to_vec();
@@ -362,6 +422,16 @@ impl Context<'_> {
 
         let all: Vec<&Object> = op.operands.iter().map(|t| &t.value).collect();
         let operands = ops::take_last(info, &all);
+        // A form is a nested content stream, not something to paint: executing it is what
+        // this operator means, and the marks it draws are the page's marks. Every other
+        // `Do` falls through to `record_mark`, which is the only thing that knows how to
+        // record one.
+        if name.as_slice() == b"Do"
+            && let Some(named) = operands.first().and_then(|o| o.as_name())
+            && self.do_xobject(named, &op.span)
+        {
+            return;
+        }
         // A path begins at the first operator that puts a point down, not at the
         // operator that ends it.
         if self.path_start.is_none()
@@ -672,6 +742,295 @@ impl Context<'_> {
         target.set(space, nums);
     }
 
+    /// `Do` of an XObject. `true` when this was something the interpreter carried out, so
+    /// that no mark is recorded for it.
+    ///
+    /// The decision is the XObject dictionary's own `/Subtype`, read from the object the
+    /// name resolved to. Three answers, and the third is why the other two cannot be
+    /// guessed: a form is executed here, an image is recorded for a renderer to draw, and
+    /// anything else is **reported by name**. A `/PS` XObject is a real thing in the
+    /// format, and a producer that invents a subtype is rarer but real; executing either
+    /// would draw PostScript as operators, and handing either to an image decoder asks it
+    /// for something that is not an image. Reporting is the only answer that is not a
+    /// blank or a half-drawn shape.
+    ///
+    /// A name the table does not define is not decided here: without the object there is
+    /// no `/Subtype` to read, and the renderer — which holds the document and can name
+    /// what it could not resolve — reports it.
+    fn do_xobject(&mut self, name: &[u8], span: &Range<usize>) -> bool {
+        let Ok(key) = std::str::from_utf8(name) else {
+            return false;
+        };
+        let Some(object) = self.resources.xobjects.get(key) else {
+            return false;
+        };
+        let Some(dict) = crate::xobject_dict(object) else {
+            return false;
+        };
+        if crate::is_form(dict) {
+            self.execute_form(key, object, dict, span);
+            return true;
+        }
+        if let Some(subtype) = dict.get("Subtype").and_then(Object::as_name)
+            && subtype != b"Image"
+        {
+            self.out.notes.push(format!(
+                "the XObject `/{key}` is a `/Subtype /{}`, which is neither an image nor a \
+                 form, so it was not executed",
+                String::from_utf8_lossy(subtype)
+            ));
+            return true;
+        }
+        false
+    }
+
+    /// Execute a form XObject as though its content were wrapped in `q` … `Q`.
+    ///
+    /// Everything the form does is the page's: its marks go into the same records in the
+    /// same order, at the point the `Do` appears, because that is where a painter's-algorithm
+    /// renderer will draw them and no later mark may go underneath. Three things come from
+    /// the form's own dictionary, and all three are applied to the state the form runs in:
+    /// the `/Matrix` composes into the CTM, the `/BBox` clips, and the `/Resources` decide
+    /// what its names resolve against. The state is put back afterwards whatever happened,
+    /// because a form's operators are not allowed to change the page that drew it.
+    ///
+    /// **Depth is bounded, and the bound is where it belongs.** The recursion is here, in
+    /// the run rather than in the stream, so a form that draws itself stops and says so
+    /// instead of exhausting the stack. A name the table does not define is reported by the
+    /// renderer; a form that *is* defined but cannot be executed is reported here, by name,
+    /// because a form this could not run is a finding about the file and a blank patch of
+    /// page is not.
+    fn execute_form(&mut self, name: &str, object: &Object, dict: &Dict, span: &Range<usize>) {
+        if self.depth >= MAX_FORM_DEPTH {
+            self.out.notes.push(format!(
+                "the form XObject `/{name}` is drawn from inside another form more than \
+                 {MAX_FORM_DEPTH} deep, and was not executed"
+            ));
+            return;
+        }
+        let Object::Stream(stream) = object else {
+            self.out.notes.push(format!(
+                "the form XObject `/{name}` is a dictionary rather than a stream, so it has \
+                 no content to execute"
+            ));
+            return;
+        };
+        // The raw bytes are never handed to the interpreter: a compressed stream read as
+        // if it were operators is a page of nonsense, and a page of nonsense is a blank
+        // patch with a plausible-looking reason attached to it.
+        let decoded = decode_stream(stream);
+        if !decoded.complete {
+            if decoded.notes.is_empty() {
+                self.out
+                    .notes
+                    .push(format!("the form XObject `/{name}` did not decode cleanly"));
+            }
+            for note in &decoded.notes {
+                self.out
+                    .notes
+                    .push(format!("the form XObject `/{name}`: {note}"));
+            }
+        }
+        if decoded.encoded {
+            // The bytes are still encoded. Handing them to the operator table would draw
+            // whatever the compressed stream happens to contain as a page, and the notes
+            // above already name the filter and the form.
+            return;
+        }
+        if decoded.data.is_empty() {
+            // A form with no content draws nothing, and that is not a finding: it is what
+            // the file said. The report is for a form this *could not* run.
+            return;
+        }
+        if let Some(matrix) = dict.get("Matrix") {
+            match form_matrix(matrix) {
+                Some(m) => self.state.concat(m),
+                None => self.out.notes.push(format!(
+                    "the form XObject `/{name}` declares a `/Matrix` that is not six numbers, \
+                     so its content was drawn without it"
+                )),
+            }
+        }
+        match form_bbox(dict.get("BBox")) {
+            BBox::Absent => {}
+            BBox::Unreadable => self.out.notes.push(format!(
+                "the form XObject `/{name}` declares a `/BBox` that is not four numbers, so \
+                 its content was not clipped"
+            )),
+            BBox::Inverted(ordered) => {
+                // Reported, and then read as the same box with its corners in order. The
+                // alternative reading — an empty box, and therefore an invisible form — is
+                // a corner-ordering mistake in the file being allowed to delete a page.
+                self.out.notes.push(format!(
+                    "the form XObject `/{name}` declares its `/BBox` the wrong way round, so \
+                     it is read as the same box with its corners in order"
+                ));
+                self.clip_to_box(ordered);
+            }
+            BBox::Box(ordered) => self.clip_to_box(ordered),
+        }
+        // A `W` in force at the `Do` clips the form's execution as well, so it is committed
+        // to the state the form runs in rather than left pending for whatever follows. The
+        // page is still told where its own clip changed, because that is a fact about the
+        // page and not only about the form.
+        if std::mem::take(&mut self.clip_pending) {
+            let next = self.clip_for_path(FillRule::NonZero);
+            self.commit_clip(Some(next));
+            let changed = Mark::ClipChanged(self.state.clip.clone());
+            let record = self.record_for(changed, span.clone());
+            self.push_record(record);
+        }
+        // `Q`: the state as it was before the `/Matrix` and the `/BBox` went in. Copied rather
+        // than moved, because the form's state is derived from it and this run has to get
+        // its own back afterwards.
+        let outer = self.state.clone();
+        let prior = self.prior + self.out.records.len();
+        let depth = self.depth + 1;
+        // The form's own resources where it declares them, and the ones it was drawn
+        // against where it does not: a form with no `/Resources` inherits, and what it
+        // inherits is the table it was *named in*, so a form inside a form inherits that
+        // form's table rather than the page's.
+        let own = self.resources.form_resources(name);
+        let mut inner = Context {
+            state: std::mem::take(&mut self.state),
+            stack: StateStack::new(),
+            out: PageContent::default(),
+            clip_pending: false,
+            path_start: None,
+            resources: own.as_deref().unwrap_or(self.resources),
+            depth,
+            form: Some(name.to_string()),
+            prior,
+        };
+        // The form's execution is a `q`, so its `q`s start one level further in.
+        inner.state.depth = outer.depth + 1;
+        inner.execute(&ContentStream::parse(&decoded.data));
+        self.out.records.append(&mut inner.out.records);
+        self.out
+            .unknown_operators
+            .append(&mut inner.out.unknown_operators);
+        self.out.notes.append(&mut inner.out.notes);
+        self.state = outer;
+        // A `Do` ends the path, as it did when it was a mark, and the bytes that built it
+        // are not the bytes that drew whatever came next.
+        self.state.clear_path();
+        self.path_start = None;
+    }
+
+    /// The clip the path being built sets, and the empty region when it has no path.
+    ///
+    /// The rule is the operator's own: `W f*` clips by the even-odd rule exactly as it
+    /// fills by it.
+    fn clip_for_path(&self, rule: FillRule) -> Clip {
+        if !self.state.has_path() {
+            // A pending `W` with no path is not "no clip". The specification says an empty
+            // path sets the region to the empty one, and until the clip is reset nothing is
+            // drawn.
+            return Clip::empty();
+        }
+        let segments = self.state.device_path();
+        let bounds = bounds_of(&Mark::Path {
+            segments: segments.clone(),
+            fill: None,
+            stroke: None,
+            rule,
+        })
+        .unwrap_or(ClipBounds {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 0.0,
+            y1: 0.0,
+        });
+        Clip::new(bounds, ClipPath { segments, rule })
+    }
+
+    /// Narrow the clip in force by another one.
+    ///
+    /// Two clips nest: the second is intersected with the first rather than replacing it.
+    fn commit_clip(&mut self, next: Option<Clip>) {
+        self.state.clip = match (&self.state.clip, &next) {
+            (Some(existing), Some(next)) => Some(existing.intersect(next)),
+            (Some(existing), None) => Some(existing.clone()),
+            (None, Some(next)) => Some(next.clone()),
+            (None, None) => None,
+        };
+    }
+
+    /// Clip to a box in *this run's* own space, on top of the clip already in force.
+    ///
+    /// A form's `/BBox` is in the form's space, so the four corners go through the CTM the
+    /// form is executing under — the same matrix the path of a `W` operator goes through,
+    /// and for the same reason: a rotation does not map an axis-aligned box to an
+    /// axis-aligned one, so the corners are placed and the result re-bounded.
+    ///
+    /// The clip is a region and not only a box, because that is what every consumer of a
+    /// clip already expects to find, and a box drawn with a region behind it is narrower
+    /// than the page asked for wherever the shape was smaller than its own bounds.
+    fn clip_to_box(&mut self, bounds: ClipBounds) {
+        let ctm = self.state.ctm;
+        let corners = [
+            ctm.apply(bounds.x0, bounds.y0),
+            ctm.apply(bounds.x1, bounds.y0),
+            ctm.apply(bounds.x1, bounds.y1),
+            ctm.apply(bounds.x0, bounds.y1),
+        ];
+        let x0 = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let x1 = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let y0 = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let y1 = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let segments = vec![
+            PathSegment::Move(corners[0].0, corners[0].1),
+            PathSegment::Line(corners[1].0, corners[1].1),
+            PathSegment::Line(corners[2].0, corners[2].1),
+            PathSegment::Line(corners[3].0, corners[3].1),
+            PathSegment::Close,
+        ];
+        let box_clip = Clip::new(
+            ClipBounds { x0, y0, x1, y1 },
+            ClipPath {
+                segments,
+                rule: FillRule::NonZero,
+            },
+        );
+        self.commit_clip(Some(box_clip));
+    }
+
+    /// A record for `mark` at `span`, carrying the state it was drawn in.
+    ///
+    /// Every record is built here so that no mark can exist without the clip in force, the
+    /// alphas and the stroke style that were current for it, and so that every mark knows
+    /// which form it came from.
+    fn record_for(&self, mark: Mark, span: Range<usize>) -> Record {
+        Record {
+            mark,
+            span,
+            ctm: self.state.ctm,
+            clip: self.state.clip.clone(),
+            fill_alpha: self.state.fill_alpha,
+            stroke_alpha: self.state.stroke_alpha,
+            blend_mode: self.state.blend_mode.clone(),
+            device_line_width: self.state.stroke.width * self.state.ctm.mean_scale(),
+            line_cap: self.state.stroke.cap,
+            line_join: self.state.stroke.join,
+            dash: self.state.stroke.dash.clone(),
+            tag: self.out.tags.last().cloned(),
+            form: self.form.clone(),
+        }
+    }
+
+    /// Add a record, at the limit and no further.
+    fn push_record(&mut self, record: Record) {
+        if self.out.records.len() < MAX_RECORDS {
+            self.out.records.push(record);
+        }
+    }
+
     /// `gs`: take the state from a named `/ExtGState` dictionary.
     ///
     /// A name the page's resources do not define is a note, not a silent no-op: the
@@ -704,37 +1063,7 @@ impl Context<'_> {
         // cannot disagree. A box computed from a different path than the one being clipped
         // to is worse than either of them being wrong alone: it is a claim about a shape
         // that is not on the page.
-        //
-        // A pending `W` with no path is not "no clip". The specification says an empty path
-        // sets the region to the empty region, and until the clip is reset nothing is drawn.
-        let clip_path = if clip_pending {
-            if self.state.has_path() {
-                let segments = self.state.device_path();
-                let bounds = bounds_of(&Mark::Path {
-                    segments: segments.clone(),
-                    fill: None,
-                    stroke: None,
-                    rule: op_rule,
-                })
-                .unwrap_or(ClipBounds {
-                    x0: 0.0,
-                    y0: 0.0,
-                    x1: 0.0,
-                    y1: 0.0,
-                });
-                Some(Clip::new(
-                    bounds,
-                    ClipPath {
-                        segments,
-                        rule: op_rule,
-                    },
-                ))
-            } else {
-                Some(Clip::empty())
-            }
-        } else {
-            None
-        };
+        let clip_path = clip_pending.then(|| self.clip_for_path(op_rule));
         let mut mark = match name {
             b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" | b"S" | b"s" => Mark::Path {
                 segments: self.state.device_path(),
@@ -794,15 +1123,7 @@ impl Context<'_> {
 
         // A pending `W` narrows the clip for this mark and every one after it.
         if clip_pending {
-            // Two clips nest: the second is intersected with the first rather than replacing
-            // it, and the intersection of the boxes is what a consumer that only has a box
-            // can honour exactly.
-            self.state.clip = match (&self.state.clip, &clip_path) {
-                (Some(existing), Some(next)) => Some(existing.intersect(next)),
-                (Some(existing), None) => Some(existing.clone()),
-                (None, Some(next)) => Some(next.clone()),
-                (None, None) => None,
-            };
+            self.commit_clip(clip_path);
             mark = Mark::ClipChanged(self.state.clip.clone());
         }
 
@@ -811,23 +1132,8 @@ impl Context<'_> {
             None => op.span.clone(),
             Some(start) => start..op.span.end,
         };
-        let record = Record {
-            mark,
-            span,
-            ctm: self.state.ctm,
-            clip: self.state.clip.clone(),
-            fill_alpha: self.state.fill_alpha,
-            stroke_alpha: self.state.stroke_alpha,
-            blend_mode: self.state.blend_mode.clone(),
-            device_line_width: self.state.stroke.width * self.state.ctm.mean_scale(),
-            line_cap: self.state.stroke.cap,
-            line_join: self.state.stroke.join,
-            dash: self.state.stroke.dash.clone(),
-            tag: self.out.tags.last().cloned(),
-        };
-        if self.out.records.len() < MAX_RECORDS {
-            self.out.records.push(record);
-        }
+        let record = self.record_for(mark, span);
+        self.push_record(record);
         // Every painting operator ends the path; `s`, `f` and `B*` also close it first,
         // which `apply` has already done.
         self.state.clear_path();
@@ -946,8 +1252,8 @@ impl Context<'_> {
                 cursor = cursor.concat(Matrix::translate(-kern, 0.0));
             }
         }
-        let record = Record {
-            mark: Mark::Glyphs {
+        let record = self.record_for(
+            Mark::Glyphs {
                 font: self.state.text.font.clone(),
                 size: self.state.text.size,
                 text,
@@ -959,21 +1265,9 @@ impl Context<'_> {
                 text_spans,
                 placements,
             },
-            span: op.span.clone(),
-            ctm: self.state.ctm,
-            clip: self.state.clip.clone(),
-            fill_alpha: self.state.fill_alpha,
-            stroke_alpha: self.state.stroke_alpha,
-            blend_mode: self.state.blend_mode.clone(),
-            device_line_width: self.state.stroke.width * self.state.ctm.mean_scale(),
-            line_cap: self.state.stroke.cap,
-            line_join: self.state.stroke.join,
-            dash: self.state.stroke.dash.clone(),
-            tag: self.out.tags.last().cloned(),
-        };
-        if self.out.records.len() < MAX_RECORDS {
-            self.out.records.push(record);
-        }
+            op.span.clone(),
+        );
+        self.push_record(record);
         // The text matrix moves past what was shown, which is what makes a second `Tj`
         // continue rather than overlap, and by the sum of the glyphs' own advances rather
         // than one figure for all of them. It is left where the cursor walked it, which is
@@ -1082,6 +1376,77 @@ pub fn bbox_of(stream: &Stream) -> Option<ClipBounds> {
         x1: x0.max(*x1),
         y1: y0.max(*y1),
     })
+}
+
+/// A form's own `/Matrix`, or `None` when the entry is not one.
+///
+/// Optional, and the specification's default is the identity. A six-element array is
+/// `[a b c d e f]`; anything else is damage, and is reported rather than turned into a
+/// degenerate transformation that would collapse the form to a line.
+#[must_use]
+pub fn form_matrix(entry: &Object) -> Option<Matrix> {
+    let values = entry.as_array()?;
+    if values.len() != 6 {
+        return None;
+    }
+    let at = |i: usize| values.get(i).and_then(Object::as_f64).unwrap_or(0.0);
+    Some(Matrix::new(at(0), at(1), at(2), at(3), at(4), at(5)))
+}
+
+/// What a form's `/BBox` entry says.
+///
+/// Three answers and not two, because the third case is the one that would otherwise
+/// delete a page from the middle of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BBox {
+    /// No `/BBox` at all: the form clips nothing of its own, which is legal and is not the
+    /// same as a box that clips everything away.
+    Absent,
+    /// Four corners, ordered so that `x0 <= x1` and `y0 <= y1`.
+    Box(ClipBounds),
+    /// Four corners the file gave the wrong way round. Reported, and then read as the same
+    /// box ordered — see [`BBox::Inverted`].
+    Inverted(ClipBounds),
+    /// Present, and not four numbers. Reported, and no clip taken: a box this cannot read
+    /// is not evidence that the form drew nothing.
+    Unreadable,
+}
+
+/// Read a form's `/BBox`, with the three answers kept apart.
+///
+/// **`bbox_of` cannot be used here**: it answers `None` for a `/BBox` that is absent and
+/// for one that cannot be read, and those two mean opposite things — a form with no box
+/// clips nothing and is drawn whole, while a form whose box is damaged is a finding. Both
+/// are told apart here.
+///
+/// **A box that is zero-width or zero-height is not reported.** The specification makes it
+/// clip everything away, and that is what a producer that emitted `[0 0 0 0]` asked for.
+/// An **inverted** box is a different matter: the same corners with the wrong order are a
+/// slip, and reading them as an empty box would make the form invisible — so they are
+/// reported *and* read as the box they obviously meant.
+#[must_use]
+pub fn form_bbox(entry: Option<&Object>) -> BBox {
+    let Some(entry) = entry else {
+        return BBox::Absent;
+    };
+    let Some(values) = entry.as_array() else {
+        return BBox::Unreadable;
+    };
+    let numbers: Vec<f64> = values.iter().take(4).filter_map(Object::as_f64).collect();
+    let [x0, y0, x1, y1] = numbers.as_slice() else {
+        return BBox::Unreadable;
+    };
+    let ordered = ClipBounds {
+        x0: x0.min(*x1),
+        y0: y0.min(*y1),
+        x1: x0.max(*x1),
+        y1: y0.max(*y1),
+    };
+    if *x1 < *x0 || *y1 < *y0 {
+        BBox::Inverted(ordered)
+    } else {
+        BBox::Box(ordered)
+    }
 }
 
 #[cfg(test)]
@@ -2396,6 +2761,647 @@ mod tests {
             near(solid.device_line_width, 3.0),
             "and the first kept the width it was drawn with"
         );
+    }
+
+    // ── Form XObjects ────────────────────────────────────────────────────────────
+
+    /// A form XObject: `/Subtype /Form`, the entries a form may carry, and its content.
+    ///
+    /// Written here rather than taken from a file so that what each entry *means* is what
+    /// is under test: the three answers `/BBox` can have, a `/Matrix` that is absent or
+    /// present or damaged, and a `/Resources` of the form's own or none at all.
+    fn form(
+        content: &str,
+        bbox: Option<&str>,
+        matrix: Option<&str>,
+        resources: Option<Dict>,
+    ) -> Obj {
+        let mut dict = Dict::new();
+        dict.set("Type", Obj::name("XObject"));
+        dict.set("Subtype", Obj::name("Form"));
+        if let Some(bbox) = bbox {
+            let numbers: Vec<Obj> = bbox
+                .split_whitespace()
+                .map(|n| Obj::Real(n.parse::<f64>().unwrap_or(0.0)))
+                .collect();
+            dict.set("BBox", Obj::Array(numbers));
+        }
+        if let Some(matrix) = matrix {
+            let numbers: Vec<Obj> = matrix
+                .split_whitespace()
+                .map(|n| Obj::Real(n.parse::<f64>().unwrap_or(0.0)))
+                .collect();
+            dict.set("Matrix", Obj::Array(numbers));
+        }
+        if let Some(resources) = resources {
+            dict.set("Resources", Obj::Dict(resources));
+        }
+        Obj::Stream(Stream {
+            dict,
+            raw: content.as_bytes().to_vec(),
+            file_offset: None,
+            synthetic: true,
+        })
+    }
+
+    /// A `/Resources` dictionary with one font named `F1` and the given declared widths.
+    fn font_resources_dict(widths: &[i64]) -> Dict {
+        let mut font = Dict::new();
+        font.set("Type", Obj::name("Font"));
+        font.set("BaseFont", Obj::name("NoSuchFont"));
+        font.set("FirstChar", Obj::Int(32));
+        font.set(
+            "Widths",
+            Obj::Array(widths.iter().map(|w| Obj::Int(*w)).collect()),
+        );
+        let mut table = Dict::new();
+        table.set("F1", Obj::Dict(font));
+        let mut resources = Dict::new();
+        resources.set("Font", Obj::Dict(table));
+        resources
+    }
+
+    /// A resources dictionary whose `/XObject` table names the forms given.
+    ///
+    /// Forms and page resources share one writer because the difference between them is
+    /// *where the table is read from*, not what it is: a page's table names a form, and a
+    /// form's table names the forms it draws.
+    fn xobject_resources(forms: &[(&str, Obj)], fonts: Option<&[i64]>) -> Resources {
+        let mut table = Dict::new();
+        for (name, object) in forms {
+            table.set(name, object.clone());
+        }
+        let mut resources = Dict::new();
+        resources.set("XObject", Obj::Dict(table));
+        if let Some(widths) = fonts {
+            let fonts = font_resources_dict(widths);
+            resources.set("Font", fonts.get("Font").cloned().unwrap_or(Obj::Null));
+        }
+        Resources::from_dict(&resources, &|o| Some(o.clone()))
+    }
+
+    /// The corners of a path mark, in order, closing point included.
+    fn corners(record: &Record) -> Vec<(f64, f64)> {
+        let Mark::Path { segments, .. } = &record.mark else {
+            panic!("expected a path");
+        };
+        segments
+            .iter()
+            .filter_map(|s| match *s {
+                PathSegment::Move(x, y) | PathSegment::Line(x, y) => Some((x, y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The bounds of a path mark, as its own points put it.
+    fn extent(points: &[(f64, f64)]) -> ClipBounds {
+        let x0 = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+        let x1 = points.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+        let y0 = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+        let y1 = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+        ClipBounds { x0, y0, x1, y1 }
+    }
+
+    /// A form drawing a filled rectangle, and a page that puts it somewhere.
+    ///
+    /// The page is asymmetric on purpose: the form's square is drawn under a `cm` that
+    /// both moves and scales it, so a reader that used the wrong matrix — the page's, the
+    /// form's, or neither — puts a square of the wrong size in the wrong place, and none of
+    /// the three mistakes lands where this says.
+    fn rectangle_form_page(matrix: Option<&str>, bbox: Option<&str>) -> PageContent {
+        let resources =
+            xobject_resources(&[("Fm0", form("0 0 20 10 re f", bbox, matrix, None))], None);
+        run_with(
+            &ContentStream::parse(b"q 100 0 0 100 50 60 cm /Fm0 Do Q"),
+            &resources,
+        )
+    }
+
+    #[test]
+    fn a_form_is_executed_as_a_nested_stream_rather_than_read_as_an_image() {
+        // The whole defect in one assertion: a `Do` of a `/Subtype /Form` XObject used to
+        // be recorded as `Mark::Image`, which is how a form became the note "an image
+        // claims to be 0 by 0 pixels and was not drawn" — a finding about a picture where
+        // there was a content stream.
+        let out = rectangle_form_page(None, None);
+        assert_eq!(
+            out.records.len(),
+            1,
+            "the form's one fill is the page's one mark: {:?}",
+            out.records.iter().map(|r| &r.mark).collect::<Vec<_>>()
+        );
+        let record = out.records.first().expect("the form's mark");
+        assert!(
+            matches!(record.mark, Mark::Path { .. }),
+            "a path, not an image: {:?}",
+            record.mark
+        );
+        assert_eq!(
+            record.form.as_deref(),
+            Some("Fm0"),
+            "and it knows which form drew it, which is what its resources are looked up in"
+        );
+        // The page's own transformation, and only that: the form declares no `/Matrix`.
+        // A 20 by 10 rectangle at the origin becomes 2000 by 1000 with its lower left at
+        // (50, 60) — a hundred times the page's own scale, plus the page's own move.
+        let points = corners(record);
+        assert_eq!(points.len(), 4, "four sides");
+        let b = extent(&points);
+        assert!(
+            near(b.x0, 50.0) && near(b.y0, 60.0) && near(b.x1, 2050.0) && near(b.y1, 1060.0),
+            "got {b:?}"
+        );
+    }
+
+    #[test]
+    fn a_forms_matrix_composes_with_the_page_transformation() {
+        // Each of the three things a `/Matrix` can do, checked against the **closed** path
+        // rather than against a snapshot of a picture: the rectangle is still a rectangle,
+        // and its sides are the page's `cm` and the form's `/Matrix` composed. A scale, a
+        // quarter turn and a move in one page each, because a reader that dropped the
+        // matrix entirely, or applied it in the wrong order, or treated it as the page's,
+        // gets one of these three wrong while leaving the other two looking right.
+        let scale = rectangle_form_page(Some("2 0 0 2 0 0"), None);
+        let scaled = extent(&corners(scale.records.first().expect("a mark")));
+        assert!(
+            near(scaled.x0, 50.0)
+                && near(scaled.y0, 60.0)
+                && near(scaled.x1, 4050.0)
+                && near(scaled.y1, 2060.0),
+            "doubling in the form's own space, then the page's hundredfold: {scaled:?}"
+        );
+
+        // A quarter turn: `[0 1 -1 0 0 0]` sends (x, y) to (−y, x), so a rectangle from
+        // (0,0) to (20,10) becomes one from (−10,0) to (0,20), and the page's move puts
+        // its lower left at (50, 60) — so the box runs *left* of and *above* the origin,
+        // which is the whole of what a rotation is and cannot be mistaken for a scale.
+        let turn = rectangle_form_page(Some("0 1 -1 0 0 0"), None);
+        let turned = extent(&corners(turn.records.first().expect("a mark")));
+        assert!(
+            near(turned.x0, -950.0)
+                && near(turned.y0, 60.0)
+                && near(turned.x1, 50.0)
+                && near(turned.y1, 2060.0),
+            "a quarter turn, in the form's space and then the page's: {turned:?}"
+        );
+
+        let moved = rectangle_form_page(Some("1 0 0 1 30 40"), None);
+        let shifted = extent(&corners(moved.records.first().expect("a mark")));
+        assert!(
+            near(shifted.x0, 3050.0)
+                && near(shifted.y0, 4060.0)
+                && near(shifted.x1, 5050.0)
+                && near(shifted.y1, 5060.0),
+            "the form's own move, scaled by the page's hundredfold: {shifted:?}"
+        );
+
+        // And every one of them is still a closed four-sided path, which a wrong matrix
+        // would leave as four unrelated points.
+        for out in [&scale, &turn, &moved] {
+            let points = corners(out.records.first().expect("a mark"));
+            assert_eq!(points.len(), 4, "four corners, still a rectangle");
+            let width = extent(&points);
+            let sides = [0, 1, 2, 3].map(|i| {
+                let (x, y) = points[i];
+                let (x2, y2) = points[(i + 1) % 4];
+                (x2 - x).hypot(y2 - y)
+            });
+            assert!(
+                near(sides[0], sides[2]) && near(sides[1], sides[3]),
+                "opposite sides equal, so the path is still closed: {sides:?}"
+            );
+            assert!(
+                sides[0] > 0.0 && sides[1] > 0.0,
+                "and it has an area, rather than being degenerate: {sides:?} for {width:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_forms_own_resources_name_a_font_the_page_does_not_have() {
+        // The page has no `/Font` table at all and the form names `/F1` of its own. Every
+        // name in a form resolves against the form's `/Resources`, and a reader that looked
+        // in the page's would place every glyph with a fallback width — or draw nothing.
+        let show = b"BT /F1 10 Tf 0 0 Td (AA) Tj ET";
+        let with_own = xobject_resources(
+            &[(
+                "Fm0",
+                form(
+                    std::str::from_utf8(show).expect("ascii"),
+                    None,
+                    None,
+                    Some(font_resources_dict(&[500; 95])),
+                ),
+            )],
+            None,
+        );
+        assert!(
+            with_own.fonts.is_empty(),
+            "the page names no font at all, which is the case under test"
+        );
+        let out = run_with(
+            &ContentStream::parse(b"q 2 0 0 2 10 10 cm /Fm0 Do Q"),
+            &with_own,
+        );
+        let placements: Vec<Matrix> = out
+            .records
+            .iter()
+            .filter_map(|r| match &r.mark {
+                Mark::Glyphs { placements, .. } => Some(placements.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(placements.len(), 2, "the form's own font drew both glyphs");
+        // The form's font declares 500 units per glyph, so at ten points each glyph is five
+        // wide *in text space*, and the page's `2 0 0 2` doubles that. A fallback width
+        // would be the same figure here, so the width is checked against the declared one
+        // on both counts: the declaration and the page's transformation.
+        let (x0, y0) = placements[0].apply(0.0, 0.0);
+        let (x1, _) = placements[1].apply(0.0, 0.0);
+        assert!(
+            near(x0, 10.0) && near(y0, 10.0),
+            "the first glyph is at the form's origin, which the page moved to (10, 10): ({x0}, {y0})"
+        );
+        assert!(
+            near(x1 - x0, 10.0),
+            "the second is one 500-unit glyph at ten points, doubled by the page: {}",
+            x1 - x0
+        );
+
+        // A form with no `/Resources` of its own inherits the page's, which is the other
+        // half of the rule: the same content, the same page transformation, and the *page's*
+        // font — declared at a different width so that the two cannot be told apart by
+        // accident.
+        let inherited_page = xobject_resources(
+            &[(
+                "Fm0",
+                form(std::str::from_utf8(show).expect("ascii"), None, None, None),
+            )],
+            Some(&[200; 95]),
+        );
+        let out = run_with(
+            &ContentStream::parse(b"q 2 0 0 2 10 10 cm /Fm0 Do Q"),
+            &inherited_page,
+        );
+        let placements: Vec<Matrix> = out
+            .records
+            .iter()
+            .filter_map(|r| match &r.mark {
+                Mark::Glyphs { placements, .. } => Some(placements.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(placements.len(), 2, "the inherited font drew both glyphs");
+        let (x0, _) = placements[0].apply(0.0, 0.0);
+        let (x1, _) = placements[1].apply(0.0, 0.0);
+        assert!(near(x0, 10.0), "still at the form's origin: {x0}");
+        assert!(
+            near(x1 - x0, 4.0),
+            "but a 200-unit glyph at ten points doubled: {}",
+            x1 - x0
+        );
+        // And the marks say which table they came from, so a renderer can find the right
+        // one: `/F1` in the form and `/F1` on the page are two different fonts.
+        assert!(
+            out.records.iter().all(|r| r.form.as_deref() == Some("Fm0")),
+            "every mark inside the form names it"
+        );
+    }
+
+    #[test]
+    fn a_bbox_clips_the_forms_content() {
+        // The form paints a rectangle far larger than its own box, so a reader that drew
+        // the form without clipping paints a shape that is not on the page and one that
+        // clips draws only the box.
+        let out = rectangle_form_page(None, Some("10 10 20 20"));
+        let record = out.records.first().expect("the form's mark");
+        let clip = record.clip.as_ref().expect("the form's own clip");
+        let b = clip.bounds;
+        // The box is in the form's space, so it goes through the same hundredfold scale and the
+        // same move as the mark does: (10,10) to (20,20) in the form becomes (1050, 1060)
+        // to (2050, 2060) on the page.
+        assert!(
+            near(b.x0, 1050.0) && near(b.y0, 1060.0) && near(b.x1, 2050.0) && near(b.y1, 2060.0),
+            "the box, through the transformation the form executes under: {b:?}"
+        );
+        assert_eq!(clip.paths.len(), 1, "and the region is the box, as a path");
+        assert!(
+            !clip.is_empty(),
+            "a box with four corners is not the empty region"
+        );
+        // The mark's own geometry is still the whole rectangle — the clip is what cuts it
+        // down — so a consumer that honours the clip and one that only reads the bounds
+        // agree about what was drawn.
+        let drawn = extent(&corners(record));
+        assert!(
+            near(drawn.x0, 50.0) && near(drawn.x1, 2050.0),
+            "the mark itself is the whole rectangle, which the clip then cuts: {drawn:?}"
+        );
+        // The clip does not outlive the form: the `Q` in the page restored it.
+        assert!(
+            out.state.clip.is_none(),
+            "the form's clip is not the page's"
+        );
+
+        // A form with no `/BBox` clips nothing of its own, which is legal and is not the
+        // same thing as a box that clips everything away.
+        let unclipped = rectangle_form_page(None, None);
+        assert!(
+            unclipped.records.first().expect("the mark").clip.is_none(),
+            "no box means no clip of its own"
+        );
+
+        // A box with the corners the wrong way round is a slip in the file, and reading it
+        // as the empty region would delete the form from the page. It is reported *and*
+        // read as the box it meant.
+        let inverted = rectangle_form_page(None, Some("20 20 10 10"));
+        let record = inverted.records.first().expect("the form's mark");
+        let clip = record.clip.as_ref().expect("a clip, not an invisible form");
+        assert!(
+            near(clip.bounds.x0, 1050.0) && near(clip.bounds.x1, 2050.0),
+            "the same box with its corners in order: {:?}",
+            clip.bounds
+        );
+        assert!(
+            !clip.is_empty(),
+            "which is the whole point: not the empty region"
+        );
+        assert!(
+            inverted
+                .notes
+                .iter()
+                .any(|n| n.contains("Fm0") && n.contains("wrong way round")),
+            "and it is reported by name: {:?}",
+            inverted.notes
+        );
+
+        // A `/BBox` that is not four numbers is damage, and damage is a finding rather than
+        // a reason to draw nothing: the form is drawn, unclipped, and says so.
+        let unreadable = rectangle_form_page(None, Some("0 0 10"));
+        assert!(
+            unreadable
+                .notes
+                .iter()
+                .any(|n| n.contains("Fm0") && n.contains("/BBox")),
+            "reported by name: {:?}",
+            unreadable.notes
+        );
+        assert!(
+            unreadable.records.first().expect("the mark").clip.is_none(),
+            "and the form is still drawn"
+        );
+    }
+
+    #[test]
+    fn a_form_may_draw_another_form() {
+        // Three deep, and the order is the assertion. The innermost form's mark comes
+        // first, then the middle form's own, then the page's: a reader that executed a form
+        // *after* the rest of the page would draw the page's rectangle underneath the form's
+        // and get a page that looks right on paper and wrong in every overlap.
+        let innermost = form("0 0 10 10 re f", None, None, None);
+        let middle = form(
+            "q 1 0 0 1 100 0 cm /Inner Do Q 0 0 10 10 re f",
+            Some("0 0 200 200"),
+            None,
+            Some(xobject_resources_dict(&[("Inner", innermost)])),
+        );
+        let outer = xobject_resources(&[("Outer", middle)], None);
+        let out = run_with(
+            &ContentStream::parse(b"q 3 0 0 3 5 5 cm /Outer Do Q"),
+            &outer,
+        );
+        assert_eq!(out.records.len(), 2, "the two rectangles, and nothing else");
+        let (first, second) = (
+            out.records.first().expect("the innermost form's mark"),
+            out.records.get(1).expect("the middle form's own mark"),
+        );
+        assert_eq!(
+            first.form.as_deref(),
+            Some("Inner"),
+            "the innermost form's mark comes first"
+        );
+        assert_eq!(
+            second.form.as_deref(),
+            Some("Outer"),
+            "and the middle form's own mark after it"
+        );
+        // Each is placed by the whole chain of matrices: the page's threefold scale and its own
+        // move, and the middle form's move to (100, 0) for its child.
+        let inner_box = extent(&corners(first));
+        assert!(
+            near(inner_box.x0, 305.0)
+                && near(inner_box.y0, 5.0)
+                && near(inner_box.x1, 335.0)
+                && near(inner_box.y1, 35.0),
+            "three matrices deep: {inner_box:?}"
+        );
+        let outer_box = extent(&corners(second));
+        assert!(
+            near(outer_box.x0, 5.0)
+                && near(outer_box.y0, 5.0)
+                && near(outer_box.x1, 35.0)
+                && near(outer_box.y1, 35.0),
+            "the middle form's own rectangle, under the page's own `cm` and outside its \
+             `q 1 0 0 1 100 0`: {outer_box:?}"
+        );
+        // The middle form's `/BBox` reaches both its own mark and its child's. The innermost
+        // form declares no box of its own, so there is one path here and not two: a form
+        // that inherits does not clip itself.
+        let clip = first.clip.as_ref().expect("the middle form's clip");
+        assert!(
+            near(clip.bounds.x0, 5.0) && near(clip.bounds.x1, 605.0),
+            "{:?}",
+            clip.bounds
+        );
+        assert_eq!(
+            clip.paths.len(),
+            1,
+            "one box, in force for the child's mark too"
+        );
+    }
+
+    #[test]
+    fn a_form_that_draws_itself_stops_and_reports() {
+        // The recursion is in the run, not in the stream, so this is where the bound belongs.
+        // A generator that flattened a template into the page and left the template behind
+        // produces exactly this, and following it without a bound is a stack overflow — a
+        // crash, not a note.
+        let resources = xobject_resources(
+            &[("Fm0", form("/Fm0 Do 0 0 1 1 re f", None, None, None))],
+            None,
+        );
+        let out = run_with(&ContentStream::parse(b"/Fm0 Do"), &resources);
+        assert_eq!(
+            out.records.len(),
+            MAX_FORM_DEPTH,
+            "each level executed the same form once and then stopped"
+        );
+        let note = out
+            .notes
+            .iter()
+            .find(|n| n.contains("Fm0"))
+            .expect("a note naming the form");
+        assert!(
+            note.contains(&MAX_FORM_DEPTH.to_string()),
+            "which says how deep it went: {note}"
+        );
+        // Nothing was drawn, and nothing was half-drawn either: there are no marks at all,
+        // and the page is told why rather than being left with a hole.
+        assert!(
+            out.records
+                .iter()
+                .all(|r| !matches!(r.mark, Mark::Image { .. })),
+            "no level of it reached the image path"
+        );
+
+        // Two forms each naming the other is the same shape one level round, and is bounded the
+        // same way. A cycle of objects cannot be written down directly, so the chain is
+        // built bottom-up and made one deeper than the bound: each form draws the next and
+        // then a rectangle of its own, so the depth the run reached is countable in marks
+        // rather than merely asserted to have stopped.
+        let mut deepest = form("0 0 1 1 re f", None, None, None);
+        for _ in 0..=MAX_FORM_DEPTH {
+            deepest = form(
+                "/Next Do 0 0 1 1 re f",
+                None,
+                None,
+                Some(xobject_resources_dict(&[("Next", deepest)])),
+            );
+        }
+        let chain = xobject_resources(&[("Fm0", deepest)], None);
+        let out = run_with(&ContentStream::parse(b"/Fm0 Do"), &chain);
+        assert_eq!(
+            out.records.len(),
+            MAX_FORM_DEPTH,
+            "one rectangle per level, and not one level more"
+        );
+        assert!(
+            out.notes.iter().any(|n| n.contains("deep")),
+            "and the level that would have gone past it is reported: {:?}",
+            out.notes
+        );
+        assert!(
+            !out.notes.iter().any(|n| n.contains("do not define")),
+            "every name in the chain resolved, so the bound is what stopped it: {:?}",
+            out.notes
+        );
+    }
+
+    #[test]
+    fn the_state_a_form_finds_is_the_state_it_leaves_behind() {
+        // The form's content is executed as though wrapped in `q` … `Q`, so the state the
+        // page set before the `Do` survives it and nothing the form set escapes.
+        let noisy = form(
+            "7 w 1 0 0 rg 2 0 0 2 1000 1000 cm 0 0 200 200 re W n 0 0 m 1 1 l S",
+            None,
+            None,
+            None,
+        );
+        let resources = xobject_resources(&[("Fm0", noisy)], None);
+        let out = run_with(
+            &ContentStream::parse(b"q 3 w 0 0 1 rg 1 0 0 1 50 50 cm /Fm0 Do 0 0 m 10 0 l S Q"),
+            &resources,
+        );
+        // The form's own mark is drawn under the form's state.
+        let inside = out.records.first().expect("the form's mark");
+        assert!(
+            near(inside.ctm.e, 1050.0) && near(inside.ctm.f, 1050.0),
+            "the form's own `cm` composed onto the page's: {:?}",
+            inside.ctm
+        );
+        assert!(
+            near(inside.device_line_width, 14.0),
+            "and its own line width, doubled by its own scale: {}",
+            inside.device_line_width
+        );
+        assert!(inside.clip.is_some(), "and its own clip");
+        // The mark after the `Do` is the page's again: its own move, and neither the form's
+        // twofold scale nor its thousand-unit translation. It is found by asking which
+        // form drew it rather than by its position, because the form's own clip mark is in
+        // the list too.
+        let after = out
+            .records
+            .iter()
+            .find(|r| r.form.is_none())
+            .expect("the page's own mark");
+        assert!(
+            near(after.ctm.a, 1.0) && near(after.ctm.e, 50.0) && near(after.ctm.f, 50.0),
+            "the transformation the form set did not escape: {:?}",
+            after.ctm
+        );
+        assert!(
+            near(after.device_line_width, 3.0),
+            "nor its line width: {}",
+            after.device_line_width
+        );
+        assert!(after.clip.is_none(), "nor its clip");
+        let Mark::Path {
+            stroke: Some(stroke),
+            ..
+        } = &after.mark
+        else {
+            panic!("a stroked path");
+        };
+        assert_eq!(
+            stroke.components,
+            vec![0.0],
+            "nor its colour: the page set black and the form set red"
+        );
+        // And the state the page ends in is the one it had before the `q`, which is the default:
+        // the form is two levels of `q` below it and neither leaked.
+        assert!(
+            near(out.state.stroke.width, 1.0),
+            "the default width: {}",
+            out.state.stroke.width
+        );
+        assert!(out.state.ctm.is_identity());
+        assert_eq!(
+            out.state.fill.components,
+            vec![0.0],
+            "and the fill the page set inside the `q` is gone with it"
+        );
+    }
+
+    #[test]
+    fn a_do_naming_an_xobject_that_is_neither_an_image_nor_a_form_is_reported_by_name() {
+        // `/PS` is a real subtype: a PostScript XObject is in the format, and executing its
+        // content as operators would draw whatever the PostScript happened to contain as
+        // paths. Handing it to an image decoder asks for something that is not an image.
+        // The only answer that is not a blank or a half-drawn shape is to say so.
+        let mut dict = Dict::new();
+        dict.set("Type", Obj::name("XObject"));
+        dict.set("Subtype", Obj::name("PS"));
+        let mut table = Dict::new();
+        table.set("Weird", Obj::Dict(dict));
+        let mut resources = Dict::new();
+        resources.set("XObject", Obj::Dict(table));
+        let resources = Resources::from_dict(&resources, &|o| Some(o.clone()));
+
+        let out = run_with(&ContentStream::parse(b"/Weird Do"), &resources);
+        assert!(
+            out.records.is_empty(),
+            "nothing was recorded for it: {:?}",
+            out.records.iter().map(|r| &r.mark).collect::<Vec<_>>()
+        );
+        let note = out.notes.first().expect("a note");
+        assert!(
+            note.contains("Weird") && note.contains("PS"),
+            "which names both the XObject and its subtype: {note}"
+        );
+    }
+
+    /// The `/Resources` of a form, as a `/XObject` table of the forms it draws.
+    fn xobject_resources_dict(forms: &[(&str, Obj)]) -> Dict {
+        let mut table = Dict::new();
+        for (name, object) in forms {
+            table.set(name, object.clone());
+        }
+        let mut resources = Dict::new();
+        resources.set("XObject", Obj::Dict(table));
+        resources
     }
 
     #[test]

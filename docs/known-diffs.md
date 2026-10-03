@@ -1236,10 +1236,12 @@ mark. On a page whose every mark was a patterned stroke that is a blank page, an
 named the cause exactly.
 
 The fourth row above is a **real defect of its own** that this page happened to expose: `Do`
-of a `/Subtype /Form` XObject is not implemented, so `/Fm0 Do` became `Mark::Image` and
+of a `/Subtype /Form` XObject was not implemented, so `/Fm0 Do` became `Mark::Image` and
 produced `an image claims to be 0 by 0 pixels and was not drawn`. That form draws nothing, so
-it is not this page's blankness, but a `Do` that reads a form as an image is wrong and is
-recorded separately.
+it is not this page's blankness, but a `Do` that reads a form as an image is wrong. **It is
+now fixed** — a form is executed as a nested content stream, with its own `/Matrix`, `/BBox`
+and `/Resources` — and the finding it leaves behind is
+[D17](#d17--a-composite-fonts-glyph-is-looked-up-through-a-subtable-symbol-fonts-do-not-have).
 
 ### What fixing it meant
 
@@ -1560,3 +1562,47 @@ whichever edge came first.
 `RENDERING_SLACK` in `tests/pages.rs` is 32 because of this, and the comment there says so. A
 bowtie is a difference of ninety on every dash of every run, so the slack costs the test nothing
 it needs.
+
+---
+
+## D17 — a composite font's glyph is looked up through a subtable, and Symbol fonts do not have one
+
+**Severity: every glyph drawn in an `Identity-H` symbol font. Open, found while implementing
+Form XObjects — it was invisible until a form was executed, because the font is named inside
+one.**
+
+`corpus/wild/pdfjs__issue16263.pdf` page 1 is 40 copies of an equation whose content is inside
+Form `Meta6`. That form was never executed, so the page drew **zero** ink and the defect below
+never appeared; now that it is, 40 copies of the equation are drawn in the right places and the
+one difference left on the page is this.
+
+Above each "OA", "OB" and "OC" the oracle draws a thin right arrow; this draws a solid bar of
+the same size. The arrow is glyph 14 of the embedded SymbolMT, reached through a Type 0 font
+with `/Encoding /Identity-H` and `/CIDToGIDMap /Identity`, shown as `[<000E>-1714<000E>-1771
+<0020>] TJ`. Read out of the program directly:
+
+```
+outline_for_cid(0x000E)  13 segments, bounds (0, 0) – (0.5127, 0.5127)
+outline_for_cid(0x0020)  10 segments, bounds (0, 0.1401) – (0.5127, 0.3706)
+outline_for_cid(0x0041)   0 segments
+```
+
+Every one of those is glyph **0**: a square from the origin to half the em is `.notdef` in this
+font, `0x0020` is a space and has no outline at all, and `0x0041` is `A`, which SymbolMT does
+not have. So `outline_for_cid` is not finding these glyphs and falls back to glyph zero.
+
+The cause is that a CID is a **glyph identifier in the font's own numbering**, and the
+`(3,0)` symbol subtable is one *way* to reach a glyph but not the only one — a font built for
+symbolic use, which is what every `/Encoding /Identity-H` symbol font is, carries only a
+`(1,0)` subtable mapping symbol codes to glyphs. The lookup is being made through a subtable
+that is not there, and the answer it returns is the fallback rather than nothing.
+
+Left open because it is a change in `mangle-font`'s glyph addressing, not a small one: the
+right answer is a documented order — the `(3,0)` subtable if the font has one, otherwise the
+glyph number itself, which is what `/CIDToGIDMap /Identity` means and what every identity-
+encoded composite font in the wild assumes.
+
+**Left open in the other direction too, and that is not a defect here:** `/F1` in the same form
+is `/TimesNewRomanPSMT`, which the document did not embed, so a metric-compatible face stands in
+and the substitution is reported. The oracle draws the original outlines; this draws Times'.
+That is D6's subject and the project's stated policy, not a bug.

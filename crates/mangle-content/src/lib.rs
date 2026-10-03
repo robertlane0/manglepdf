@@ -41,9 +41,14 @@ pub mod ops;
 pub mod state;
 pub mod tokens;
 
+use std::sync::Arc;
+
 use mangle_font::metrics::{CidWidths, Declared, DeclaredWidths};
 
-pub use interp::{FillRule, Mark, PageContent, Record, bbox_of, bounds_of, run, run_with};
+pub use interp::{
+    BBox, FillRule, Mark, PageContent, Record, bbox_of, bounds_of, form_bbox, form_matrix, run,
+    run_with, run_with_state,
+};
 pub use matrix::Matrix;
 pub use state::{
     Clip, ClipBounds, Colour, ColourSpace, Dash, ExtGState, ExtGStates, GraphicsState, LineCap,
@@ -74,6 +79,22 @@ pub struct Resources {
     /// that showed text in it would otherwise have its string split into single bytes.
     composite_fonts: std::collections::BTreeSet<String>,
     pub xobjects: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
+    /// Every form XObject's own resource table, by name.
+    ///
+    /// A form carries its own `/Resources` and **everything it draws resolves against
+    /// those**, so a font or an XObject named only inside a form is found here rather than
+    /// in the page's tables. A form with no `/Resources` inherits, so it has *no entry*:
+    /// an entry means "this form declares its own", and the absence of one is what
+    /// [`Resources::form_resources`] reads as "use the table you were called with".
+    ///
+    /// The tables are built here rather than at execution because this is the only place
+    /// that can follow a reference: `/Resources` is an indirect object in most files, and
+    /// the interpreter deliberately holds no document to resolve it with.
+    ///
+    /// Shared rather than owned so that a page which draws the same form a thousand times
+    /// pays for the table once, and so that a nested run can borrow it while the run that
+    /// invoked it keeps its own.
+    pub forms: std::collections::BTreeMap<String, Arc<Resources>>,
     pub ext_gstates: ExtGStates,
     pub shadings: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
     pub colour_spaces: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
@@ -87,6 +108,7 @@ impl PartialEq for Resources {
             && self.font_widths == other.font_widths
             && self.composite_fonts == other.composite_fonts
             && self.xobjects == other.xobjects
+            && self.forms == other.forms
             && self.ext_gstates == other.ext_gstates
             && self.shadings == other.shadings
             && self.colour_spaces == other.colour_spaces
@@ -100,6 +122,20 @@ impl Resources {
     pub fn from_dict(
         d: &mangle_syntax::object::Dict,
         resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+    ) -> Self {
+        Self::read_at(d, resolve, 0)
+    }
+
+    /// Read a table, `depth` form XObjects below the page.
+    ///
+    /// The depth is here so that a file whose forms name each other in a cycle stops
+    /// building tables rather than recursing forever. It is the interpreter's own
+    /// [`crate::interp::MAX_FORM_DEPTH`], not a second limit: a form nested past that
+    /// cannot be executed, so its tables would never be consulted.
+    fn read_at(
+        d: &mangle_syntax::object::Dict,
+        resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+        depth: usize,
     ) -> Self {
         let table = |key: &str| -> mangle_syntax::object::Object {
             d.get(key)
@@ -123,6 +159,11 @@ impl Resources {
         // the values are dereferenced here and the table is read from the result.
         let gs_values = named(&table("ExtGState"));
         let fonts = named(&table("Font"));
+        let xobjects = named(&table("XObject"));
+        // A form's own resources are read here, through the same resolver, rather than
+        // when the form is executed: this is the only place a reference can be followed,
+        // and a form's `/Resources` is an indirect object in most files.
+        let forms = read_form_resources(&xobjects, resolve, depth);
         // The widths each font declares, read through the same resolver. A page usually
         // names two or three fonts, and reading them here is once per page rather than
         // once per `Tf`.
@@ -176,7 +217,8 @@ impl Resources {
             font_widths,
             composite_fonts,
             fonts,
-            xobjects: named(&table("XObject")),
+            xobjects,
+            forms,
             shadings: named(&table("Shading")),
             colour_spaces: named(&table("ColorSpace")),
             patterns: named(&table("Pattern")),
@@ -205,6 +247,19 @@ impl Resources {
     #[must_use]
     pub fn ext_gstate(&self, name: &[u8]) -> Option<&ExtGState> {
         self.ext_gstates.get(name)
+    }
+
+    /// The resource table a form XObject of this name draws against.
+    ///
+    /// `None` when the form declares no `/Resources` of its own, which means it inherits
+    /// the table it was named in rather than drawing with none — so a caller resolves
+    /// against this when it is `Some` and against what it already has when it is `None`.
+    ///
+    /// Shared, so a page that draws the same form repeatedly reads one table, and so a
+    /// nested run can hold this while the run that invoked it goes on.
+    #[must_use]
+    pub fn form_resources(&self, name: &str) -> Option<Arc<Resources>> {
+        self.forms.get(name).cloned()
     }
 
     /// The widths the named font declares, or `None` when it declares none.
@@ -241,6 +296,83 @@ impl Resources {
             patterns: self.patterns.len(),
         }
     }
+}
+
+/// Read each form XObject's own resource table, keyed by the name the page uses.
+///
+/// A form's `/Resources` is read through the same resolver as the page's, because it is
+/// the same kind of object: in most files it is an indirect reference to a dictionary whose
+/// entries are themselves indirect references, and following it once here is what makes a
+/// font named only inside a form resolve.
+///
+/// A form that declares no `/Resources` gets no entry, which is how inheritance is
+/// expressed — see [`Resources::forms`].
+fn read_form_resources(
+    xobjects: &std::collections::BTreeMap<String, mangle_syntax::object::Object>,
+    resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+    depth: usize,
+) -> std::collections::BTreeMap<String, Arc<Resources>> {
+    let mut forms = std::collections::BTreeMap::new();
+    // At the depth the interpreter refuses to execute a form, its tables would never be
+    // consulted, so they are not read: the bound here and the bound there are one bound.
+    if depth >= interp::MAX_FORM_DEPTH {
+        return forms;
+    }
+    for (name, object) in xobjects {
+        let Some(dict) = xobject_dict(object) else {
+            continue;
+        };
+        if !is_form(dict) {
+            continue;
+        }
+        let Some(entry) = dict.get("Resources") else {
+            continue;
+        };
+        let Some(resolved) = resolve(entry) else {
+            continue;
+        };
+        let Some(inner) = resolved.as_dict() else {
+            continue;
+        };
+        forms.insert(
+            name.clone(),
+            Arc::new(Resources::read_at(inner, resolve, depth + 1)),
+        );
+    }
+    forms
+}
+
+/// The dictionary of an XObject, whichever of the two shapes it arrives in.
+///
+/// A form is a stream, because it has content; an image is a stream, because it has
+/// samples. Both are read here so that `/Subtype` can be asked of either without the
+/// caller matching on the object twice.
+#[must_use]
+pub fn xobject_dict(
+    object: &mangle_syntax::object::Object,
+) -> Option<&mangle_syntax::object::Dict> {
+    match object {
+        mangle_syntax::object::Object::Stream(s) => Some(&s.dict),
+        mangle_syntax::object::Object::Dict(d) => Some(d),
+        _ => None,
+    }
+}
+
+/// Is this XObject dictionary a form?
+///
+/// The answer is in the dictionary's own `/Subtype` and nowhere else. Guessing from the
+/// content — a stream that decodes as an image being an image, anything else being a form
+/// — would report a form with a damaged image inside it as an image, and would execute a
+/// broken image as a content stream. `/Subtype` is the file saying which it is.
+///
+/// A dictionary with no `/Subtype` is not a form. That is the legacy default of *image*,
+/// which is what such files mean, and it is the reading that lets an image without the key
+/// still be drawn.
+#[must_use]
+pub fn is_form(dict: &mangle_syntax::object::Dict) -> bool {
+    dict.get("Subtype")
+        .and_then(mangle_syntax::object::Object::as_name)
+        == Some(b"Form")
 }
 
 /// Whether a font dictionary describes a composite (Type 0) font.

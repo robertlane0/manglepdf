@@ -347,12 +347,19 @@ pub fn render_page(
     // must not capture the notes: they are passed into `draw_mark` on the next line, and a
     // second live borrow of them would not compile. The failure reason comes back as the
     // closure's `Err` and is appended by `draw_mark` itself.
-    let mut lookup = |name: &str| image_for(name, resources, doc);
-    let mut shade_lookup = |name: &str| shading_for(name, resources, doc);
+    //
+    // All three lookups take the resource table to look in rather than capturing the
+    // page's, because a mark drawn inside a form resolves its names against **that form's**
+    // `/Resources`. Two forms may each name `/F1` and mean different fonts, so a lookup
+    // that fell back to the page's table would draw the wrong glyphs with nothing in the
+    // report to say so.
+    let mut lookup = |name: &str, in_resources: &Resources| image_for(name, in_resources, doc);
+    let mut shade_lookup =
+        |name: &str, in_resources: &Resources| shading_for(name, in_resources, doc);
     // The font lookup is beside the other two rather than inside `draw_mark`, for the same
     // reason: the document and the page's resources are borrowed here, once, and the
     // drawing code only ever sees a name.
-    let mut font_lookup = |name: &str| font_for(name, resources, doc);
+    let mut font_lookup = |name: &str, in_resources: &Resources| font_for(name, in_resources, doc);
     // The clip the device is holding, so a run of marks under one clip costs one install
     // rather than one per mark. The memo is keyed on the record's own clip and installs the
     // whole region when it differs, which keeps the cost proportional to how often the page
@@ -374,6 +381,14 @@ pub fn render_page(
             installed.clone_from(&record.clip);
         }
         let to_device = placement.matrix.concat(record.ctm);
+        // The table this mark's names resolve against: the form's own where it was drawn
+        // inside one, and the page's otherwise. One line, and the reason a font named only
+        // inside a form is found at all.
+        let own = record
+            .form
+            .as_ref()
+            .and_then(|name| resources.form_resources(name));
+        let named_in = own.as_deref().unwrap_or(resources);
         draw_mark(
             &mut device,
             &record.mark,
@@ -384,7 +399,7 @@ pub fn render_page(
             &mut lookup,
             &mut shade_lookup,
             &mut font_lookup,
-            resources,
+            named_in,
             doc,
         );
         render.marks += 1;
@@ -662,8 +677,10 @@ fn image_for(name: &str, resources: &Resources, doc: &Document) -> Result<Raster
 /// A shading lookup: a name to the shading it names, and the pattern's own transformation.
 ///
 /// Passed into `draw_mark` rather than resolved there so that the borrowing stays with
-/// whoever owns the document and the page's resources.
-type ShadingLookup<'a> = &'a mut dyn FnMut(&str) -> Result<(Shading, Matrix), String>;
+/// whoever owns the document and the page's resources. The resource table is an argument
+/// rather than captured, because a mark inside a form names its shadings in the *form's*
+/// table.
+type ShadingLookup<'a> = &'a mut dyn FnMut(&str, &Resources) -> Result<(Shading, Matrix), String>;
 
 /// A font resource's glyph outlines, and how big its em is.
 ///
@@ -904,8 +921,15 @@ fn substitute_for(
 ///
 /// Passed into `draw_mark` for the same reason as the image lookup, and with the same
 /// shape, so that the document and the page's resources stay borrowed by whoever owns
-/// them rather than by a function that has to reach into both.
-type FontLookup<'a> = &'a mut dyn FnMut(&str) -> Result<FontProgram, String>;
+/// them rather than by a function that has to reach into both. The table is an argument
+/// because a font named inside a form lives in the form's own resources, which is the only
+/// thing that says which font `/F1` means.
+type FontLookup<'a> = &'a mut dyn FnMut(&str, &Resources) -> Result<FontProgram, String>;
+
+/// An image lookup: an XObject name to the samples it names.
+///
+/// For the same reason as the other two, and with the same shape.
+type ImageLookup<'a> = &'a mut dyn FnMut(&str, &Resources) -> Result<Raster, String>;
 
 /// A rectangle carried through the page placement, as a device-space rectangle.
 ///
@@ -971,14 +995,15 @@ fn draw_mark(
     placement: &Matrix,
     record: &mangle_content::Record,
     notes: &mut Vec<String>,
-    images: &mut dyn FnMut(&str) -> Result<Raster, String>,
+    images: ImageLookup<'_>,
     shadings: ShadingLookup<'_>,
     fonts: FontLookup<'_>,
-    // The page's resources and the document, for the one thing a name alone cannot answer:
-    // a pattern colour is a reference to a pattern resource, so the resource has to be read
-    // here rather than looked up by the caller. The other two lookups above are closures so
-    // that the borrows stay with `render_page`; this one is the same information, taken
-    // directly, because it is needed in two arms rather than in one.
+    // The resources this mark's names resolve against — the form's own where it was drawn
+    // inside one, the page's otherwise — and the document. They are here for the one thing
+    // a name alone cannot answer: a pattern colour is a reference to a pattern resource, so
+    // the resource has to be read rather than looked up by the caller. The three lookups
+    // above are closures so that the borrows stay with `render_page`; this is the same
+    // information, taken directly, because it is needed in three arms rather than in one.
     resources: &Resources,
     doc: &Document,
 ) {
@@ -1101,7 +1126,7 @@ fn draw_mark(
         // empty rather than guessing one.
         Mark::Shading { name, .. } => match name.as_str() {
             "" => notes.push("a shading with no name was found and not painted".into()),
-            name => match shadings(name) {
+            name => match shadings(name, resources) {
                 Ok((shading, pattern_matrix)) => {
                     // The mark's transformation carries the pattern's space to the pixels
                     // and the pattern's own matrix sits inside it, so the two compose in
@@ -1118,7 +1143,10 @@ fn draw_mark(
             },
         },
         Mark::Image { name, fill, .. } => match name.as_deref() {
-            Some(name) => match images(name) {
+            // An XObject that is neither an image nor a form never reaches here: the
+            // interpreter reports it by name rather than recording a mark for it, because a
+            // mark is a claim that something was drawn.
+            Some(name) => match images(name, resources) {
                 Ok(raster) => {
                     // The image's own space is the unit square, so the mark's
                     // transformation is all that is needed to place it. A mask is painted in
@@ -1191,7 +1219,7 @@ fn draw_mark(
             let Some(name) = font.as_deref().filter(|n| !n.is_empty()) else {
                 return;
             };
-            let mut program = match fonts(name) {
+            let mut program = match fonts(name, resources) {
                 Ok(program) => program,
                 Err(reason) => {
                     // Once per run rather than once per page. A page of prose in a

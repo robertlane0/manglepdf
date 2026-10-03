@@ -23,7 +23,7 @@ number when `C0` is zero, and every fixture in this repository that exercises on
 |---|---|---|
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
-| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw, a shading pattern used as a fill colour draws per pixel, and tiling patterns and `Symbol`/`ZapfDingbats` still draw nothing |
+| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw, a shading pattern used as a fill colour draws per pixel, and **a form XObject executes as a nested content stream with its own `/Matrix`, `/BBox` clip and `/Resources`**. Tiling patterns and `Symbol`/`ZapfDingbats` still draw nothing |
 | **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint, and TrueType, composite, CFF and Type 1 outlines all draw. Twelve of the standard fourteen draw from bundled metric-compatible faces when a document names one without embedding it. Type 3, mesh shadings, tiling patterns and transparency do not |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
@@ -676,11 +676,97 @@ up as **D14**: an open path of three or more points is stroked as a **closed rin
 a stroke along its own closing segment and has no caps at all. `mutool` draws an `L` as an `L`;
 this drew the `L` plus a diagonal. That one is the next thing on the stroke item.
 
-Two smaller things the same page exposed, both left open: **`Do` of a `/Subtype /Form` XObject
-is not implemented** — `/Fm0 Do` became an image mark and reported `an image claims to be 0 by 0
+Two smaller things the same page exposed, both left open: **a form XObject could not be
+executed at all** — `/Fm0 Do` became an image mark and reported `an image claims to be 0 by 0
 pixels and was not drawn`, harmless here because the form is empty and wrong in general — and
 **`/CS0` cannot be converted**, twice, because it is an `[/ICCBased]` space whose profile is not
-read. The two fills it names are white, so neither costs anything on this page.
+read. The two fills it names are white, so neither costs anything on this page. **The first is
+now fixed**; see the entry below.
+
+## A form XObject is a nested content stream, not an image with no samples
+
+`Do` is one operator with two completely different meanings, and this project used to give it
+only the second. `/Subtype /Image` means a picture: samples, a colour space, a placement. `/Subtype
+/Form` means **a content stream**, executed as though it were wrapped in `q` … `Q` with a
+transformation and a clip of its own. A `Do` of a form went down the image path, `image::decode`
+found no samples in it, and the page reported:
+
+```
+an image claims to be 0 by 0 pixels and was not drawn
+```
+
+— a finding about a picture where the file had put a drawing. D12 recorded the defect and said
+where it was harmless; on that page the form is `0 TL q Q`, which draws nothing either way.
+
+**The decision is made at the XObject dictionary, by `/Subtype`,** and it is made in the
+interpreter, because that is the layer holding the resource table. It cannot be made in the
+renderer and it must not be guessed from the content: a form containing a damaged image would
+be read as an image if the content decided, and a damaged image would be executed as a content
+stream. `/Subtype` is the file saying which it is, and an XObject that is **neither** — a
+`/PS` PostScript XObject, or a subtype nobody has heard of — is reported by name rather than
+handed to either path. That last part is the constraint that shapes the whole feature: a form
+this cannot run is a *finding about the file*, and a blank patch of page where it should have
+been is not.
+
+**Nesting already worked; the recursion did not.** `run_with` is one loop over one stream, and
+a form is one more stream, so `run_with_state(stream, state, resources)` is the entry point and
+`run_with` is that call with the default state. What was missing was the *bound*: the recursion
+is in the run and not in the stream, so a form that draws itself is a stack overflow unless
+something stops it. `MAX_FORM_DEPTH` is 12 — far past any nesting a file means, and a form past
+it is reported by name with the depth it reached.
+
+Three things come from the form's dictionary and all three are applied to the state the form runs
+in:
+
+| | |
+|---|---|
+| `/Matrix` | composed into the CTM, page CTM first, so it lands where the `cm` says it does |
+| `/BBox` | a **clip**, built in the form's own space and put through that CTM — the four corners are placed and re-bounded, because a rotation does not map an axis-aligned box to an axis-aligned one |
+| `/Resources` | the table every name in the form resolves against, **including the ones only it names** |
+
+`/Resources` is where the design decision in this feature sits. A form's `/Resources` is an
+indirect reference in most files and its own entries are indirect references too (`/F1 8 0 R`,
+`/Widths 65 0 R`), and the interpreter deliberately holds no document — so the form's tables are
+read where the resource dictionary is built, through the resolver `Resources::from_dict` already
+has, recursively, and shared rather than owned so that a page drawing one form a thousand times
+pays for the table once. A form that declares no `/Resources` inherits, and inheritance means
+*the table it was named in*, so a form inside a form inherits that form's table rather than the
+page's.
+
+Each record now carries the name of the form it was drawn inside, and that is what lets a
+renderer find the right table: **two forms may each name `/F1` and mean different fonts**, and a
+lookup that fell back to the page's would draw the wrong glyphs with nothing in the report to
+say so. That is one extra argument on the three lookup closures in `page.rs` — images, shadings,
+fonts — and nothing else in the renderer changed.
+
+Page 1 of `corpus/wild/pdfjs__issue16263.pdf` against `mutool draw -r 150`, 2000×1125. The page
+is 40 copies of an equation whose whole content is inside Form `Meta6`:
+
+| | SSIM | RMS | pixels above tolerance | our ink | `mutool`'s |
+|---|---|---|---|---|---|
+| before | 0.85188 | 41.53 | 97 485 (4.33%) | **0** | 103 905 (4.62%) |
+| after | 0.84906 | 73.51 | 237 475 (10.55%) | 271 575 (12.07%) | 103 905 (4.62%) |
+
+**Read this table as the defect getting *worse* and being *right*, and be precise about why.**
+Before, this page drew nothing at all: 82 marks and no ink, the whole of it behind
+`an image claims to be 0 by 0 pixels and was not drawn`. After, all 40 equations are drawn, in
+the right places, with the right text, in the right font — and the page now disagrees with the
+oracle in a way it could not before, because it has ink to disagree with. SSIM and RMS move the
+wrong way *for that reason*, not despite it: 0.85188 → 0.84906 and 41.53 → 73.51 are the cost of
+drawing a page that is 96% white and scoring a blank one against it well.
+
+The one remaining difference is **not the form**. Above each "OA" the oracle draws a thin arrow
+and this draws a solid bar of the same size: `outline_for_cid(0x000E)` on the embedded SymbolMT
+returns glyph 0, because a CID is a glyph number in the font's own numbering and the lookup is
+being made through a `(3,0)` subtable that a symbolic font does not have. That is a defect in the
+font layer's glyph addressing, it was invisible while the form never ran, and it is
+[D17](known-diffs.md#d17--a-composite-fonts-glyph-is-looked-up-through-a-subtable-symbol-fonts-do-not-have).
+
+`pdfjs__issue1985.pdf` page 1 moves **not at all** — 0.83925 / 22.24 / 39 pixels above tolerance
+before and after, zero ink both ways — and the reason is worth stating rather than leaving as a
+null result: **that file contains no form XObject at all.** Its one XObject is a CCITT image
+mask, and its two remaining marks fail on an `[/ICCBased]` space. It was a reasonable file to
+check the change against and it has nothing to do with forms.
 
 ## Metric-compatible aliases
 

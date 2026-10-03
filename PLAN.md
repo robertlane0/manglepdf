@@ -362,12 +362,22 @@ renderer that never has to ask the machine for a font.
 5. **Break the symmetry of the remaining fixtures.** The diagonal-clip page is asymmetric now
    and scored 0.51652 when its clip was a box, where every symmetric fixture had scored above
    0.99 through the same bug. The rest still need the same treatment.
-6. **`Do` of a form XObject.** A `Do` whose `/Subtype` is `/Form` is read as an image today, so a
-   page's real content inside a form is never descended into — the corpus file that exposed
-   D12 is one, and its form happens to be empty (`0 TL q Q`), which is the only reason it was
-   harmless there. A form's `/Matrix`, `/BBox` clip and own `/Resources` all matter, and this is
-   a page-level feature rather than a paint one, so it belongs beside the clip work rather than
-   in the patterns item.
+6. **Form XObjects: done.** A `Do` whose `/Subtype` is `/Form` is executed as a nested content
+   stream rather than read as an image, and what it took is written up in
+   [STATUS](docs/STATUS.md#a-form-xobject-is-a-nested-content-stream-not-an-image-with-no-samples):
+   the form/image decision is made at the XObject dictionary, the `/Matrix` and `/BBox` go into
+   the state the form runs in, the form's own `/Resources` are read where the resource dictionary
+   is built — the only place that can follow a reference — and every record says which form drew
+   it, so a renderer can find the right table for `/F1`. Nesting needed a starting-state entry
+   point (`run_with_state`) and a depth bound; `/BBox` clipping needed the corners put through
+   the form's own CTM. What is left behind it is
+   [D17](docs/known-diffs.md): the page it was measured on has a SymbolMT glyph in it that
+   `outline_for_cid` cannot find, which was invisible until the form ran.
+7. **A composite font's glyph addressing.** A CID is a glyph number in the font's own
+   numbering, and this looks it up through a `(3,0)` subtable — which a symbolic font does not
+   have — and falls back to glyph 0, so an `/Identity-H` symbol font draws `.notdef` for
+   everything ([D17](docs/known-diffs.md)). It is the next thing on the font list, and it is on
+   it because a form made it visible rather than because it is new.
 
 Tier B is now standing — see "The wild corpus found" below — and it has overtaken everything
 else on this list, because nothing else in the project can see the problems it can see.

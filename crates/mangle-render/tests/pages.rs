@@ -6410,3 +6410,522 @@ fn dict_from(entries: &[(&str, Object)]) -> mangle_syntax::object::Dict {
     }
     d
 }
+
+// ── Form XObjects: a nested content stream ───────────────────────────────────────
+
+/// A page whose resource table names the XObjects given.
+///
+/// **Objects are numbered from five**, in the order they are given, and the page's
+/// `/XObject` table names the first field of each in that order. The catalogue, the page
+/// tree, the page and its content are one to four in the order every fixture in this file has
+/// used since the first one, so a form that draws another refers to it by counting — and the
+/// counting is stated once here rather than left to each fixture to get right.
+///
+/// Each entry is `(name, body)` where `body` is the object's own dictionary and stream with
+/// `/Length` already written, because a fixture that cannot see its own byte count is a
+/// fixture whose lengths this suite has learned nothing about. `extra` goes into the page's
+/// `/Resources` beside the `/XObject` table, for the `/Font` and `/ExtGState` entries a
+/// fixture also wants.
+fn page_with_xobjects(
+    points: i64,
+    content: &str,
+    extra: &str,
+    objects: &[(&str, String)],
+    tail: &[(usize, Vec<u8>)],
+) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at: Vec<usize> = vec![0; 5 + objects.len()];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    let table = objects
+        .iter()
+        .enumerate()
+        .fold(String::new(), |mut t, (i, (name, _))| {
+            let _ = write!(t, "/{name} {} 0 R ", i + 5);
+            t
+        });
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        format!(
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 {points} \
+             {points}] >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    at[3] = out.len();
+    out.extend_from_slice(
+        format!(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << \
+             /XObject << {table}>> {extra} >> >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content.as_bytes());
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    for (i, (_, text)) in objects.iter().enumerate() {
+        at[5 + i] = out.len();
+        out.extend_from_slice(format!("{} 0 obj\n{text}\nendobj\n", i + 5).as_bytes());
+    }
+    // `tail` holds whole objects — an embedded font's three, say — each with the number it is
+    // written under, and comes after the named ones. It is a list rather than a string
+    // because the xref has to point at each object and the writer is the only thing that
+    // knows where they landed: a font's program is binary and must never be scanned for
+    // syntax.
+    for (_, text) in tail {
+        at.push(out.len());
+        out.extend_from_slice(text);
+    }
+    let xref = out.len();
+    let count = at.len() - 1;
+    out.extend_from_slice(format!("xref\n0 1\n0000000000 65535 f \n1 {count}\n").as_bytes());
+    for offset in at.iter().take(count + 1).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R /ID [<0102> <0304>] >>\nstartxref\n{xref}\n\
+             %%EOF\n",
+            count + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// A form XObject's body: `/Subtype /Form`, the entries it declares, and its content.
+fn form_body(entries: &str, content: &str) -> String {
+    format!(
+        "<< /Type /XObject /Subtype /Form {entries} /Length {} >>\nstream\n{content}\nendstream",
+        content.len()
+    )
+}
+
+/// The three objects of an embedded TrueType font, numbered from `n`.
+///
+/// The same font `text_page` embeds and for the same reason — whole, uncompressed, with the
+/// widths taken from the program's own advances — because a form that draws text is a test of
+/// **whose** `/Resources` the name is resolved against, and a font that both renderers can
+/// read is what keeps it that.
+fn embedded_font_objects(n: usize, font: &[u8]) -> Vec<(usize, Vec<u8>)> {
+    let mut program = mangle_font::Program::new(font.to_vec());
+    let units = program.units_per_em().unwrap_or(1000);
+    let widths: Vec<String> = (32u8..=126)
+        .map(|code| {
+            program
+                .glyph_for_code(u32::from(code))
+                .and_then(|g| program.advance(g))
+                .map(|a| u32::from(a) * 1000 / u32::from(units))
+                .unwrap_or(500)
+                .to_string()
+        })
+        .collect();
+    vec![
+        (
+            n,
+            format!(
+                "{n} 0 obj\n<< /Type /Font /Subtype /TrueType /BaseFont /Embedded /FirstChar \
+                 32 /LastChar 126 /Widths [{}] /Encoding /WinAnsiEncoding /FontDescriptor {} \
+                 0 R >>\nendobj\n",
+                widths.join(" "),
+                n + 1
+            )
+            .into_bytes(),
+        ),
+        (
+            n + 1,
+            format!(
+                "{} 0 obj\n<< /Type /FontDescriptor /FontName /Embedded /Flags 32 /FontBBox \
+                 [0 -200 1000 800] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 \
+                 /StemV 80 /MissingWidth 500 /FontFile2 {} 0 R >>\nendobj\n",
+                n + 1,
+                n + 2
+            )
+            .into_bytes(),
+        ),
+        (
+            n + 2,
+            // The program itself, as bytes. A fixture that cannot carry binary is a fixture
+            // with no font in it.
+            {
+                let mut text = format!(
+                    "{} 0 obj\n<< /Length {} /Length1 {} >>\nstream\n",
+                    n + 2,
+                    font.len(),
+                    font.len()
+                )
+                .into_bytes();
+                text.extend_from_slice(font);
+                text.extend_from_slice(b"\nendstream\nendobj\n");
+                text
+            },
+        ),
+    ]
+}
+
+/// A form's content that fills a rectangle in the form's own space.
+const FORM_SQUARE: &str = "0 0 20 10 re f";
+
+/// A form drawing a rectangle, drawn where the page asks for it.
+///
+/// The whole defect in one page: `/Fm0 Do` used to be read as an image, so the form's own
+/// content was never executed and the page came out with the note "an image claims to be 0 by
+/// 0 pixels and was not drawn" where the ink should have been. Nothing on this page is
+/// asymmetric except the placement, which is the point: the form draws a 20 by 10 rectangle in
+/// its own space and the page scales it fivefold and moves it, so a reader that used the
+/// wrong matrix puts a square of the wrong size in the wrong place and cannot be mistaken for
+/// one that got it right.
+#[test]
+fn a_form_draws_its_own_rectangle_where_the_page_asks_for_it() {
+    let bytes = page_with_xobjects(
+        200,
+        "q 5 0 0 5 50 60 cm /Fm0 Do Q",
+        "",
+        &[("Fm0", form_body("", FORM_SQUARE))],
+        &[],
+    );
+    let drawn = render(bytes, 1.0);
+    let got = ink_points(&drawn.image, 1.0).expect("the form's rectangle");
+    let want = [50.0, 60.0, 150.0, 110.0];
+    for (g, w) in [got.0, got.1, got.2, got.3].into_iter().zip(want) {
+        assert!(
+            (g - w).abs() <= 1.0,
+            "the form's rectangle at {want:?} in page points, got {got:?}"
+        );
+    }
+    assert!(
+        inked(&drawn.image) > 1000,
+        "and it is a filled rectangle, not an outline: {} pixels",
+        inked(&drawn.image)
+    );
+    assert!(
+        !drawn.notes.iter().any(|n| n.contains("Fm0")),
+        "and the form is not a finding about the file: {:?}",
+        drawn.notes
+    );
+}
+
+/// A form's `/Matrix` composes with the page's transformation.
+///
+/// Three fixtures, one for each thing a matrix can do, each checked against **closed-form
+/// numbers** rather than against a snapshot of a picture: a snapshot says nothing about why
+/// the pixels are where they are, and a page with one symmetric square on it scores the same
+/// for a whole family of wrong answers. The rotation is the one that matters most and is
+/// given its own asymmetric fixture — a box that runs *left* of and *above* the point the
+/// form is drawn at cannot be produced by any mistake about scale or offset.
+#[test]
+fn a_forms_matrix_composes_with_the_page_transformation() {
+    let draw = |matrix: &str, page_cm: &str| {
+        let bytes = page_with_xobjects(
+            200,
+            &format!("q {page_cm} cm /Fm0 Do Q"),
+            "",
+            &[(
+                "Fm0",
+                form_body(&format!("/Matrix [{matrix}]"), "0 0 10 4 re f"),
+            )],
+            &[],
+        );
+        ink_points(&render(bytes, 1.0).image, 1.0).expect("the form's rectangle")
+    };
+    let close = |got: (f64, f64, f64, f64), want: [f64; 4]| {
+        for (g, w) in [got.0, got.1, got.2, got.3].into_iter().zip(want) {
+            assert!(
+                (g - w).abs() <= 1.0,
+                "at {want:?} in page points, got {got:?}"
+            );
+        }
+    };
+    // Doubled in the form's own space, then moved: (0,0)–(10,4) becomes (0,0)–(20,8) and
+    // then (20,20)–(40,28).
+    close(
+        draw("2 0 0 2 0 0", "1 0 0 1 20 20"),
+        [20.0, 20.0, 40.0, 28.0],
+    );
+    // A quarter turn: `[0 1 -1 0 0 0]` sends (x, y) to (−y, x), so the rectangle's lower left
+    // moves to (100 − 4, 100) and its own width runs up the page.
+    close(
+        draw("0 1 -1 0 0 0", "1 0 0 1 100 100"),
+        [96.0, 100.0, 100.0, 110.0],
+    );
+    // The form's own move, under the page's own.
+    close(
+        draw("1 0 0 1 30 0", "1 0 0 1 20 20"),
+        [50.0, 20.0, 60.0, 24.0],
+    );
+}
+
+/// A form's own `/Resources` decide what its names mean, in both directions.
+///
+/// Two fixtures that differ in one thing: whether the form declares a `/Resources` of its own.
+/// The first page's resources hold **no font at all**, so the only place `/F1` can have come
+/// from is the form — a reader that resolved names against the page's table would find
+/// nothing and draw no text. The second has a `/Font` on the page and none on the form, so the
+/// text can only have come from inheritance. One assertion each, and between them they are
+/// the whole rule.
+#[test]
+fn a_forms_names_resolve_in_its_own_resources_and_in_the_pages_when_it_declares_none() {
+    let font = true_type_font().expect("a font to embed");
+    let show = "BT /F1 24 Tf 10 40 Td (In) Tj ET";
+
+    // The form's own table, and nothing on the page.
+    // Object five is the form; the font is objects six to eight, which is why the form's own
+    // `/Resources` names `/F1 6 0 R` and the page's names the same.
+    let own = page_with_xobjects(
+        200,
+        "q 2 0 0 2 0 0 cm /Fm0 Do Q",
+        "",
+        &[(
+            "Fm0",
+            form_body("/Resources << /Font << /F1 6 0 R >> >>", show),
+        )],
+        &embedded_font_objects(6, &font),
+    );
+    let drawn = render(own, 1.0);
+    assert!(
+        !drawn.notes.iter().any(|n| n.contains("/F1")),
+        "the font the form names was found: {:?}",
+        drawn.notes
+    );
+    let ink = ink_points(&drawn.image, 1.0).expect("the form's text");
+    assert!(
+        ink.0 >= 19.0 && ink.1 >= 79.0 && ink.2 <= 120.0 && ink.3 <= 130.0,
+        "drawn where the form put it, doubled by the page: {ink:?}"
+    );
+
+    // No `/Resources` on the form, and the font on the page instead.
+    let inherited = page_with_xobjects(
+        200,
+        "q 2 0 0 2 0 0 cm /Fm0 Do Q",
+        "/Font << /F1 6 0 R >>",
+        &[("Fm0", form_body("", show))],
+        &embedded_font_objects(6, &font),
+    );
+    let drawn = render(inherited, 1.0);
+    assert!(
+        !drawn.notes.iter().any(|n| n.contains("/F1")),
+        "the page's own font was inherited: {:?}",
+        drawn.notes
+    );
+    assert_eq!(
+        ink_points(&drawn.image, 1.0),
+        Some(ink),
+        "and a form that inherits draws in exactly the same place"
+    );
+}
+
+/// A form's `/BBox` clips what the form draws.
+///
+/// The form paints the whole page and declares a box a quarter of it. That is the only way to
+/// tell a clip from a scale: a reader that honoured neither paints the page, one that clipped
+/// to the wrong box paints the wrong quarter, and one that treated the box as empty paints
+/// nothing. All three are told apart by where the ink is *and* by the paper beside it.
+#[test]
+fn a_bbox_clips_the_content_of_a_form() {
+    let bytes = page_with_xobjects(
+        200,
+        "/Fm0 Do",
+        "",
+        &[(
+            "Fm0",
+            form_body("/BBox [50 50 100 100]", "0 0 200 200 re f"),
+        )],
+        &[],
+    );
+    let drawn = render(bytes, 1.0);
+    let ink = ink_points(&drawn.image, 1.0).expect("the clipped rectangle");
+    for (g, w) in [ink.0, ink.1, ink.2, ink.3]
+        .into_iter()
+        .zip([50.0, 50.0, 100.0, 100.0])
+    {
+        assert!(
+            (g - w).abs() <= 1.0,
+            "ink only inside the box, which is the upper right quarter: {ink:?}"
+        );
+    }
+    // The paper either side of it, which is the half of the assertion a bounding box cannot
+    // make: the shape is not smaller, it is *not drawn* there.
+    assert!(
+        region_is_fraction(&drawn.image, 0.1, 0.1, 0.4, 0.4, [255, 255, 255]),
+        "paper inside the form's own bounds and outside its box"
+    );
+    assert!(
+        region_is_fraction(&drawn.image, 0.6, 0.1, 0.9, 0.4, [255, 255, 255]),
+        "and paper above the box"
+    );
+}
+
+/// A form's content executes inside `q` … `Q`, so nothing of it reaches the page after it.
+///
+/// The form sets a red fill and a clip of its own; the page draws a black rectangle outside
+/// both. If either escaped, that rectangle would be red or would be missing — and the two
+/// halves are separate assertions because they are separate halves of the rule. The red is
+/// checked too: a form that set nothing would leave the page's black there and pass.
+#[test]
+fn the_state_a_form_draws_with_does_not_outlive_it() {
+    let bytes = page_with_xobjects(
+        200,
+        "q 1 0 0 rg 0 0 50 50 re W n /Fm0 Do Q 0 0 0 rg 100 0 50 50 re f",
+        "",
+        &[("Fm0", form_body("", "1 0 0 rg 0 0 50 50 re f"))],
+        &[],
+    );
+    let drawn = render(bytes, 1.0);
+    // `y` counts down on a canvas and up on a page, so the rectangle at page (100, 0) to
+    // (150, 50) is the region from a half to three quarters down the image.
+    assert!(
+        pixel_is_fraction(&drawn.image, 0.625, 0.875, [0, 0, 0]),
+        "the page's own mark after the form is black, so the form's colour did not escape"
+    );
+    assert!(
+        pixel_is_fraction(&drawn.image, 0.125, 0.875, [255, 0, 0]),
+        "and the form's own fill was red inside its own clip, so it drew at all"
+    );
+    assert!(
+        region_is_fraction(&drawn.image, 0.55, 0.1, 0.95, 0.45, [255, 255, 255]),
+        "and it was not clipped away, so the form's clip did not escape either"
+    );
+}
+
+/// A form that cannot be executed is reported by name, and draws nothing.
+///
+/// Three ways a form can be unusable, and all three are things a producer does: a stream with
+/// nothing in it, an `/ImageMask` with no samples, and an XObject that is neither an image nor
+/// a form at all. Each must be a note that names the XObject, because a page that silently
+/// loses a region of ink is worse than a page that says where it went.
+#[test]
+fn a_do_that_cannot_be_executed_is_reported_by_name() {
+    // A form behind a filter this does not read. The bytes are written as readable content
+    // on purpose, so that drawing them would be *possible*: a renderer that hands encoded
+    // bytes to the operator table passes this file and gets a plausible page out of it.
+    let encoded = page_with_xobjects(
+        200,
+        "/Fm0 Do",
+        "",
+        &[(
+            "Fm0",
+            format!(
+                "<< /Type /XObject /Subtype /Form /Filter /NoSuchDecode /Length {} >>\n\
+                 stream\n0 0 200 200 re f\nendstream",
+                "0 0 200 200 re f".len()
+            ),
+        )],
+        &[],
+    );
+    let drawn = render(encoded, 1.0);
+    assert!(
+        drawn.is_blank(),
+        "and nothing is drawn from bytes we cannot read: {:?}",
+        drawn.notes
+    );
+    assert!(
+        drawn
+            .notes
+            .iter()
+            .any(|n| n.contains("Fm0") && n.contains("NoSuchDecode")),
+        "which names both the form and what stopped it: {:?}",
+        drawn.notes
+    );
+
+    // A form with no content at all is legal and draws nothing, and is *not* a finding: the
+    // report is for a form this could not run, not for a form that had nothing to say.
+    let empty = page_with_xobjects(200, "/Fm0 Do", "", &[("Fm0", form_body("", ""))], &[]);
+    let drawn = render(empty, 1.0);
+    assert!(drawn.is_blank(), "an empty form draws nothing");
+    assert!(
+        !drawn.notes.iter().any(|n| n.contains("Fm0")),
+        "and says nothing about it: {:?}",
+        drawn.notes
+    );
+
+    // An XObject that is neither an image nor a form. `/PS` is a real subtype — a PostScript
+    // XObject — and executing its content as operators would draw whatever the PostScript
+    // contained, while handing it to an image decoder asks for something that is not an image.
+    let weird = page_with_xobjects(
+        200,
+        "/Weird Do",
+        "",
+        &[("Weird", "<< /Type /XObject /Subtype /PS >>".to_string())],
+        &[],
+    );
+    let drawn = render(weird, 1.0);
+    assert!(
+        drawn.is_blank(),
+        "and nothing is drawn in its place: {:?}",
+        drawn.notes
+    );
+    let note = drawn
+        .notes
+        .iter()
+        .find(|n| n.contains("Weird"))
+        .unwrap_or_else(|| panic!("a note naming it: {:?}", drawn.notes));
+    assert!(
+        note.contains("PS") && note.contains("neither an image nor a form"),
+        "which says what it is rather than guessing: {note}"
+    );
+}
+
+/// A form three deep places both of its rectangles, in the right order.
+///
+/// The nesting case is where the recursion bound has to live, so the fixture is a chain of
+/// forms rather than one: a page draws a form, that form draws another, and that one draws a
+/// third. Each mark is checked against closed-form numbers, and the *order* is checked too —
+/// the innermost rectangle first — because a reader that executed a form after the rest of the
+/// page would draw this page's rectangle underneath it and look right wherever nothing
+/// overlaps.
+#[test]
+fn a_form_nested_three_deep_draws_both_of_its_rectangles() {
+    // Object 5 is the outermost, 6 the middle, 7 the innermost, and each names the next by
+    // that numbering. The middle moves its child along the page, so the two rectangles are
+    // nowhere near each other and a mark placed by the wrong matrix cannot coincide with the
+    // right one.
+    let bytes = page_with_xobjects(
+        200,
+        "/A Do",
+        "",
+        &[
+            (
+                "A",
+                form_body(
+                    "/BBox [0 0 200 200]",
+                    "q 1 0 0 1 100 0 cm /B Do Q 0 0 20 20 re f",
+                ),
+            ),
+            (
+                "B",
+                form_body(
+                    "/Resources << /XObject << /C 7 0 R >> >> /BBox [0 0 200 200]",
+                    "q 1 0 0 1 0 100 cm /C Do Q",
+                ),
+            ),
+            ("C", form_body("", "0 0 20 20 re f")),
+        ],
+        &[],
+    );
+    let drawn = render(bytes, 1.0);
+    // Both rectangles are on the page, and neither is at the origin: A's own at (0,0)–(20,20)
+    // and C's at (100,100)–(120,120), which is A's move to (100,0) composed with B's.
+    let ink = ink_points(&drawn.image, 1.0).expect("both rectangles");
+    assert!(
+        (ink.0).abs() <= 1.0 && (ink.1).abs() <= 1.0,
+        "the outermost form's own rectangle puts ink at the origin: {ink:?}"
+    );
+    assert!(
+        ink.2 >= 119.0 && ink.3 >= 119.0,
+        "and the innermost one, two matrices down, at the far corner: {ink:?}"
+    );
+    // The two are 40 points apart in each axis, so a page with only one of them cannot pass.
+    let gap = ink.2 - ink.0;
+    assert!(
+        (gap - 120.0).abs() <= 2.0,
+        "the whole of both rectangles is 120 points across: {gap}"
+    );
+    assert!(
+        !drawn.notes.iter().any(|n| n.contains("deep")),
+        "three deep is within the bound: {:?}",
+        drawn.notes
+    );
+}
