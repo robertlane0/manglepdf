@@ -186,12 +186,13 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   most about: `/Decode` maps the *stored range* onto the colour space and is how a file
   writes a negative, packed sub-byte samples are padded *per row* so the byte holding
   sample *n* depends on which row it is in, an `/ImageMask` is a stencil rather than a
-  picture, and an `/SMask` is a separate image whose luminance is the alpha. Placement maps
-  each pixel *back* through the inverse transformation, which is what makes a rotated image
-  come out the right shape instead of a staircase. Colour spaces covered: DeviceGray,
-  DeviceRGB, DeviceCMYK, CalGray, CalRGB, ICCBased (by its `/N`) and Indexed. Lab and
-  Separation are refused rather than guessed, because neither can be converted without data
-  this does not have.
+  picture, and an `/SMask` is a separate image whose luminance is the alpha — which makes it
+  something to be *checked* rather than merely sampled, and see "A soft mask is a separate
+  image" below. Placement maps each pixel *back* through the inverse transformation, which is
+  what makes a rotated image come out the right shape instead of a staircase. Colour spaces
+  covered: DeviceGray, DeviceRGB, DeviceCMYK, CalGray, CalRGB, ICCBased (by its `/N`) and
+  Indexed. Lab and Separation are refused rather than guessed, because neither can be converted
+  without data this does not have.
 
   **Shadings** paint. All four PDF function kinds are here, including the PostScript
   calculator — a small stack machine with the specification's operators, whose
@@ -779,6 +780,62 @@ to four decimal places, because the arrows were already right and this page uses
 codes the change affects. The 2.6× excess ink is the image mask, and skipping the image moves
 the page to 0.94306 / 21.33 / 66 655 / 70 595, which is a separate finding and not one this
 change made.
+
+## A soft mask is a separate image, and it was never checked as one
+
+`pdfjs__issue16263.pdf` page 1 carries an `/Image15` that is a **2×2** image whose `/SMask` is a
+**34862×4332** `DeviceGray` one, drawn here as a solid 285×17 pixel bar where `mutool` draws
+three thin arrows and nothing else. Three candidate causes were on the table and they are
+different bugs, so it is worth saying which one it was: **the mask's size was never validated
+against the image's.** Not `Raster::sample` clamping — a mask is sampled at the *image's* own
+`(u, v)`, which is the specification's own arrangement, and a mask wider than its image is not
+an out-of-range read but the whole of what a mask is. Not the alpha read at the wrong scale
+either. What was there is that `decode` called itself on `/SMask` with no check of any kind, so
+a mask 17 431 times the width of its image decoded, sampled to a constant, and painted the
+picture solid.
+
+**The half of it that is a bug rather than a wrong picture is the memory.** `MAX_IMAGE_PIXELS`
+*was* applied to a mask, because a mask goes through the same function as an image — but it was
+applied *after* the mask's stream had been decoded, and under a codec there was no check at all.
+Both measured, against a hostile file of a few hundred bytes:
+
+| hostile `/SMask` | before | after |
+|---|---|---|
+| `/FlateDecode`, 408 kB inflating to 400 MB | peak grew **1 114 624 kB**, mask decoded, **no note at all** | peak grew **400 kB**, refused, reported |
+| `/DCTDecode`, 354 bytes claiming 16000×16000 | peak grew **750 004 kB** | peak grew **0 kB** |
+
+A file from the internet could make this renderer allocate a quarter of a gigabyte and say
+nothing about it. The corpus page itself was paying 19 MB of transient allocation per draw — its
+mask's stream inflates to 18 878 856 bytes and the page draws the form **35 times** — so page 1
+went from a 650 MB peak and 38 s to 41 MB and 20 s.
+
+The bound is now asked of the **dictionary**, before anything is decoded, and under an image
+codec of the codec's own **header**, before the codec has allocated anything: `zune_jpeg::decode`
+reserves `width × height × 3` from a `/SOF` marker, so a file is a request for that much memory
+with a header and nothing behind it. `/SMask` goes through its own entry point and four things
+are refused there, each with its own note — over the bound, a size that disagrees with the
+image's, a stream that decoded short (padding a mask with zeroes is a *hole in the
+transparency*, not a colour), and a mask carrying a mask of its own.
+
+**Every one of them leaves the image drawn with its own colours at full alpha.** `mutool` refuses
+this image outright and skipping it takes the page to SSIM 0.94306, *below* the oracle's ink —
+which is why the difference is visible at all — but the rule this project works to is that an
+image whose mask cannot be used is **reported and drawn**, not dropped and not made invisible.
+So the page's numbers do not move: **0.84906 / 73.51 / 237 475 above tolerance / 272 715 ink
+before and after**, against `mutool`'s 104 890. What changed is that the page now carries one
+line naming `/Image15` and both of the mask's dimensions, and that asking the question costs
+400 kB instead of a gigabyte.
+
+That last part was a defect of its own, and it is the reason the page said nothing before:
+`image_for` collected a decode's notes and then **discarded them whenever the decode succeeded**,
+because they were only read on the error path. A mask that could not be read was therefore
+reported nowhere, even though the picture drew. Ten tests are pinned on all of it — the
+right-sized mask still working, the boundary at exactly `MAX_IMAGE_PIXELS` and one pixel over, a
+short mask reported rather than padded, a mask *under* a mask reported rather than followed, and
+the "before any allocation" claim asserted on the **address space a decode does not grow**, in a
+child process, because a test that only checks the outcome cannot tell an early refusal from a
+late one. See
+[D18](known-diffs.md#d18--an-smask-was-never-checked-against-the-image-it-masks-and-a-hostile-one-cost-a-gigabyte).
 
 `pdfjs__issue1985.pdf` page 1 moves **not at all** — 0.83925 / 22.24 / 39 pixels above tolerance
 before and after, zero ink both ways — and the reason is worth stating rather than leaving as a

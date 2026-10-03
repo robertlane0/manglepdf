@@ -648,12 +648,22 @@ fn read_matrix(object: Option<&Object>) -> Matrix {
     Matrix::new(at(0), at(1), at(2), at(3), at(4), at(5))
 }
 
-/// Find and decode the image a `Do` names.
+/// Find and decode the image a `Do` names, with whatever the decode had to say about it.
 ///
 /// A page's resource table holds the XObjects by name, and an XObject that is not an image
 /// is a note rather than a failure: a form XObject is named by `Do` too, and reaching one is
 /// a later step than this.
-fn image_for(name: &str, resources: &Resources, doc: &Document) -> Result<Raster, String> {
+///
+/// The notes come back beside the raster rather than only on the failure path, because an
+/// image that *did* draw can still have something to report — a soft mask whose size does not
+/// match its image's, or whose samples were short. Dropping those on the way out would say
+/// the picture was drawn and say nothing about the part of it that could not be believed, and
+/// a note that only survives when nothing was drawn is not a report.
+fn image_for(
+    name: &str,
+    resources: &Resources,
+    doc: &Document,
+) -> Result<(Raster, Vec<String>), String> {
     let Some(object) = resources.xobjects.get(name).cloned() else {
         return Err(format!(
             "the page names an image `/{name}` that its resources do not define"
@@ -665,13 +675,20 @@ fn image_for(name: &str, resources: &Resources, doc: &Document) -> Result<Raster
     };
     let resolver = |o: &Object| doc.resolve_object(o);
     let mut notes = Vec::new();
-    image::decode(&stream, &resolver, &mut notes).ok_or_else(|| {
+    let raster = image::decode(&stream, &resolver, &mut notes).ok_or_else(|| {
         if notes.is_empty() {
             format!("the image `/{name}` could not be decoded")
         } else {
             notes.join("; ")
         }
-    })
+    })?;
+    // The name goes on the front so that a page drawing the same picture from three resources
+    // says which of them carried the mask that could not be read.
+    let notes = notes
+        .into_iter()
+        .map(|note| format!("`/{name}`: {note}"))
+        .collect();
+    Ok((raster, notes))
 }
 
 /// A shading lookup: a name to the shading it names, and the pattern's own transformation.
@@ -951,7 +968,7 @@ type FontLookup<'a> = &'a mut dyn FnMut(&str, &Resources) -> Result<FontProgram,
 /// An image lookup: an XObject name to the samples it names.
 ///
 /// For the same reason as the other two, and with the same shape.
-type ImageLookup<'a> = &'a mut dyn FnMut(&str, &Resources) -> Result<Raster, String>;
+type ImageLookup<'a> = &'a mut dyn FnMut(&str, &Resources) -> Result<(Raster, Vec<String>), String>;
 
 /// A rectangle carried through the page placement, as a device-space rectangle.
 ///
@@ -1169,7 +1186,21 @@ fn draw_mark(
             // interpreter reports it by name rather than recording a mark for it, because a
             // mark is a claim that something was drawn.
             Some(name) => match images(name, resources) {
-                Ok(raster) => {
+                Ok((raster, said)) => {
+                    // Whatever the decode had to report goes on the page even though the
+                    // picture was drawn — an image whose soft mask could not be read is on
+                    // the page, and so is the reason it has no transparency.
+                    //
+                    // Once per page rather than once per mark, for the reason the font's
+                    // notices are: a form drawn forty times draws the same picture forty
+                    // times, and the note names the resource rather than the mark, so
+                    // repeating it says the same thing forty times over. A page whose report
+                    // is forty identical lines is a page whose report is not read.
+                    for reason in said {
+                        if !notes.contains(&reason) {
+                            notes.push(reason);
+                        }
+                    }
                     // The image's own space is the unit square, so the mark's
                     // transformation is all that is needed to place it. A mask is painted in
                     // the graphics state's non-stroking colour, which `Do` does not name and

@@ -1715,3 +1715,135 @@ a separate finding.
 is `/TimesNewRomanPSMT`, which the document did not embed, so a metric-compatible face stands in
 and the substitution is reported. The oracle draws the original outlines; this draws Times'.
 That is D6's subject and the project's stated policy, not a bug.
+
+## D18 — an `/SMask` was never checked against the image it masks, and a hostile one cost a gigabyte
+
+**Severity: a page from the internet could make this renderer allocate a quarter of a gigabyte,
+and the picture it was protecting was drawn solid with no word about why. Fixed. The visible
+pixels on the corpus page do not move, and that is a decision rather than a null.**
+
+D17 left one thing on this page and named it: `/Image15`, a 2×2 indexed image whose `/SMask` is
+a 34862×4332 `DeviceGray` image. Three candidate causes were on the table and they are
+different bugs, so it is worth saying which one it was.
+
+### Which of the three it was
+
+**The first: the soft mask's size was never validated against the image's.**
+
+- **Not** `Raster::sample` clamping out of range. There is no separate mask type; a mask is a
+  second `Raster` sampled at the same `(u, v)` as the picture, which is the specification's own
+  arrangement, and `sample` clamps `u` and `v` into `0..=1` and then indexes the mask's *own*
+  width. Sampling a wider mask at a narrower image's coordinates is not out of range at all —
+  it is the whole of what a mask is for.
+- **Not** the alpha read at the wrong scale. `mask_alpha(u, v)` is handed the image's own
+  fractional coordinates, so one mask sample serves one image sample, and the mask's *luminance*
+  becomes the alpha with the right weights.
+
+What was actually there: `decode` called itself on `/SMask` with **no check of any kind** — not
+the size, not the bound, not whether the samples covered the size. A mask 17 431 times the width
+of the image it masks therefore decoded, and a decoded mask larger than its image samples a
+constant, and a constant alpha paints the picture solid. The second and third candidates are
+the *symptom* of the missing first one; the missing check is the defect.
+
+### The hostile half, which is the half that matters
+
+`MAX_IMAGE_PIXELS` was applied to a mask, because a mask is decoded by the same function as an
+image — but it was applied **after** the mask's stream had been decoded, and under a codec there
+was no check at all. Both measured, in a process whose own peak virtual size was the instrument,
+against a file of a few hundred bytes:
+
+| hostile `/SMask` | before | after |
+|---|---|---|
+| `/FlateDecode`, `/Width 34862 /Height 4332`, 408 kB inflating to 400 MB | peak grew **1 114 624 kB**, mask decoded to 34862 wide, **no note at all** | peak grew **400 kB**, refused, reported |
+| `/DCTDecode`, 354 bytes claiming 16000×16000 | peak grew **750 004 kB**, refused for a reason about Huffman tables rather than about size | peak grew **0 kB**, refused on the bound |
+
+The first row is the quarter of a gigabyte, and it was silent: the image drew, and nothing said
+why it had no transparency. The second is worse in principle and the same in kind —
+`zune_jpeg::decode` allocates `width × height × 3` up front from a `/SOF` marker, so a file is a
+request for that much memory with a header and nothing behind it.
+
+The corpus page itself cost 19 MB of transient allocation per draw — the mask's stream inflates
+to 18 878 856 bytes, and the page draws the form containing it **35 times**. Rendering page 1
+went from a 650 MB peak and 38 s to a 41 MB peak and 20 s, and that is the same defect seen from
+the other end.
+
+### What fixing it meant
+
+`decode` now answers "how big is this" from the **dictionary**, before anything is decoded, and a
+size above the bound is a refusal there rather than a warning 40 lines later. The exception is a
+stream under an image codec, where the codec's own header carries the size and the dictionary may
+be lying; there the header is read on its own and the bound asked of *it*, which costs a few
+hundred bytes of parsing and no pixels.
+
+`/SMask` goes through its own entry point, `decode_soft_mask`, and four things are refused there,
+each with its own note because they are four different faults:
+
+1. a mask **above `MAX_IMAGE_PIXELS`** — the one about memory rather than meaning;
+2. a mask whose `/Width` and `/Height` **disagree with the image's**, which is what the
+   specification requires and what a damaged or hostile file breaks;
+3. a mask that **decoded short**. Padding a mask with zeroes is not a wrong colour, it is a
+   *hole in the transparency*: `sample_at` past the end of the buffer answers zero, and for a
+   picture zero may be a colour the file meant, while for a mask it is invisible content;
+4. the recursive case, a mask carrying a mask of its own, which is not a thing and is where an
+   unbounded recursion would start.
+
+**Every one of them leaves the image drawn with its own colours at full alpha.** The colours are
+real and worth showing; the mask is a claim about transparency that could not be checked, and it
+is reported rather than believed. Dropping the picture would answer a loss of content with a
+note, and treating the mask as zero alpha would hide content and call it a rendering.
+
+### One more defect the mask found
+
+`image_for` collected a decode's notes and then **threw them away whenever the decode
+succeeded** — they were only read on the `Err` path. So a mask that could not be read was
+reported nowhere at all, even though the picture drew. The lookup now returns the notes beside
+the raster, `draw_mark` puts them on the page, and they are de-duplicated: this page draws the
+form 35 times, and 35 identical lines of report is a report nobody reads. Before this change the
+page carried **no note about its image at all**; it now carries one line naming `/Image15` and
+both of the mask's dimensions.
+
+### The corpus page did not move, and why
+
+| | SSIM | RMS | above tolerance | our ink | `mutool`'s |
+|---|---|---|---|---|---|
+| before | 0.84906 | 73.51 | 237 475 | 272 715 | 104 890 |
+| after | 0.84906 | 73.51 | 237 475 | 272 715 | 104 890 |
+
+Not one pixel moved, and **the reason is the second of the two answers above.** `mutool` refuses
+this image outright — it draws nothing in that band — and skipping the image here takes the page
+to SSIM 0.94306 and *below* the oracle's ink, which is what makes the difference visible at all.
+This renderer now draws the image at full alpha, because the rule is that an image whose mask
+cannot be used is reported and drawn rather than dropped or hidden. So the bar is still drawn;
+what changed is that the page now says why the picture has no transparency, and that asking the
+question costs 400 kB instead of a gigabyte.
+
+That is a real cost and it is recorded rather than dressed: **a hostile file can still make this
+renderer allocate, and the guard is a bound rather than a policy.** The one number above it —
+`MAX_IMAGE_PIXELS` — is 64 · 1024 · 1024 samples, which is 604 MB as RGBA, so a page carrying
+several images *at* the bound can still reach a gigabyte in ordinary use. Tightening it is a
+separate decision with a cost of its own: a 64-megapixel photograph is a real page, not an
+attack.
+
+### What is pinned now
+
+Eleven tests, each confirmed to fail on the code before this change and to pass on it after.
+Six in `image.rs`, five end to end in `pages.rs`:
+
+- a mask whose size disagrees with its image's is reported, with both sizes in the note, and the
+  image draws at full alpha in its own colours;
+- a mask above the bound is refused, and **its stream is never decoded** — asserted by the
+  address space it does *not* grow, in a child process, because a test that only checks the
+  outcome cannot tell an early refusal from a late one;
+- a mask of the **correct** dimensions still works, at a small size, asserted both as a raster
+  and through `draw` so that the half that is transparent and the half that is opaque are
+  distinguished;
+- the **boundary**: exactly `MAX_IMAGE_PIXELS` samples is inside the bound and one pixel over is
+  outside it, asserted on *which* refusal happened, because a mask at the bound cannot be
+  decoded in a test and the reason is the only place the boundary is visible;
+- a mask that decoded short is reported rather than padded with zeroes;
+- a mask **under** a mask is reported rather than followed, because a chain of them is a file
+  choosing the depth of a recursion rather than the renderer discovering one;
+- the same bound on the **codec** path, where the size comes from a `/SOF` marker rather than
+  from the dictionary, and where the decoder allocates before it knows anything else;
+- and a mask's absence is full opacity rather than zero, which is the third of the three
+  candidates this entry opened on, pinned so that it cannot drift into the second.

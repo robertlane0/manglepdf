@@ -390,12 +390,32 @@ renderer that never has to ask the machine for a font.
    the fix changes no pixel on that page while removing a wrong answer for every CID in the
    range that subtable does cover. Its 2.6× excess ink is `/Image15`, a 2×2 image whose `/SMask`
    is a 34862×4332 one, drawn as a solid bar where the oracle draws three thin arrows.
-8. **The image mask on `pdfjs__issue16263.pdf`, next.** It is the whole of that page's remaining
-   difference and it is a sampling defect, not a font one: the bar sits inside the image's
-   placement box, appears once per column per row band, and accounts for 176 190 of the ~168 000
-   pixels of excess. Skipping the image and drawing nothing else moves the page from SSIM 0.84906
-   to 0.94306 and from 272 715 pixels of ink to 70 595, which is *below* `mutool`'s 104 890 — so
-   this is worth the next hour on this page rather than the next hundred on the list above.
+8. **The image mask on `pdfjs__issue16263.pdf`: done.** It was **not** a sampling defect, and
+   ruling out the other two candidates is most of the finding. `Raster::sample` was not clamping
+   out of range — a mask is sampled at the *image's* own `(u, v)`, which is the specification's
+   arrangement, and a mask wider than its image is not an out-of-range read. The alpha was not
+   read at the wrong scale. **What was there is that `decode` called itself on `/SMask` with no
+   check at all**, so `/Image15`'s 34862×4332 mask decoded, sampled to a constant over a 2×2
+   image, and painted the picture solid. Four things are now refused in `decode_soft_mask` before
+   the mask's stream is touched at all — over the bound, a size that disagrees with the image's,
+   a stream that decoded short, and a mask carrying a mask — and each leaves the image drawn
+   with its own colours at full alpha. The **memory** half was the urgent one and it is measured:
+   `MAX_IMAGE_PIXELS` *was* reached for a mask, but only *after* its stream had been decoded, and
+   not at all under a codec. A 408 kB `/FlateDecode` mask inflating to 400 MB grew this process's
+   address space by **1 114 624 kB** and said nothing about it; a 354-byte `/DCTDecode` claiming
+   16000×16000 grew it by **750 004 kB**, because `zune_jpeg::decode` reserves `w × h × 3` from a
+   `/SOF` marker. Both are now **0–400 kB**, refused on the bound before anything is allocated,
+   and page 1 went from a 650 MB peak and 38 s to 41 MB and 20 s. A fifth defect fell out: a
+   decode's notes were **discarded whenever the decode succeeded**, so a mask that could not be
+   read was reported nowhere at all even though the picture drew.
+
+   **The page's numbers do not move, and that is the rule rather than a null result:**
+   0.84906 / 73.51 / 237 475 above tolerance / 272 715 ink before and after, against `mutool`'s
+   104 890. Skipping the image moves it to 0.94306 and *below* the oracle, which is why the
+   difference is visible at all — but an image whose mask cannot be used is **reported and
+   drawn**, not dropped and not made invisible, so the bar is still drawn and the page now says
+   why the picture has no transparency. See
+   [D18](docs/known-diffs.md#d18--an-smask-was-never-checked-against-the-image-it-masks-and-a-hostile-one-cost-a-gigabyte).
 
 Tier B is now standing — see "The wild corpus found" below — and it has overtaken everything
 else on this list, because nothing else in the project can see the problems it can see.

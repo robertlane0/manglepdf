@@ -19,7 +19,11 @@
 //! * **`/ImageMask`** is a stencil, not a picture. One bit per sample, zero paints and one
 //!   does not, and the colour comes from the graphics state rather than from the data.
 //! * **`/SMask`** is a *separate* image whose luminance is this one's alpha. It is not
-//!   blended with the colour, and it usually has a different size.
+//!   blended with the colour, and it is **required to have the same `/Width` and `/Height`**
+//!   as the image it masks — one mask sample per image sample. "Usually a different size" is
+//!   the wrong reading and it is a dangerous one: a mask much larger than its image samples to
+//!   a constant, and a constant alpha paints the picture solid, which looks like a rendering
+//!   and is a lie about transparency. See [`decode_soft_mask`].
 //! * **`/Interpolate`** decides what happens when the image is scaled up. Without it a
 //!   photograph becomes a mosaic of whole pixels, which is what the file asked for.
 //!
@@ -37,6 +41,21 @@
 //! sample it wants. Going backwards rather than forwards is what makes a rotated image
 //! work: nothing has to be resampled into an axis-aligned buffer first, and a square at
 //! forty-five degrees comes out the right shape rather than a staircase.
+//!
+//! ## How big an image is allowed to be
+//!
+//! [`MAX_IMAGE_PIXELS`] is asked of the **dictionary**, before anything is decoded, because a
+//! declared size above the bound is a refusal rather than a warning — and because asking it
+//! afterwards is asking it too late. The size a file *declares* is what its samples will be
+//! read at, and a file that declares an enormous image can attach a filter chain to it: a
+//! 408 kB `/FlateDecode` stream that inflates to 400 MB, or a JPEG whose `/SOF` marker names
+//! 16000 by 16000 and makes a codec reserve 768 MB before it has read a single scan. Under an
+//! image codec the dictionary may be lying, so the **header** is read on its own there and the
+//! bound asked of *it*, which costs a few hundred bytes of parsing and no pixels.
+//!
+//! A soft mask is an image and is asked the same question, one step earlier — before its stream
+//! exists — because a mask nobody can check is a claim about transparency that must be reported
+//! rather than believed. See [`decode_soft_mask`].
 
 use mangle_content::Matrix;
 use mangle_syntax::object::{Dict, Object, Stream};
@@ -48,6 +67,18 @@ use crate::{Device, Rect};
 /// The most pixels an image may have. A page can ask for an image larger than memory, and
 /// the answer has to be a refusal rather than an allocation failure.
 pub const MAX_IMAGE_PIXELS: usize = 64 * 1024 * 1024;
+
+/// Does a picture of this shape exceed the bound?
+///
+/// Multiplication saturates rather than wrapping: a `/Width` of 2⁶⁴ next to a `/Height` of 2
+/// is over the bound whatever the machine's arithmetic says, and a wrapped product could
+/// come out small enough to be drawn. Every call is a *question*, so it can be asked before
+/// anything has been allocated — which is the point of having it apart from the refusal
+/// that follows it.
+#[must_use]
+fn exceeds_bound(width: usize, height: usize) -> bool {
+    width.saturating_mul(height) > MAX_IMAGE_PIXELS
+}
 
 /// A decoded image, ready to place.
 #[derive(Debug, Clone, PartialEq)]
@@ -387,6 +418,20 @@ impl SampleRange {
     }
 }
 
+/// What a stream is being read as.
+///
+/// A soft mask is an image with one obligation a picture does not have: it has to be whole.
+/// The part of a mask that is missing becomes an alpha nothing can be drawn with, and a
+/// renderer that fills the gap with zero alpha does not draw a damaged picture, it hides
+/// content — which is the one answer a note exists to rule out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// A picture, drawn for its own sake.
+    Picture,
+    /// An `/SMask`: the alpha of another image.
+    SoftMask,
+}
+
 /// Decode an image XObject into samples ready to place.
 ///
 /// `None` means the image could not be decoded at all, which the caller reports; a note is
@@ -396,6 +441,75 @@ pub fn decode(
     stream: &Stream,
     resolve: &dyn Fn(&Object) -> Option<Object>,
     notes: &mut Vec<String>,
+) -> Option<Raster> {
+    decode_role(stream, resolve, notes, Role::Picture)
+}
+
+/// Decode an `/SMask`: the separate image whose luminance is another one's alpha.
+///
+/// A mask is required to have the **same** width and height as the image it masks, and both
+/// facts are checked here — before the mask's stream is decoded at all, so a file cannot name
+/// a mask of any size it likes and have us allocate for it.
+///
+/// Four things are refused, each with its own note, because they are four different faults
+/// and a page that loses its transparency deserves to be told which one it was:
+///
+/// * a mask above [`MAX_IMAGE_PIXELS`], which is the one that is about memory rather than
+///   about meaning — this file's mask is 34862 by 4332 pixels, and asking its filter chain for
+///   the bytes of a mask that size is how a page from the internet asks for a quarter of a
+///   gigabyte;
+/// * a mask whose size disagrees with the image's, which is damaged or hostile and cannot be
+///   sampled per image sample at all;
+/// * a mask that decoded short, whose missing samples would become an invented alpha;
+/// * and a mask carrying a `/SMask` of its own, which is not a thing and is where an unbounded
+///   recursion would start.
+///
+/// Every one of them leaves the image drawn with its own colours at full alpha. The colours
+/// are real and worth showing; the mask is a claim about transparency that could not be
+/// checked, and it is reported rather than believed.
+#[must_use]
+pub fn decode_soft_mask(
+    stream: &Stream,
+    image_width: usize,
+    image_height: usize,
+    resolve: &dyn Fn(&Object) -> Option<Object>,
+    notes: &mut Vec<String>,
+) -> Option<Raster> {
+    let declared = |key: &str| -> usize {
+        stream
+            .dict
+            .get(key)
+            .and_then(Object::as_i64)
+            .unwrap_or(0)
+            .max(0) as usize
+    };
+    let (mask_w, mask_h) = (declared("Width"), declared("Height"));
+    // A mask that says nothing about its own size is left to `decode_role`, which refuses it
+    // with the note it uses for every picture with no size.
+    if mask_w > 0 && mask_h > 0 {
+        if exceeds_bound(mask_w, mask_h) {
+            notes.push(format!(
+                "a soft mask of {mask_w} by {mask_h} pixels is above the {MAX_IMAGE_PIXELS} \
+                 this draws, and was not decoded"
+            ));
+            return None;
+        }
+        if mask_w != image_width || mask_h != image_height {
+            notes.push(format!(
+                "a soft mask of {mask_w} by {mask_h} pixels does not match the {image_width} by \
+                 {image_height} image it masks, and was not used"
+            ));
+            return None;
+        }
+    }
+    decode_role(stream, resolve, notes, Role::SoftMask)
+}
+
+fn decode_role(
+    stream: &Stream,
+    resolve: &dyn Fn(&Object) -> Option<Object>,
+    notes: &mut Vec<String>,
+    role: Role,
 ) -> Option<Raster> {
     let dict: &Dict = &stream.dict;
     let declared_w = dict.get("Width").and_then(Object::as_i64).unwrap_or(0);
@@ -417,18 +531,31 @@ pub fn decode(
         .unwrap_or(8)
         .max(0) as usize;
 
-    // The filters below an image codec are deliberately left alone, so what comes back is
-    // either samples or the bytes the codec itself wants.
-    let decoded = decode_stream(stream);
-    for note in &decoded.notes {
-        notes.push(format!("image: {note}"));
-    }
+    // Read off the dictionary, which costs nothing, and asked before anything is decoded: a
+    // file's declared size is what its samples are read at, so a size above the bound is a
+    // refusal and not a warning. The exception is a stream under an image codec, where the
+    // codec's own header carries the size and the dictionary may be lying — there the header
+    // is asked instead, below, and before the codec has allocated anything either.
     let terminal = stream
         .filters()
         .iter()
         .rev()
         .find(|f| matches!(**f, b"DCTDecode" | b"DCT" | b"JPXDecode" | b"JBIG2Decode"))
         .copied();
+    if terminal.is_none() && exceeds_bound(declared_w.max(0) as usize, declared_h.max(0) as usize) {
+        notes.push(format!(
+            "an image of {declared_w} by {declared_h} pixels is above the {MAX_IMAGE_PIXELS} \
+             this draws and was not drawn"
+        ));
+        return None;
+    }
+
+    // The filters below an image codec are deliberately left alone, so what comes back is
+    // either samples or the bytes the codec itself wants.
+    let decoded = decode_stream(stream);
+    for note in &decoded.notes {
+        notes.push(format!("image: {note}"));
+    }
 
     let (source, space, width, height) = match terminal {
         Some(b"DCTDecode" | b"DCT") => {
@@ -510,8 +637,11 @@ pub fn decode(
         Source::Samples { data, range } => (data, range),
     };
 
-    let total = width.checked_mul(height)?;
-    if total > MAX_IMAGE_PIXELS {
+    // The bound, asked again for the size that is actually about to be allocated. The check
+    // above it is the one that matters — it runs before a single byte is allocated — and this
+    // one is here because a codec's header can name a size the dictionary did not, so the
+    // answer to "how big is this" is not yet final at the earlier point.
+    if exceeds_bound(width, height) {
         notes.push(format!(
             "an image of {width} by {height} pixels is above the {MAX_IMAGE_PIXELS} this \
              draws and was not drawn"
@@ -538,18 +668,48 @@ pub fn decode(
 
     let components = space.components();
     let space = apply_decode(space, &read_decode(dict.get("Decode"), components));
+
+    // A short stream is a fact about the mask's *alpha* rather than about its colour, so it
+    // is checked here and only here. `sample_at` past the end of the buffer answers zero, and
+    // for a picture zero is a colour the file may well have meant; for a mask it is a hole in
+    // the transparency, and drawing the picture as though that hole were transparent is not a
+    // rendering of the file — it is the removal of part of it, done quietly.
+    if role == Role::SoftMask {
+        let wanted = sample_bytes(width, height, components, range);
+        if samples.len() < wanted {
+            notes.push(format!(
+                "a soft mask holds {} bytes of the {wanted} its {width} by {height} pixels \
+                 need, and was not used",
+                samples.len()
+            ));
+            return None;
+        }
+    }
+
     let pixels = to_rgba(&samples, &space, width, height, range, components);
     let _ = space.name();
 
-    let soft_mask = dict
-        .get("SMask")
-        .and_then(resolve)
-        .and_then(|o| match o {
-            Object::Stream(s) => Some(s),
-            _ => None,
-        })
-        .and_then(|s| decode(&s, resolve, notes))
-        .map(Box::new);
+    // A mask's own `/SMask` is not followed. A soft mask's luminance *is* its alpha, so a mask
+    // under a mask is a claim the specification does not make, and following it would make the
+    // depth of a chain of them the only thing standing between a file and the stack: each link
+    // is a legal image reference, and a few hundred of them is a few hundred nested calls. It
+    // is reported rather than dropped silently, because a file that writes one is telling us
+    // something about itself.
+    let soft_mask = if role == Role::SoftMask {
+        if dict.get("SMask").is_some() {
+            notes.push("a soft mask carries a soft mask of its own, which is not read".to_owned());
+        }
+        None
+    } else {
+        dict.get("SMask")
+            .and_then(resolve)
+            .and_then(|o| match o {
+                Object::Stream(s) => Some(s),
+                _ => None,
+            })
+            .and_then(|s| decode_soft_mask(&s, width, height, resolve, notes))
+            .map(Box::new)
+    };
 
     let key_range = dict
         .get("Mask")
@@ -577,12 +737,43 @@ pub fn decode(
     })
 }
 
+/// How many bytes a picture of this shape needs, packed the way its samples are.
+///
+/// A codec that wrote one byte per sample made that width for us, so the layout is 8 bits
+/// whatever the dictionary said. Sub-byte layouts are padded to a byte per *row*, which is
+/// the same rule `sample_at` reads by and the reason this cannot be `width × height × …`.
+fn sample_bytes(width: usize, height: usize, components: usize, range: SampleRange) -> usize {
+    let per_row = width
+        .saturating_mul(components)
+        .saturating_mul(range.layout)
+        .div_ceil(8);
+    per_row.saturating_mul(height)
+}
+
 /// Decode a JPEG's samples into RGB.
+///
+/// The bound is asked of the header, before the decode, and that is the whole reason this is
+/// not one call: `decode` allocates `width × height × 3` up front from a `/SOF` marker, so a
+/// file is a request for that much memory with a header and nothing behind it. The header is
+/// read on its own first, which costs a few hundred bytes of parsing and no pixels, and a
+/// picture above the bound is refused there.
 fn jpeg(data: &[u8], notes: &mut Vec<String>) -> Option<(Vec<u8>, usize, usize)> {
     use zune_jpeg::JpegDecoder;
     use zune_jpeg::zune_core::bytestream::ZCursor;
 
     let mut decoder = JpegDecoder::new(ZCursor::new(data));
+    if decoder.decode_headers().is_ok()
+        && let Some(info) = decoder.info()
+    {
+        let (w, h) = (usize::from(info.width), usize::from(info.height));
+        if exceeds_bound(w, h) {
+            notes.push(format!(
+                "a JPEG image is {w} by {h} pixels, above the {MAX_IMAGE_PIXELS} this draws, \
+                 and was not decoded"
+            ));
+            return None;
+        }
+    }
     let pixels = match decoder.decode() {
         Ok(p) => p,
         Err(e) => {
@@ -990,6 +1181,49 @@ mod tests {
             }),
         );
         Stream::new(dict, pack(&bits))
+    }
+
+    /// An `/SMask` of this size in `DeviceGray`, carrying `data`.
+    ///
+    /// The point of the fixture is that `/Width` and `/Height` can be written freely: the
+    /// common case is a mask the same size as its image, and every refusal here is a claim
+    /// about a mask that is *not*.
+    fn soft_mask(w: usize, h: usize, data: Vec<u8>, bits: usize) -> Stream {
+        let mut dict = Dict::new();
+        dict.set("Width", Object::Int(w as i64));
+        dict.set("Height", Object::Int(h as i64));
+        dict.set("BitsPerComponent", Object::Int(bits as i64));
+        dict.set("ColorSpace", Object::name("DeviceGray"));
+        Stream::new(dict, data)
+    }
+
+    /// An image of this size whose `/SMask` is `mask`.
+    ///
+    /// An `/SMask` here is the stream itself rather than a reference, because the resolver
+    /// these tests use hands back what it is given and a reference would come back as a
+    /// reference.
+    fn with_mask(w: usize, h: usize, data: Vec<u8>, bits: usize, mask: &Stream) -> Stream {
+        let mut stream = match bits {
+            8 => rgb_image(w, h, data),
+            1 => {
+                // One bit per sample in `DeviceGray`, packed per row, which is the layout a
+                // mask is most often written in.
+                let mut dict = Dict::new();
+                dict.set("Width", Object::Int(w as i64));
+                dict.set("Height", Object::Int(h as i64));
+                dict.set("BitsPerComponent", Object::Int(1));
+                dict.set("ColorSpace", Object::name("DeviceGray"));
+                Stream::new(dict, data)
+            }
+            other => panic!("no fixture writes {other} bits"),
+        };
+        stream.dict.set("SMask", Object::Stream(mask.clone()));
+        stream
+    }
+
+    /// The notes of a decode, joined, for a test that asserts *what was said*.
+    fn said(notes: &[String]) -> String {
+        notes.join("; ")
     }
 
     /// A string of `0` and `1` as bytes, most significant bit first, which is the order a
@@ -1748,6 +1982,474 @@ mod tests {
             assert!(MAX_IMAGE_PIXELS == 64 * 1024 * 1024);
             assert!(MAX_IMAGE_PIXELS > 1_000_000, "room for a real photograph");
         }
+    }
+
+    // ── A soft mask, which is a separate image and has to be checked as one ──────────
+
+    /// The bound is a question, and both sides of it are asserted rather than the shape of
+    /// the check.
+    #[test]
+    fn the_bound_is_at_the_bound_and_one_pixel_over_is_not() {
+        // 8192 by 8192 is exactly 64 · 1024 · 1024 pixels.
+        assert!(!exceeds_bound(8192, 8192), "at the bound is drawn");
+        assert!(
+            exceeds_bound(8193, 8192) && exceeds_bound(8192, 8193),
+            "one pixel over in either axis is refused, and `>` is what says so"
+        );
+        assert!(
+            exceeds_bound(34862, 4332),
+            "the corpus file's mask is 151 million samples"
+        );
+    }
+
+    /// A multiplication that wraps is not a small image.
+    #[test]
+    fn a_bound_saturated_by_an_absurd_size_is_still_over_it() {
+        assert!(
+            exceeds_bound(usize::MAX, 2),
+            "2^65 pixels is not zero pixels"
+        );
+        assert!(exceeds_bound(usize::MAX, 1));
+        assert!(!exceeds_bound(1, 1));
+    }
+
+    /// The common case: a mask the same size as the image, which is what the specification
+    /// requires and what nearly every file has. It must keep working.
+    #[test]
+    fn a_mask_the_same_size_as_its_image_is_used() {
+        // Two by two, so one byte per row at one bit per sample. The top row is white and the
+        // bottom row is black, which is a mask with a visible edge rather than a constant.
+        // The mask's first row is its *top* row, so this is opaque above and transparent
+        // below — a mask with a visible edge rather than a constant one.
+        let mask = soft_mask(2, 2, vec![0b1111_1111, 0b0000_0000], 1);
+        let image = with_mask(
+            2,
+            2,
+            vec![255, 0, 0, 0, 0, 255, 0, 255, 0, 255, 0, 255],
+            8,
+            &mask,
+        );
+        let (raster, notes) = decode_ok(&image);
+        assert!(
+            notes.is_empty(),
+            "an ordinary mask is not a complaint: {notes:?}"
+        );
+        let soft = raster.soft_mask.as_ref().expect("the mask was read");
+        assert_eq!((soft.width, soft.height), (2, 2));
+        // The mask is a luminance, so its white row is opaque and its black row is not. The
+        // alpha reaches the page through `draw`, so that is where it is asserted rather than
+        // on the raster's own pixels — the image's alpha is 255 everywhere and the mask is
+        // what makes it otherwise.
+        assert_eq!(soft.at(0, 0)[0], 255, "the mask's first row is white");
+        assert_eq!(soft.at(0, 1)[0], 0, "and its second is black");
+        assert!(
+            (raster.mask_alpha(0.5, 0.25) - 1.0).abs() < 1e-9,
+            "opaque above"
+        );
+        assert!(
+            (raster.mask_alpha(0.5, 0.75) - 0.0).abs() < 1e-9,
+            "not drawn below"
+        );
+
+        let mut device = Device::new(crate::Image::filled(2, 2, [255, 255, 255, 255]));
+        // The canvas counts its rows down and `draw` turns the page's y axis over itself, so the
+        // unit square onto rows 0..2 is a negative y scale rather than a positive one.
+        let unit_square = Matrix::new(2.0, 0.0, 0.0, -2.0, 0.0, 2.0);
+        assert!(draw(&mut device, &raster, &unit_square, 1.0, None));
+        let page = device.into_image();
+        assert_eq!(
+            page.get(0, 0),
+            Some([255, 0, 0, 255]),
+            "red, where the mask is white"
+        );
+        assert_eq!(
+            page.get(0, 1),
+            Some([255, 255, 255, 255]),
+            "paper, where the mask is black — the image's colour does not leak through"
+        );
+    }
+
+    /// A mask's luminance is its alpha, and that is what the drawn picture answers.
+    #[test]
+    fn a_masks_alpha_comes_from_its_luminance() {
+        let raster = Raster {
+            width: 1,
+            height: 1,
+            pixels: vec![10, 20, 30, 255],
+            interpolate: false,
+            soft_mask: Some(Box::new(Raster {
+                width: 1,
+                height: 1,
+                pixels: vec![128, 128, 128, 255],
+                interpolate: false,
+                soft_mask: None,
+                key_range: None,
+                is_stencil: false,
+            })),
+            key_range: None,
+            is_stencil: false,
+        };
+        let alpha = raster.mask_alpha(0.5, 0.5);
+        assert!(
+            (alpha - 128.0 / 255.0).abs() < 1e-9,
+            "half grey is half opaque, and it is per image sample rather than per device pixel"
+        );
+    }
+
+    /// A missing mask is fully opaque, not zero: an alpha nobody can check is not a claim of
+    /// transparency.
+    #[test]
+    fn an_image_with_no_mask_is_fully_opaque() {
+        let raster = Raster {
+            width: 1,
+            height: 1,
+            pixels: vec![10, 20, 30, 255],
+            interpolate: false,
+            soft_mask: None,
+            key_range: None,
+            is_stencil: false,
+        };
+        assert_eq!(raster.mask_alpha(0.5, 0.5), 1.0);
+    }
+
+    /// The defect, as it was found: a 2 by 2 image whose `/SMask` is 34862 by 4332.
+    ///
+    /// The mask was read with no check at all, and a mask that large sampled at a two-by-two
+    /// image's coordinates is a constant, so the picture painted solid. Here the mask is
+    /// reported and the picture keeps its own colours at full alpha.
+    #[test]
+    fn a_mask_the_size_of_another_page_is_reported_and_the_image_keeps_its_colours() {
+        // The corpus file's own numbers, and the mask's stream is *not* filled with 151
+        // million samples — the point of the test is that it is never decoded, so its
+        // contents are not what decides anything.
+        let mask = soft_mask(34862, 4332, vec![0; 16], 8);
+        let image = with_mask(2, 2, vec![255; 24], 8, &mask);
+        let mut notes = Vec::new();
+        let raster = decode(&image, &|o| Some(o.clone()), &mut notes).expect("the image decodes");
+        assert!(
+            raster.soft_mask.is_none(),
+            "a mask 17431 times the width of the image it masks is not an alpha channel"
+        );
+        let said = said(&notes);
+        assert!(
+            said.contains("soft mask") && said.contains("34862") && said.contains("4332"),
+            "the mask is reported by its own size: {said:?}"
+        );
+        // The image's colours are real and worth showing.
+        assert_eq!(raster.at(1, 1), [255, 255, 255, 255], "drawn, and opaque");
+    }
+
+    /// The same fact for a mask that is merely the wrong size, which is damaged rather than
+    /// hostile.
+    #[test]
+    fn a_mask_that_does_not_match_its_image_is_reported() {
+        let mask = soft_mask(3, 2, vec![0, 0, 0, 0, 0, 0], 8);
+        let image = with_mask(2, 2, vec![0; 24], 8, &mask);
+        let mut notes = Vec::new();
+        let raster = decode(&image, &|o| Some(o.clone()), &mut notes).expect("the image decodes");
+        assert!(raster.soft_mask.is_none());
+        assert!(
+            said(&notes).contains("does not match"),
+            "a mask of a different size is reported: {notes:?}"
+        );
+    }
+
+    /// The bound is a boundary, and one pixel over is on the other side of it.
+    ///
+    /// What is asserted is **which** refusal happened, not whether one did. A mask of
+    /// exactly 64 · 1024 · 1024 samples cannot be decoded in a test — 604 MB of RGBA — so
+    /// the only honest way to stand on the boundary is to give the mask at the bound no
+    /// samples at all and read the reason: the bound must not be it. An off-by-one makes this
+    /// fail at exactly the pixel where it belongs.
+    #[test]
+    fn a_mask_at_the_bound_is_not_refused_and_one_pixel_over_is() {
+        // Exactly at the bound: 8192 by 8192 samples.
+        let at_bound = soft_mask(8192, 8192, vec![0; 32], 8);
+        let mut notes = Vec::new();
+        let _ = decode_soft_mask(&at_bound, 8192, 8192, &|o| Some(o.clone()), &mut notes);
+        assert!(
+            !said(&notes).contains("above the"),
+            "a mask of exactly {MAX_IMAGE_PIXELS} samples is within the bound, so the bound \
+             cannot be why this mask was refused: {notes:?}"
+        );
+
+        // One pixel over, in the shape the corpus file actually uses.
+        let over = soft_mask(34862, 4332, vec![0; 32], 8);
+        notes.clear();
+        assert!(
+            decode_soft_mask(&over, 34862, 4332, &|o| Some(o.clone()), &mut notes).is_none(),
+            "151 million samples is over the bound whatever the image is"
+        );
+        assert!(
+            said(&notes).contains("above the"),
+            "and it is refused on the bound rather than on its size: {notes:?}"
+        );
+    }
+
+    /// A mask under a mask is not followed, because a chain of them is a file choosing the depth
+    /// of the recursion rather than the renderer discovering one.
+    #[test]
+    fn a_mask_under_a_mask_is_reported_rather_than_followed() {
+        let inner = soft_mask(2, 2, vec![0b1111_1111, 0b1111_1111], 1);
+        let mut outer = soft_mask(2, 2, vec![0b1111_1111, 0b1111_1111], 1);
+        outer.dict.set("SMask", Object::Stream(inner));
+        let image = with_mask(2, 2, vec![255; 24], 8, &outer);
+        let mut notes = Vec::new();
+        let raster = decode(&image, &|o| Some(o.clone()), &mut notes).expect("the image decodes");
+        let soft = raster
+            .soft_mask
+            .as_ref()
+            .expect("the outer mask is still read");
+        assert!(
+            soft.soft_mask.is_none(),
+            "and the mask under it is not: a soft mask's luminance is its alpha, so there is \\
+             nothing for a second mask to say"
+        );
+        assert!(
+            said(&notes).contains("soft mask of its own"),
+            "reported: {notes:?}"
+        );
+    }
+
+    /// A mask that decoded short is reported rather than padded, because padding it with
+    /// zeroes is drawing the picture as though the missing part were transparent.
+    #[test]
+    fn a_mask_that_decodes_short_is_reported_rather_than_padded() {
+        // Two by two at eight bits a sample is eight bytes; this carries one.
+        let mask = soft_mask(2, 2, vec![255], 8);
+        let image = with_mask(2, 2, vec![255; 24], 8, &mask);
+        let mut notes = Vec::new();
+        let raster = decode(&image, &|o| Some(o.clone()), &mut notes).expect("the image decodes");
+        assert!(
+            raster.soft_mask.is_none(),
+            "a mask of one byte is not a mask of four"
+        );
+        let said = said(&notes);
+        assert!(
+            said.contains("soft mask") && said.contains("bytes"),
+            "reported as a short stream rather than as a refusal of the mask's meaning: {said:?}"
+        );
+        assert_eq!(
+            raster.at(0, 0)[3],
+            255,
+            "and the image is drawn, not hidden"
+        );
+    }
+
+    /// A minimal JPEG of this size, as `libjpeg` accepts it: quantisation tables, Huffman
+    /// tables, a start-of-frame marker and a start-of-scan, then no scan data at all.
+    ///
+    /// Written here rather than pasted in as a byte string so that the size under test is a
+    /// number in the test rather than two bytes of somebody else's file. Verified against
+    /// `djpeg`, which reads an 8 by 8 of these and complains only about the missing data.
+    fn tiny_jpeg(width: u16, height: u16) -> Vec<u8> {
+        let mut out: Vec<u8> = vec![0xff, 0xd8];
+        let marker = |out: &mut Vec<u8>, m: u8, body: &[u8]| {
+            out.extend_from_slice(&[0xff, m]);
+            out.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes());
+            out.extend_from_slice(body);
+        };
+        // One 8-bit quantisation table of ones.
+        let mut dqt = vec![0u8];
+        dqt.extend_from_slice(&[1u8; 64]);
+        marker(&mut out, 0xdb, &dqt);
+        // The standard luminance Huffman tables, which is the smallest pair that decodes.
+        marker(
+            &mut out,
+            0xc4,
+            &[
+                0x00, 0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+                0x0b,
+            ],
+        );
+        let mut ac: Vec<u8> = vec![
+            0x10, 0x00, 0x02, 0x01, 0x03, 0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04, 0x04, 0x00,
+            0x00, 0x01, 0x7d,
+        ];
+        ac.extend(0..=0xa1u8);
+        marker(&mut out, 0xc4, &ac);
+        // SOF0: three components, the first sampled 2×2 so that luma gets a full MCU.
+        let mut sof = vec![8u8];
+        sof.extend_from_slice(&height.to_be_bytes());
+        sof.extend_from_slice(&width.to_be_bytes());
+        sof.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x11, 0, 3, 0x11, 0]);
+        marker(&mut out, 0xc0, &sof);
+        marker(
+            &mut out,
+            0xda,
+            &[3, 1, 0x00, 2, 0x11, 3, 0x11, 0x00, 0x3f, 0],
+        );
+        out.extend_from_slice(&[0u8; 32]);
+        out.extend_from_slice(&[0xff, 0xd9]);
+        out
+    }
+
+    /// A JPEG whose header names a size above the bound, which is all it takes.
+    ///
+    /// `decode` allocates `width × height × 3` up front from the frame header, so a file is a
+    /// request for that much memory with a header and nothing behind it — and 192 MB is
+    /// nothing for a file of three hundred bytes to ask for. The bound is asked of the header
+    /// alone, before any of it, which is the only place the question can be asked.
+    #[test]
+    fn a_jpeg_header_above_the_bound_is_refused_before_the_pixels_are_decoded() {
+        let mut dict = Dict::new();
+        dict.set("Width", Object::Int(10000));
+        dict.set("Height", Object::Int(10000));
+        dict.set("ColorSpace", Object::name("DeviceRGB"));
+        dict.set("BitsPerComponent", Object::Int(8));
+        dict.set("Filter", Object::name("DCTDecode"));
+        // The header claims 10000 by 10000 and the dictionary agrees, so nothing about this
+        // file is a lie: it is simply a request for 300 MB of pixels.
+        let stream = Stream::new(dict, tiny_jpeg(10000, 10000));
+
+        let before = std::time::Instant::now();
+        let mut notes = Vec::new();
+        let decoded = decode(&stream, &|o| Some(o.clone()), &mut notes);
+        let elapsed = before.elapsed();
+        assert!(decoded.is_none(), "a header that big is refused");
+        assert!(
+            said(&notes).contains("above the"),
+            "and refused on the bound rather than on the file having no scan data: {notes:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "300 MB of RGB is not allocated in the time it took to read a frame header: \
+             {elapsed:?}"
+        );
+    }
+
+    /// The boundary on the codec path too, for the same reason: exactly at the bound is
+    /// inside it.
+    #[test]
+    fn a_jpeg_header_exactly_at_the_bound_is_inside_it() {
+        // 8192 by 8192 is 64 · 1024 · 1024 samples and the bytes are 192 MB, so this must not
+        // be decoded — the assertion is on the *reason* rather than on the outcome, exactly
+        // as it is for a mask.
+        let mut dict = Dict::new();
+        dict.set("Width", Object::Int(8192));
+        dict.set("Height", Object::Int(8192));
+        dict.set("Filter", Object::name("DCTDecode"));
+        let mut notes = Vec::new();
+        let _ = decode(
+            &Stream::new(dict, tiny_jpeg(8192, 8192)),
+            &|o| Some(o.clone()),
+            &mut notes,
+        );
+        assert!(
+            !said(&notes).contains("above the"),
+            "8192 by 8192 is at the bound and inside it: {notes:?}"
+        );
+    }
+
+    /// **The bound is asked before the mask's stream is decoded, and this measures that.**
+    ///
+    /// The mask claims 34862 by 4332 pixels — 151 million samples — and its stream inflates
+    /// to 400 MB, so a renderer that decoded the stream first and refused afterwards grows its
+    /// address space by 400 MB doing it. Asserting only that the mask was *refused* would pass
+    /// equally well for that renderer, and the allocation is the whole of what is at stake, so
+    /// the assertion is on a process's own peak virtual size.
+    ///
+    /// It runs in a child because the parent has to build the bomb, and a process that has
+    /// held 400 MB of zeroes has already reached the peak being measured. The child is this
+    /// same test binary with one environment variable set, so there is no second program to
+    /// keep in step with this one.
+    #[test]
+    fn a_mask_above_the_bound_does_not_grow_the_address_space() {
+        fn peak() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap_or_default()
+                .lines()
+                .find_map(|l| l.strip_prefix("VmPeak:"))
+                .and_then(|v| v.split_whitespace().next())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        }
+        let bomb = std::env::temp_dir().join("mangle-mask-bomb.bin");
+        if let Ok(path) = std::env::var("MANGLE_MASK_BOMB") {
+            // The child: build the mask from the file and decode it, reporting the growth.
+            let packed = std::fs::read(&path).expect("the bomb the parent wrote");
+            let mut dict = Dict::new();
+            dict.set("Width", Object::Int(34862));
+            dict.set("Height", Object::Int(4332));
+            dict.set("BitsPerComponent", Object::Int(1));
+            dict.set("ColorSpace", Object::name("DeviceGray"));
+            dict.set("Filter", Object::name("FlateDecode"));
+            let mask = Stream::new(dict, packed);
+            let image = with_mask(2, 2, vec![255; 24], 8, &mask);
+            let before = peak();
+            let mut notes = Vec::new();
+            let raster =
+                decode(&image, &|o| Some(o.clone()), &mut notes).expect("the image decodes");
+            let grew = peak().saturating_sub(before);
+            println!(
+                "CHILD grew {grew} mask {:?} said {:?}",
+                raster.soft_mask.map(|m| m.width),
+                said(&notes)
+            );
+            return;
+        }
+        // The parent: 400 MB of zeroes, deflated, handed over and dropped.
+        let zeros = vec![0u8; 400 * 1024 * 1024];
+        let packed = mangle_filters::deflate(&zeros, mangle_filters::DeflateLevel::Default);
+        assert!(
+            packed.len() < 4 * 1024 * 1024,
+            "400 MB of zeroes must compress to something a file could carry: {} bytes",
+            packed.len()
+        );
+        drop(zeros);
+        std::fs::write(&bomb, &packed).expect("write the bomb");
+        let out = std::process::Command::new(std::env::current_exe().expect("this binary"))
+            .args([
+                "--exact",
+                "image::tests::a_mask_above_the_bound_does_not_grow_the_address_space",
+                "--nocapture",
+            ])
+            .env("MANGLE_MASK_BOMB", &bomb)
+            .output()
+            .expect("the child runs");
+        let child = String::from_utf8_lossy(&out.stdout);
+        let grew = child
+            .lines()
+            .find_map(|l| l.strip_prefix("CHILD grew "))
+            .and_then(|v| v.split_whitespace().next())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                panic!("the child said nothing about its growth:\n{child}");
+            });
+        assert!(
+            child.contains("soft mask"),
+            "the mask is refused, and by name: {child}"
+        );
+        assert!(
+            grew < 64 * 1024,
+            "the mask's stream inflates to 400 MB and the child's address space grew {grew} kB, \
+             so the stream was decoded before the bound was asked"
+        );
+        let _ = std::fs::remove_file(&bomb);
+    }
+
+    /// How many bytes a picture needs, for the two layouts that differ: packed per row, or
+    /// one byte per sample because a codec said so.
+    #[test]
+    fn a_pictures_byte_count_is_padded_per_row() {
+        let eight = SampleRange::declared(8);
+        assert_eq!(sample_bytes(2, 2, 3, eight), 12, "two RGB rows of three");
+        // Three one-bit samples is one byte per row, so four rows is four bytes rather than
+        // the two a whole-image count would give.
+        assert_eq!(sample_bytes(3, 4, 1, SampleRange::declared(1)), 4);
+        // A fax decoder wrote one byte per pixel whatever the dictionary said.
+        assert_eq!(sample_bytes(3, 4, 1, SampleRange::expanded(1)), 12);
+        assert_eq!(
+            sample_bytes(2, 2, 1, SampleRange::stencil(false)),
+            2,
+            "a stencil is one bit per sample, so two rows of two is a byte each"
+        );
+        assert_eq!(
+            sample_bytes(2, 2, 1, SampleRange::stencil(true)),
+            4,
+            "and one byte per sample rather than one bit, when a codec widened the layout"
+        );
     }
 
     /// A two-by-two raster whose four samples are four different colours, so every corner of it

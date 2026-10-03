@@ -7058,3 +7058,221 @@ fn a_form_nested_three_deep_draws_both_of_its_rectangles() {
         drawn.notes
     );
 }
+
+// ── A soft mask, which is a separate image and has to be checked as one ─────────────
+
+/// A page whose one image carries the `/SMask` in `mask`, a stream written verbatim.
+///
+/// The mask is a whole object rather than a size, because that is what makes the two
+/// refusals distinguishable end to end: a mask whose `/Width` and `/Height` disagree with the
+/// image's, and one whose stream is a Flate bomb with a size above the bound. The image is
+/// four by four of solid red so that "drawn" and "not drawn" cannot be confused with each
+/// other, and the mask's *contents* are never what any of this depends on.
+fn masked_image_page(mask: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 7];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] \
+          /Resources << /XObject << /Im0 5 0 R >> >> >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    let content = b"q 100 0 0 100 0 0 cm /Im0 Do Q";
+    at[4] = out.len();
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content);
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    at[5] = out.len();
+    // Red, not white: an image that draws nothing must leave paper behind rather than a
+    // colour that could be mistaken for the image.
+    let samples = [255u8, 0, 0].repeat(4 * 4);
+    let mut image = format!(
+        "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 4 /Height 4 \
+         /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask 6 0 R /Length {} >>\nstream\n",
+        samples.len()
+    )
+    .into_bytes();
+    image.extend_from_slice(&samples);
+    image.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&image);
+    at[6] = out.len();
+    out.extend_from_slice(mask);
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 6\n");
+    // Six objects after the free one, which is `at[1]` to `at[6]`.
+    for offset in at.iter().skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// The whole of object 6 as a stream, so that a mask can be given a dictionary and a body
+/// separately and `/Length` can be the bytes that are actually there.
+fn mask_object(dict: &str, body: &[u8]) -> Vec<u8> {
+    let mut out = format!("6 0 obj\n<< {dict} /Length {} >>\nstream\n", body.len()).into_bytes();
+    out.extend_from_slice(body);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    out
+}
+
+/// A soft mask of the right size, which is what nearly every file has and what must not
+/// regress: the image's top half is drawn and its bottom half is not.
+#[test]
+fn an_image_with_a_soft_mask_of_the_right_size_draws_the_masked_half() {
+    // Four by four at one bit per sample is one byte per row. The first two rows are white —
+    // opaque — and the last two are black, which is no alpha at all.
+    let mask = mask_object(
+        "/Type /XObject /Subtype /Image /Width 4 /Height 4 /BitsPerComponent 1 \
+         /ColorSpace /DeviceGray",
+        &[0b1111_1111, 0b1111_1111, 0b0000_0000, 0b0000_0000],
+    );
+    let render = render(masked_image_page(&mask), 1.0);
+    assert!(
+        render.notes.is_empty(),
+        "an ordinary mask is not a complaint: {:?}",
+        render.notes
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.45, [255, 0, 0]),
+        "the image's own red where the mask is white"
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.55, 0.95, 0.95, [255, 255, 255]),
+        "and paper where the mask is black, rather than a constant alpha everywhere"
+    );
+}
+
+/// The defect, as it appears on a page: the mask is 34862 by 4332 and the image is four by
+/// four.
+///
+/// Two things are asserted and they are different claims. The image is *drawn* — the colours
+/// in a mask that cannot be checked are still real, and dropping the picture would be a
+/// content loss answered with a note. And the mask is *named*, with both sizes in the note, so
+/// a page that lost its transparency says why in numbers a reader can check.
+#[test]
+fn a_mask_that_is_a_whole_page_of_itself_is_reported_and_the_image_is_still_drawn() {
+    let mask = mask_object(
+        "/Type /XObject /Subtype /Image /Width 34862 /Height 4332 /BitsPerComponent 1 \
+         /ColorSpace /DeviceGray",
+        &[0; 16],
+    );
+    let render = render(masked_image_page(&mask), 1.0);
+    assert!(
+        render
+            .notes
+            .iter()
+            .any(|n| n.contains("soft mask") && n.contains("34862") && n.contains("4332")),
+        "the note names the mask and both of its dimensions: {:?}",
+        render.notes
+    );
+    assert!(
+        render.notes.iter().any(|n| n.contains("/Im0")),
+        "and says which image carried it: {:?}",
+        render.notes
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 0, 0]),
+        "the image's own colours are drawn at full alpha, not dropped and not hidden"
+    );
+}
+
+/// A mask above the bound is refused, and its stream is never asked for.
+///
+/// The mask claims 34862 by 4332 pixels and its stream is a Flate bomb, so a renderer that
+/// decoded the stream first and refused afterwards would report the bomb alongside the bound.
+/// This one reports only the bound, which is what "refused before it was decoded" looks like
+/// from the outside. [`image::tests::a_mask_above_the_bound_does_not_grow_the_address_space`]
+/// is the same claim measured in kilobytes rather than in words.
+#[test]
+fn a_mask_above_the_bound_is_refused_without_its_stream_being_decoded() {
+    let bomb = vec![0u8; 19 * 1024 * 1024];
+    let packed = mangle_filters::deflate(&bomb, mangle_filters::DeflateLevel::Default);
+    let mask = mask_object(
+        "/Type /XObject /Subtype /Image /Width 34862 /Height 4332 /BitsPerComponent 8 \
+         /ColorSpace /DeviceGray /Filter /FlateDecode",
+        &packed,
+    );
+    let page = masked_image_page(&mask);
+    drop(bomb);
+    drop(packed);
+    let render = render(page, 1.0);
+    let said = render.notes.join("; ");
+    assert!(
+        said.contains("soft mask") && said.contains("above the"),
+        "refused on the bound: {:?}",
+        render.notes
+    );
+    assert!(
+        !said.contains("FlateDecode") && !said.contains("truncat"),
+        "and its stream was never inflated, so nothing about its contents is reported: {:?}",
+        render.notes
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 0, 0]),
+        "the image is drawn with its own colours"
+    );
+}
+
+/// The boundary, end to end: a mask of exactly `MAX_IMAGE_PIXELS` samples is inside the bound
+/// and one pixel over is outside it.
+///
+/// The mask at the bound is not decoded — 604 MB of RGBA is not something a test may ask for —
+/// so what is asserted is the *reason* for its refusal, which is the only place the boundary
+/// is visible. A mask at the bound is refused for having no samples; one pixel over is refused
+/// for being too big, and the note says so.
+#[test]
+fn a_mask_at_the_bound_is_refused_for_being_empty_and_one_pixel_over_for_being_big() {
+    let at_bound = mask_object(
+        "/Type /XObject /Subtype /Image /Width 8192 /Height 8192 /BitsPerComponent 8 \
+         /ColorSpace /DeviceGray",
+        &[0; 8],
+    );
+    let over = mask_object(
+        "/Type /XObject /Subtype /Image /Width 8193 /Height 8192 /BitsPerComponent 8 \
+         /ColorSpace /DeviceGray",
+        &[0; 8],
+    );
+    let inside = render(masked_image_page(&at_bound), 1.0);
+    let outside = render(masked_image_page(&over), 1.0);
+    assert!(
+        !inside.notes.join("; ").contains("above the"),
+        "8192 by 8192 is exactly the bound, so the bound cannot be the reason: {:?}",
+        inside.notes
+    );
+    assert!(
+        outside.notes.join("; ").contains("above the"),
+        "one pixel over is refused on the bound rather than on its samples: {:?}",
+        outside.notes
+    );
+}
+
+/// A mask whose samples stop short of its own size is reported rather than padded with zeros,
+/// because a zero alpha hides content rather than showing it wrongly.
+#[test]
+fn a_mask_that_decodes_short_is_reported_rather_than_padded_with_zero_alpha() {
+    // Four by four at eight bits a sample is sixteen bytes; this carries one.
+    let mask = mask_object(
+        "/Type /XObject /Subtype /Image /Width 4 /Height 4 /BitsPerComponent 8 \
+         /ColorSpace /DeviceGray",
+        &[255],
+    );
+    let render = render(masked_image_page(&mask), 1.0);
+    let said = render.notes.join("; ");
+    assert!(
+        said.contains("soft mask") && said.contains("bytes"),
+        "reported as a short stream: {:?}",
+        render.notes
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 0, 0]),
+        "and the image is drawn opaquely rather than made invisible by an invented alpha"
+    );
+}
