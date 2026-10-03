@@ -370,14 +370,32 @@ renderer that never has to ask the machine for a font.
    is built — the only place that can follow a reference — and every record says which form drew
    it, so a renderer can find the right table for `/F1`. Nesting needed a starting-state entry
    point (`run_with_state`) and a depth bound; `/BBox` clipping needed the corners put through
-   the form's own CTM. What is left behind it is
-   [D17](docs/known-diffs.md): the page it was measured on has a SymbolMT glyph in it that
-   `outline_for_cid` cannot find, which was invisible until the form ran.
-7. **A composite font's glyph addressing.** A CID is a glyph number in the font's own
-   numbering, and this looks it up through a `(3,0)` subtable — which a symbolic font does not
-   have — and falls back to glyph 0, so an `/Identity-H` symbol font draws `.notdef` for
-   everything ([D17](docs/known-diffs.md)). It is the next thing on the font list, and it is on
-   it because a form made it visible rather than because it is new.
+   the form's own CTM. What it left behind was
+   [D17](docs/known-diffs.md), now fixed — see item 7.
+7. **A composite font's glyph addressing: done.** A CID is answered by the descendant's
+   `/CIDToGIDMap` and by nothing else. Absent, or the name `Identity`, the identifier is the
+   glyph number; a stream is one two-byte entry per CID; the font's `cmap` is never consulted,
+   because a `cmap` numbers *characters* and a symbolic font's private-use codes are a different
+   numbering from the one the file declared. A simple font with a two-byte encoding is a
+   different question — its codes are character codes — and now has its own answer, without the
+   "the code is the glyph number" step a single-byte code is allowed. `.notdef` is reported as
+   nothing rather than drawn. `CidToGid` lives beside `CidWidths` in `metrics.rs`, and
+   `mangle-render` reads it from the descendant because it is a property of the font dictionary
+   and not of the font program ([D17](docs/known-diffs.md)).
+
+   **The page it was found on does not move, and that is the finding rather than a null
+   result.** `pdfjs__issue16263.pdf` was diagnosed here as drawing `.notdef` where the oracle
+   draws arrows; it is not — the embedded SymbolMT *does* have a `(3,0)` subtable, it does not
+   cover `0x000E`, and the glyph-number fallback was landing on glyph 14, which is the arrow. So
+   the fix changes no pixel on that page while removing a wrong answer for every CID in the
+   range that subtable does cover. Its 2.6× excess ink is `/Image15`, a 2×2 image whose `/SMask`
+   is a 34862×4332 one, drawn as a solid bar where the oracle draws three thin arrows.
+8. **The image mask on `pdfjs__issue16263.pdf`, next.** It is the whole of that page's remaining
+   difference and it is a sampling defect, not a font one: the bar sits inside the image's
+   placement box, appears once per column per row band, and accounts for 176 190 of the ~168 000
+   pixels of excess. Skipping the image and drawing nothing else moves the page from SSIM 0.84906
+   to 0.94306 and from 272 715 pixels of ink to 70 595, which is *below* `mutool`'s 104 890 — so
+   this is worth the next hour on this page rather than the next hundred on the list above.
 
 Tier B is now standing — see "The wild corpus found" below — and it has overtaken everything
 else on this list, because nothing else in the project can see the problems it can see.

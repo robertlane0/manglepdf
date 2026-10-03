@@ -701,6 +701,16 @@ pub struct FontProgram {
     /// the codes where the three base encodings disagree — 0xA0 to 0xFF — are exactly the ones
     /// a document is most likely to remap.
     encoding: mangle_font::Encoding,
+    /// How a CID-keyed font's identifiers name its glyphs, from the descendant's
+    /// `/CIDToGIDMap`.
+    ///
+    /// Carried because it is a property of the *font dictionary* rather than of the font
+    /// program: the same TrueType file is reached as a composite font's descendant, where its
+    /// codes are CIDs numbered as this says, or as a simple font, where they are character
+    /// codes and this does not apply at all. Nothing inside the program can tell those two
+    /// apart, which is the whole reason a CID must not be looked up through the font's
+    /// `cmap` — the map is the only thing in the file that says which numbering it means.
+    cid_to_gid: mangle_font::CidToGid,
     /// The notice to carry when this program is not the document's own font, or `None`.
     ///
     /// A substituted face draws the right glyphs in someone else's outlines, and the user
@@ -717,6 +727,7 @@ impl std::fmt::Debug for FontProgram {
             .field("units_per_em", &self.units_per_em)
             .field("encoding", &self.encoding.base().name())
             .field("differences", &self.encoding.differences().len())
+            .field("cid_to_gid", &self.cid_to_gid)
             .field("substituted", &self.substituted.is_some())
             .finish()
     }
@@ -835,8 +846,18 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
         program,
         units_per_em,
         encoding: encoding_for(&font, composite, doc),
+        cid_to_gid: cid_to_gid_for(owner, doc),
         substituted: None,
     })
+}
+
+/// The `/CIDToGIDMap` of the descendant font whose codes are being drawn.
+///
+/// `owner` is the descendant for a composite font and the font itself otherwise, so a simple
+/// font answers the identity map: it has no CIDs, so it declares no map, and a caller that
+/// had one anyway would be the caller at fault.
+fn cid_to_gid_for(owner: &Dict, doc: &Document) -> mangle_font::CidToGid {
+    mangle_font::CidToGid::from_descendant_dict(owner, &|o| doc.resolve_object(o))
 }
 
 /// The `/Encoding` a font's character codes are addressed through.
@@ -910,6 +931,7 @@ fn substitute_for(
         program,
         units_per_em,
         encoding: encoding_for(font, composite, doc),
+        cid_to_gid: mangle_font::CidToGid::Identity,
         substituted: Some(format!(
             "the font `/{name}` is not embedded, so a metric-compatible face stands in for \
              `/{base}`: the glyphs are that face's, not the original's"
@@ -1254,18 +1276,27 @@ fn draw_mark(
             // read from the mark rather than from the string's bytes because a composite
             // font's codes are two bytes each, and the mark is what says so.
             for (code, glyph_matrix) in codes.iter().zip(placements.iter()) {
-                // A composite font's code is looked up as a CID — through the (3,0)
-                // subtable, or as a glyph number where the font has no such subtable — and
-                // a simple font's through its `/Encoding` and then the subtables a simple
-                // font uses. Which one applies is the mark's claim, not a guess made here.
+                // A composite font's code is looked up as a CID, through the descendant's
+                // `/CIDToGIDMap` — which is the whole of how a CID reaches a glyph, and is
+                // the identity map unless the file says otherwise. A simple font's code
+                // goes through its `/Encoding` and then the subtables a simple font uses.
+                // Which one applies is the mark's claim, not a guess made here.
                 //
                 // The two paths are different questions and are kept apart. A CID is an
                 // identifier the font was built to be addressed by, and `/Differences` does
-                // not apply to one, so no encoding is consulted for it. A character code
-                // means nothing until the `/Encoding` turns it into a glyph name, and a page
-                // that remapped that code is asking for a different glyph.
+                // not apply to one, so no encoding is consulted for it and no `cmap` is
+                // either: a `cmap` numbers characters, which is a different numbering from
+                // the one the file declared. A character code means nothing until the
+                // `/Encoding` turns it into a glyph name, and a page that remapped that code
+                // is asking for a different glyph.
+                //
+                // In two steps because the map is read while the program is written to, and
+                // they are two fields of one value.
                 let found = if *two_byte {
-                    program.program.outline_for_cid(*code)
+                    program
+                        .program
+                        .glyph_for_cid(*code, &program.cid_to_gid)
+                        .and_then(|glyph| program.program.outline(glyph))
                 } else {
                     let name = program.encoding.glyph_for(*code);
                     program.program.outline_for_code_named(*code, name)

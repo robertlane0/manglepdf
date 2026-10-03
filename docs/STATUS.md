@@ -755,12 +755,30 @@ oracle in a way it could not before, because it has ink to disagree with. SSIM a
 wrong way *for that reason*, not despite it: 0.85188 → 0.84906 and 41.53 → 73.51 are the cost of
 drawing a page that is 96% white and scoring a blank one against it well.
 
-The one remaining difference is **not the form**. Above each "OA" the oracle draws a thin arrow
-and this draws a solid bar of the same size: `outline_for_cid(0x000E)` on the embedded SymbolMT
-returns glyph 0, because a CID is a glyph number in the font's own numbering and the lookup is
-being made through a `(3,0)` subtable that a symbolic font does not have. That is a defect in the
-font layer's glyph addressing, it was invisible while the form never ran, and it is
-[D17](known-diffs.md#d17--a-composite-fonts-glyph-is-looked-up-through-a-subtable-symbol-fonts-do-not-have).
+The one remaining difference is **not the form, and not the font**. Above each "OA" the oracle
+draws a thin arrow and this draws a solid bar of the same size — which was read here as
+`outline_for_cid(0x000E)` returning glyph 0 on the embedded SymbolMT, because a CID is a glyph
+number in the font's own numbering and the lookup was being made through a `(3,0)` subtable.
+**That reading was wrong on both counts.** The embedded program *does* carry a `(3,0)` subtable
+— 354 bytes covering `U+F021`–`U+F072` — and it does not cover `0x000E`, so the lookup returned
+nothing and the glyph-number fallback answered: CID `0x000E` is glyph 14, `uniF02B`, which
+`/ToUnicode` confirms is what the file meant, and which is the arrow. The bar is
+`/Image15` instead, the 2×2 indexed image inside the form, whose `/SMask` is a 34862×4332
+`DeviceGray` image.
+
+The lookup *was* still wrong, and the rule is now the specification's: a CID is answered by the
+descendant's `/CIDToGIDMap` and by nothing else — identity when the entry is absent or the name
+`Identity`, a two-byte-per-CID table when it is a stream, and never the font's `cmap`, which
+numbers characters rather than the identifiers the PDF gave. `glyph_for_cid(0xF02B)` used to
+answer `Some(14)` from the `(3,0)` subtable where `/CIDToGIDMap /Identity` says the answer is
+nothing, and a simple font with a two-byte encoding got its codes read as glyph numbers instead
+of through its own `/Encoding`. Both are fixed and pinned; that is
+[D17](known-diffs.md#d17--a-cid-was-looked-up-through-the-fonts-cmap-instead-of-its-cidtogidmap),
+and **it moves this page not at all** — SSIM, RMS, pixels above tolerance and ink are identical
+to four decimal places, because the arrows were already right and this page uses none of the
+codes the change affects. The 2.6× excess ink is the image mask, and skipping the image moves
+the page to 0.94306 / 21.33 / 66 655 / 70 595, which is a separate finding and not one this
+change made.
 
 `pdfjs__issue1985.pdf` page 1 moves **not at all** — 0.83925 / 22.24 / 39 pixels above tolerance
 before and after, zero ink both ways — and the reason is worth stating rather than leaving as a

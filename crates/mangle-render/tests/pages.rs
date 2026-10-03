@@ -3298,6 +3298,23 @@ const COMPOSITE_CIDS: [u32; 3] = [12, 151, 103];
 /// listed run for the codes in use, and a range run above them, so the boundary between the
 /// two is on the page and both are read.
 fn composite_page(font: &[u8], cids: &[u32], size: f64) -> Vec<u8> {
+    composite_page_inner(font, cids, size, None)
+}
+
+/// The composite page with a `/CIDToGIDMap` **stream** in place of the identity map.
+///
+/// `targets` gives the glyph each CID maps to, in the order the CIDs are given, and the
+/// stream carries an entry for every CID up to the largest one in use because a stream is
+/// indexed by CID rather than by position. This is the only thing in the file that says what
+/// the identifiers mean, so a reader that ignored it — or that fell back to the identity map,
+/// or to the font's `cmap` — draws something else. The stream is written uncompressed for the
+/// same reason the font program is: this fixture is about the map and not about filters.
+fn composite_page_mapped(font: &[u8], cids: &[u32], size: f64, targets: &[u32]) -> Vec<u8> {
+    composite_page_inner(font, cids, size, Some(targets))
+}
+
+/// The composite fixture, with or without a `/CIDToGIDMap` stream.
+fn composite_page_inner(font: &[u8], cids: &[u32], size: f64, map: Option<&[u32]>) -> Vec<u8> {
     let first = cids.first().copied().unwrap_or(0);
     let listed: Vec<String> = cids
         .iter()
@@ -3315,7 +3332,7 @@ fn composite_page(font: &[u8], cids: &[u32], size: f64) -> Vec<u8> {
     }
 
     let mut out: Vec<u8> = Vec::new();
-    let mut at = [0usize; 9];
+    let mut at = [0usize; 10];
     out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
     at[1] = out.len();
     out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
@@ -3339,11 +3356,16 @@ fn composite_page(font: &[u8], cids: &[u32], size: f64) -> Vec<u8> {
           /Identity-H /DescendantFonts [6 0 R] >>\nendobj\n",
     );
     at[6] = out.len();
+    let cid_to_gid = if map.is_some() {
+        "/CIDToGIDMap 9 0 R"
+    } else {
+        "/CIDToGIDMap /Identity"
+    };
     out.extend_from_slice(
         format!(
             "6 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Embedded \
              /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
-             /DW 1000 /W {w} /CIDToGIDMap /Identity /FontDescriptor 7 0 R >>\nendobj\n"
+             /DW 1000 /W {w} {cid_to_gid} /FontDescriptor 7 0 R >>\nendobj\n"
         )
         .as_bytes(),
     );
@@ -3365,13 +3387,36 @@ fn composite_page(font: &[u8], cids: &[u32], size: f64) -> Vec<u8> {
     out.extend_from_slice(font);
     out.extend_from_slice(b"\nendstream\nendobj\n");
 
+    // The last object, and so the count of them, depends on whether there is a map.
+    let mut objects = 8usize;
+    if let Some(targets) = map {
+        let highest = cids.iter().copied().max().unwrap_or(0) as usize;
+        let mut bytes = vec![0u8; (highest + 1) * 2];
+        for (i, cid) in cids.iter().enumerate() {
+            let gid = targets.get(i).copied().unwrap_or(0);
+            let at = *cid as usize * 2;
+            bytes[at..at + 2].copy_from_slice(&u16::try_from(gid).unwrap_or(0).to_be_bytes());
+        }
+        at[9] = out.len();
+        out.extend_from_slice(
+            format!("9 0 obj\n<< /Length {} >>\nstream\n", bytes.len()).as_bytes(),
+        );
+        out.extend_from_slice(&bytes);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        objects = 9;
+    }
+
     let xref = out.len();
-    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 8\n");
-    for offset in at.iter().take(9).skip(1) {
+    out.extend_from_slice(format!("xref\n0 1\n0000000000 65535 f \n1 {objects}\n").as_bytes());
+    for offset in at.iter().take(objects + 1).skip(1) {
         out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
     }
     out.extend_from_slice(
-        format!("trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects + 1
+        )
+        .as_bytes(),
     );
     out
 }
@@ -3383,7 +3428,25 @@ fn render_composite_page(
     scale: f64,
 ) -> Result<mangle_render::PageRender, String> {
     let font = true_type_font()?;
-    let doc = open(composite_page(&font, cids, size));
+    Ok(render_bytes(open(composite_page(&font, cids, size)), scale))
+}
+
+/// The mapped composite page, rendered.
+fn render_mapped_composite_page(
+    font: &[u8],
+    cids: &[u32],
+    size: f64,
+    targets: &[u32],
+    scale: f64,
+) -> mangle_render::PageRender {
+    render_bytes(
+        open(composite_page_mapped(font, cids, size, targets)),
+        scale,
+    )
+}
+
+/// The first page of an already-open document, rendered.
+fn render_bytes(doc: Document, scale: f64) -> mangle_render::PageRender {
     let all = pages(&doc);
     let page = all.first().expect("a page");
     let resources = page
@@ -3394,7 +3457,7 @@ fn render_composite_page(
         .and_then(|o| o.as_dict().cloned())
         .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
         .unwrap_or_default();
-    Ok(render_page(
+    render_page(
         &doc,
         page,
         &resources,
@@ -3402,7 +3465,7 @@ fn render_composite_page(
             scale,
             ..RenderOptions::default()
         },
-    ))
+    )
 }
 
 /// How much ink is in a band of the page, given in page fractions of x.
@@ -3483,6 +3546,72 @@ fn a_composite_font_draws_one_glyph_per_two_byte_code_at_its_own_width() {
     assert!(
         (gap(bands[0], bands[1]) - gap(bands[1], bands[2])).abs() > 0.01,
         "the two gaps differ, so an evenly-spaced run would not pass: {bands:?}"
+    );
+}
+
+/// A composite font's CIDs are answered by the descendant's `/CIDToGIDMap` and nothing else.
+///
+/// The map is the only statement in the file about what its identifiers mean, so this
+/// asserts it in both directions on one fixture: the identity map draws the three glyphs the
+/// CIDs name, and a stream that sends every one of those CIDs to a glyph with no outline
+/// draws nothing at all. A reader that used the identity map anyway, or reached the CID
+/// through the font's `cmap` — which is a map of *characters*, and which every text font
+/// has — draws the three glyphs on the second page and fails here.
+#[test]
+fn a_cid_to_gid_map_stream_is_the_only_thing_a_cid_is_looked_up_through() {
+    let font = match true_type_font() {
+        Ok(font) => font,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    // A glyph with an outline is what the identity map must reach and a glyph without one is
+    // what the stream is pointed at. Both are found rather than assumed: which glyphs of a
+    // system font are blank is not something a fixture should state.
+    let mut program = mangle_font::Program::new(font.clone());
+    let mut inked = None;
+    let mut blank = None;
+    for glyph in 1u32..2048 {
+        match program.outline(glyph) {
+            Some((outline, _)) if outline.is_empty() => {
+                blank.get_or_insert(glyph);
+            }
+            Some(_) => {
+                inked.get_or_insert(glyph);
+            }
+            None => {}
+        }
+        if inked.is_some() && blank.is_some() {
+            break;
+        }
+    }
+    let (Some(inked), Some(blank)) = (inked, blank) else {
+        eprintln!("skipped: this face has no blank glyph to point the map at");
+        return;
+    };
+    let cids = COMPOSITE_CIDS;
+    let targets = [blank; 3];
+
+    let identity = render_composite_page(&cids, 36.0, 2.0).expect("a font");
+    assert!(
+        ink_in_columns(&identity.image, 0.0, 1.0) > 0,
+        "the identity map draws the glyphs the CIDs name, which is what makes the second page \
+         a comparison rather than two blank pages"
+    );
+
+    let mapped = render_mapped_composite_page(&font, &cids, 36.0, &targets, 2.0);
+    assert!(
+        mapped.notes.is_empty(),
+        "a mapped composite font should draw without complaint: {:?}",
+        mapped.notes
+    );
+    assert_eq!(
+        ink_in_columns(&mapped.image, 0.0, 1.0),
+        0,
+        "every CID maps to glyph {blank}, which has no outline, so the page has no ink. A \
+         reader that used the identity map or the font's `cmap` would draw glyph {inked} and \
+         its neighbours here instead"
     );
 }
 

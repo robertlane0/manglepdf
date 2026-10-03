@@ -1241,7 +1241,7 @@ produced `an image claims to be 0 by 0 pixels and was not drawn`. That form draw
 it is not this page's blankness, but a `Do` that reads a form as an image is wrong. **It is
 now fixed** — a form is executed as a nested content stream, with its own `/Matrix`, `/BBox`
 and `/Resources` — and the finding it leaves behind is
-[D17](#d17--a-composite-fonts-glyph-is-looked-up-through-a-subtable-symbol-fonts-do-not-have).
+[D17](#d17--a-cid-was-looked-up-through-the-fonts-cmap-instead-of-its-cidtogidmap).
 
 ### What fixing it meant
 
@@ -1565,42 +1565,151 @@ it needs.
 
 ---
 
-## D17 — a composite font's glyph is looked up through a subtable, and Symbol fonts do not have one
+## D17 — a CID was looked up through the font's `cmap` instead of its `/CIDToGIDMap`
 
-**Severity: every glyph drawn in an `Identity-H` symbol font. Open, found while implementing
-Form XObjects — it was invisible until a form was executed, because the font is named inside
-one.**
+**Severity: was every glyph drawn in a CID-keyed font, on the wrong reasoning. Fixed; and the
+diagnosis this entry was opened with was wrong, in a way worth setting out.**
 
 `corpus/wild/pdfjs__issue16263.pdf` page 1 is 40 copies of an equation whose content is inside
 Form `Meta6`. That form was never executed, so the page drew **zero** ink and the defect below
-never appeared; now that it is, 40 copies of the equation are drawn in the right places and the
-one difference left on the page is this.
+never appeared; now that it is, 40 copies of the equation are drawn in the right places.
 
-Above each "OA", "OB" and "OC" the oracle draws a thin right arrow; this draws a solid bar of
-the same size. The arrow is glyph 14 of the embedded SymbolMT, reached through a Type 0 font
-with `/Encoding /Identity-H` and `/CIDToGIDMap /Identity`, shown as `[<000E>-1714<000E>-1771
-<0020>] TJ`. Read out of the program directly:
+### What the file actually says
+
+`mutool show` on the file, before anything was changed:
 
 ```
-outline_for_cid(0x000E)  13 segments, bounds (0, 0) – (0.5127, 0.5127)
-outline_for_cid(0x0020)  10 segments, bounds (0, 0.1401) – (0.5127, 0.3706)
-outline_for_cid(0x0041)   0 segments
+10 0 obj <</BaseFont/SymbolMT/DescendantFonts 11 0 R/Encoding/Identity-H/Subtype/Type0/ToUnicode 66 0 R/Type/Font>>
+12 0 obj <</Type/Font/Subtype/CIDFontType2/BaseFont/SymbolMT/CIDSystemInfo 13 0 R
+         /CIDToGIDMap/Identity/DW 1000/FontDescriptor 14 0 R/W 68 0 R>>
+13 0 obj <</Ordering (Identity)/Registry (Adobe)/Supplement 0>>
 ```
 
-Every one of those is glyph **0**: a square from the origin to half the em is `.notdef` in this
-font, `0x0020` is a space and has no outline at all, and `0x0041` is `A`, which SymbolMT does
-not have. So `outline_for_cid` is not finding these glyphs and falls back to glyph zero.
+Three facts, and the third is the one the fix is built on:
 
-The cause is that a CID is a **glyph identifier in the font's own numbering**, and the
-`(3,0)` symbol subtable is one *way* to reach a glyph but not the only one — a font built for
-symbolic use, which is what every `/Encoding /Identity-H` symbol font is, carries only a
-`(1,0)` subtable mapping symbol codes to glyphs. The lookup is being made through a subtable
-that is not there, and the answer it returns is the fallback rather than nothing.
+- The font is **CID-keyed**, not a simple font: `/Subtype /Type0` over a `/Subtype
+  /CIDFontType2` descendant with `/CIDSystemInfo` present and `/Encoding /Identity-H` on the
+  parent. `/CIDToGIDMap` is read from the *descendant*.
+- `/CIDToGIDMap` is the **name `/Identity`** — declared outright, not absent and not a stream.
+  Either way it means the same thing, because identity is what absence means, and that is
+  what makes the rule below a rule and not a special case.
+- The embedded program **does** have a `(3, 0)` subtable. It is 354 bytes of `cmap` with a
+  format 4 table whose segments cover `U+F021`–`U+F072` only — six entries, mapping to glyphs
+  4, 5, 14, 32, 48, 71 and 85 — plus a `(1, 0)` format 0 table of eleven codes. So the
+  premise this entry was opened on, that a symbolic font has no `(3, 0)` subtable, is false
+  for this font, and the arrow is *not* drawn as `.notdef`.
 
-Left open because it is a change in `mangle-font`'s glyph addressing, not a small one: the
-right answer is a documented order — the `(3,0)` subtable if the font has one, otherwise the
-glyph number itself, which is what `/CIDToGIDMap /Identity` means and what every identity-
-encoded composite font in the wild assumes.
+### What was wrong, and what the entry above claimed
+
+The old `glyph_for_cid` consulted the `(3, 0)` subtable and fell back to reading the code as a
+glyph number. On this font the `(3, 0)` subtable does not cover `0x000E`, the lookup returns
+nothing, the fallback answers, and CID `0x000E` is glyph **14** — which is `uniF02B`, and which
+`/ToUnicode` confirms is what the file meant:
+
+```
+outline_for_cid(0x000E)  13 segments, bounds (0, 0) – (0.5127, 0.5127)   glyph 14, uniF02B
+outline_for_cid(0x0020)  10 segments, bounds (0, 0.1401) – (0.5127, 0.3706)   glyph 32
+outline_for_cid(0x0041)   0 segments                                     glyph 65, a blank
+```
+
+Those are the numbers this entry was opened with, and they were read as glyph 0 because glyph
+0's bounds are `(0.0503, 0) – (0.5503, 0.625)` and do not match them either. The arithmetic in
+the old entry was wrong; the arrows were already the right glyphs. The render path agrees — with
+the old code, `glyph_for_cid(0x000E)` returned `Some(14)` and the drawn outline was glyph 14's.
+
+**The rule was still wrong, and this font proves it.** `glyph_for_cid(0xF02B)` returned
+`Some(14)` — the `(3, 0)` subtable's answer — where `/CIDToGIDMap /Identity` says the glyph
+number *is* `0xF02B`, which is past the font's 192 glyphs, so the answer is nothing. A code in
+that range would have drawn a glyph the file never named. The old lookup was right by luck on
+this page and wrong by construction everywhere else, and the luck was in the subtable missing
+the two codes the page happens to use.
+
+### The rule now
+
+A CID is answered by the font's `/CIDToGIDMap` and by nothing else:
+
+- **Absent, or the name `Identity`** — the identifier is the glyph number. The
+  specification's default, and what this file declares.
+- **A stream** — one two-byte big-endian entry per CID, indexed by it. A CID past the last
+  entry maps to GID 0.
+
+The font's `cmap` is not consulted, and that is the whole point: a `cmap` maps *characters* —
+Unicode, or the symbolic codes a font's author chose — to glyphs, and for a symbolic font that
+mapping is neither the identity nor anything the PDF declared. `CidToGid` is in
+`metrics.rs` beside `CidWidths`, because both are read from the same descendant dictionary;
+`mangle-render` reads it in `font_for` and carries it on `FontProgram`, since it is a property
+of the *font dictionary* and not of the font program — the same TrueType file is reached as a
+composite font's descendant in one page and as a simple font in another, and nothing inside the
+program can tell those apart.
+
+**A simple font's two-byte code is a different question and now has its own answer.** A simple
+font with a CMap `/Encoding` has codes two bytes wide and they are character codes, so
+`glyph_for_code16` answers them from the font's own `/Encoding`, `post` and `cmap` —
+deliberately **without** the "the code is the glyph number" step that `glyph_for_code` has.
+That step is right for a single-byte code, where a subsetted symbolic font's codes are its own
+0-to-255 choice and the specification provides for reading one as a glyph number; it is wrong
+for a two-byte code, where a `/CIDToGIDMap` stream is indexed over hundreds of plausible CIDs
+and a code that names no character is a code the font does not have.
+
+### `.notdef` is not drawn, and that is a decision
+
+The specification maps a CID past the end of a stream to GID 0 so that "this font has no glyph
+here" has an answer, and GID 0 is `.notdef` — a hollow box in most TrueType fonts. So a code
+that reaches GID 0 draws **nothing**, and a code whose glyph the font does not have is `None`
+rather than `Some(0)`. Painting it would put a character on the page the document never asked
+for, which is the exact shape the mistaken diagnosis above was looking for and did not find.
+
+### What is pinned now
+
+Six tests, all verified to fail on the code above by reverting the source and keeping them:
+
+- `a_cid_with_no_cid_to_gid_map_is_the_glyph_number` — CID 2 is glyph 2 and CID 1 is glyph 1
+  on a font whose `(3, 0)` subtable says 1 and 4, checked on the **outline** and not only on
+  the number, and contrasted with `glyph_for_code(2)` which legitimately answers 1.
+- `a_cid_to_gid_map_stream_is_the_numbering_the_file_declared` — the same CID through a stream
+  gives glyph 2, where the identity map would say 1 and the symbol subtable 4: three answers,
+  one of which is the file's.
+- `a_two_byte_character_code_in_a_simple_font_is_a_character_code` — codes 65 and 2 are
+  answered from the `(3, 1)` and `(3, 0)` subtables, and code 3 is `None` even though the font
+  has a glyph 3.
+- `a_plausible_cid_that_names_no_character_is_not_turned_into_a_glyph_number` — the two routes
+  side by side on one font: `glyph_for_code(3)` is `Some(3)` and `glyph_for_code16(3)` is
+  `None`.
+- `a_code_the_font_does_not_have_is_reported_rather_than_drawn_as_notdef` — four ways of
+  reaching nothing, including a stream entry of 0 and a CID past the stream's end.
+- `a_cid_to_gid_map_stream_is_the_only_thing_a_cid_is_looked_up_through` — end to end in the
+  renderer: the same page under `/CIDToGIDMap /Identity` has ink, and under a stream pointing
+  every CID at a blank glyph has none. It fails with 723 331 pixels of ink where it wants 0.
+
+Plus `a_cid_to_gid_map_is_the_identity_map_unless_it_is_a_stream` for reading the entry itself.
+
+**No existing test needed changing.** There were no tests of `glyph_for_cid` before these, and
+the render-side composite fixtures all declare `/CIDToGIDMap /Identity` already, so they pass
+unchanged.
+
+### The page did not move, and why
+
+`mutool draw -r 150` against page 1, 2000×1125, ink counted as pixels of luminance below 250:
+
+| | SSIM | RMS | pixels above tolerance | our ink | `mutool`'s |
+|---|---|---|---|---|---|
+| before | 0.84906 | 73.51 | 237 475 (10.55%) | 272 715 | 104 890 |
+| after | 0.84906 | 73.51 | 237 475 (10.55%) | 272 715 | 104 890 |
+
+**Not one pixel moved, and the honest reading is that the fix does not touch this page.** The
+arrows were already the right glyphs, as the table above shows; the change alters what happens
+for codes in the range the `(3, 0)` subtable covers, and this page uses none of them. The
+2.6× excess ink is somewhere else entirely, and it is worth being precise about where.
+
+The excess is **`/Image15`**, the 2×2 indexed image inside the form, whose `/SMask` is a
+34862×4332 `DeviceGray` image. Above each equation the oracle draws three thin arrows and
+nothing else; this draws a **solid black bar** 285 by 17 pixels, one per column, in the band
+where the arrows belong. The bar sits inside the image's placement box (`147.14 0 0 18.28 769.04
+505.42`) and is present for all eight of the page's row bands, which accounts for 176 190 of the
+~168 000 pixels of excess. Skipping the image and drawing nothing else moves the page to
+**SSIM 0.94306, RMS 21.33, 66 655 pixels above tolerance and 70 595 pixels of ink** — below the
+oracle's. So the page's remaining difference is an image-mask defect, not a font one, and it is
+a separate finding.
 
 **Left open in the other direction too, and that is not a defect here:** `/F1` in the same form
 is `/TimesNewRomanPSMT`, which the document did not embed, so a metric-compatible face stands in

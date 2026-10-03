@@ -38,6 +38,7 @@
 use ttf_parser::{Face, GlyphId, OutlineBuilder, PlatformId};
 
 use crate::cff::{self, Cff};
+use crate::metrics::CidToGid;
 use crate::type1::Type1;
 
 /// A glyph's outline, in ems, ready to be transformed onto a page.
@@ -311,45 +312,23 @@ impl Program {
     /// and `/Differences` does not apply to one; see [`Self::glyph_for_cid`].
     #[must_use]
     pub fn glyph_for_code_named(&self, code: u32, name: Option<&str>) -> Option<u32> {
-        if let Some(font) = self.type1() {
-            return font.glyph_for_named_code(code, name);
+        if let Some(glyph) = self.named_code_glyph(code, name) {
+            return Some(glyph);
         }
+        // The one step the font's own tables do not make, and which is right **only** for a
+        // single-byte code: a symbolic font's codes are its author's own 0-to-255 choice, so
+        // a code no subtable answers is a glyph number, and the specification provides for
+        // exactly this by letting a font with no `cmap` at all be addressed by glyph number.
+        // [`Self::glyph_for_code16`] deliberately does not have it.
         match Face::parse(&self.data, 0) {
             Ok(face) => {
-                // A name, when the file supplied one, is the more specific statement and is
-                // tried first. Two routes, in this order:
-                //
-                // * **The font's own `post` table**, whose entries are `glyphNNN` rather
-                //   than names — matched only when the file named a glyph that is actually
-                //   there, which is the rare case of a symbolic font remapped to a numbered
-                //   glyph.
-                // * **The Unicode subtables**, through the AGL: a name like `/adieresis` is
-                //   a character, and the (3, 1) subtable is the map from characters to
-                //   glyphs. This is how a remapped code reaches a glyph in a TrueType font.
-                //
-                // Then the code itself, exactly as before: a font with no `/Encoding` is
-                // addressed by its own subtables whatever the file says.
-                if let Some(name) = name
-                    && let Some(glyph) = glyph_by_post_name(&face, name)
-                {
-                    return Some(glyph);
-                }
-                if let Some(found) = name.and_then(|n| glyph_by_unicode_name(&face, n)) {
-                    return Some(found);
-                }
-                if let Some(found) = glyph_from_subtables(&face, code) {
-                    return Some(found);
-                }
                 let in_range = u32::from(face.number_of_glyphs());
                 (code < in_range).then_some(code)
             }
-            // A bare CFF has no `sfnt` directory, so the subtables above are not there to
-            // be tried. A name-keyed one answers through its charset and the name the
-            // encoding gave; a CID-keyed one says the identifier and the glyph number are
-            // the same number.
-            Err(_) => name
-                .and_then(|n| self.glyph_for_name(n))
-                .or_else(|| self.identity_cid(code)),
+            // A bare CID-keyed CFF has no `sfnt` directory, so the subtables above are not
+            // there to be tried. A CID-keyed one says the identifier and the glyph number are
+            // the same number; a name-keyed one has nothing to say.
+            Err(_) => self.identity_cid(code),
         }
     }
 
@@ -438,47 +417,119 @@ impl Program {
         }
     }
 
-    /// The outline a two-byte character code names, in ems, and the font's units per em.
+    /// The outline a two-byte character code names in a CID-keyed font, in ems, and the
+    /// font's units per em.
     ///
     /// The composite-font counterpart of [`Self::outline_for_code`], and the difference is
-    /// in the lookup rather than the result. A simple font's code has to be found in a
-    /// subtable and a glyph number read out of it; a CID font's code *is* a glyph identifier
-    /// in a font that was built to be addressed that way, so the (3,0) subtable is the first
-    /// place to look and the code used as the glyph number is the specification's own
-    /// fallback — the same answer `/CIDToGIDMap /Identity` gives, which is what a CID font
-    /// with no `CIDToGIDMap` means.
+    /// in the lookup rather than the result. `map` is the descendant font's `/CIDToGIDMap`,
+    /// which is the whole of how a CID reaches a glyph; see [`CidToGid`] for why it is the
+    /// only thing consulted.
     #[must_use]
-    pub fn outline_for_cid(&mut self, cid: u32) -> Option<(Outline, u16)> {
-        let glyph = self.glyph_for_cid(cid)?;
+    pub fn outline_for_cid(&mut self, cid: u32, map: &CidToGid) -> Option<(Outline, u16)> {
+        let glyph = self.glyph_for_cid(cid, map)?;
         self.outline(glyph)
     }
 
-    /// The glyph number one two-byte character code names.
+    /// The glyph number one character identifier names in a CID-keyed font.
     ///
-    /// `(3, 0)` — Windows Symbol — is the only subtable consulted, because a CID font's
-    /// codes are the font author's own and only that subtable can interpret them. It is
-    /// tried first and, when the font carries one, it is the only answer that can be right.
+    /// **`/CIDToGIDMap` is the whole of this answer, and the font's `cmap` is not part of
+    /// it.** The two cases a two-byte code can come from are different questions:
     ///
-    /// When it carries none, the code is the glyph number. That is not a guess: the
-    /// specification's default `/CIDToGIDMap` is the identity map, so a CID font that names
-    /// no map says its CIDs *are* its glyph numbers, and a subsetted CID font routinely has
-    /// no `cmap` at all. A code that is not a glyph the font has is `None`.
+    /// * **A composite font.** Its code is a CID: an identifier in the font's own numbering,
+    ///   and the file says what the numbering means in `/CIDToGIDMap` — the identity map when
+    ///   it says nothing, a two-byte-per-entry table when it says otherwise. That is all
+    ///   there is, so all there is to ask. A `cmap` subtable is *not* an alternative route
+    ///   here: a `(3, 0)` symbol subtable answers with Unicode's private-use codes, which
+    ///   are a different numbering from the one the file declared, and a font that has one
+    ///   and is reached as a CID font will be given glyphs the file never asked for.
+    /// * **A simple font whose `/Encoding` is a CMap.** Its code is a *character code*, not
+    ///   an identifier, and it is answered by the font's own encoding and tables as
+    ///   [`Self::glyph_for_code16`] does. There is nothing to be a CID about, so
+    ///   `/CIDToGIDMap` does not apply to it either.
+    ///
+    /// A CID the font has no glyph for is `None`, which is how a code the font does not have
+    /// is reported.
+    ///
+    /// **`.notdef` is never drawn, and is never reached as a fallback.** That is a decision
+    /// rather than a default: the specification maps a CID past the end of a `/CIDToGIDMap`
+    /// stream to GID 0 precisely so that "this font has no glyph here" has an answer, and
+    /// GID 0 is the font's `.notdef` — a hollow box in most TrueType fonts. Painting it puts
+    /// a character on the page that the document never asked for, and it is the shape this
+    /// whole question was once misdiagnosed as having. A code that reaches GID 0 is a code
+    /// that names nothing, so it draws nothing.
     #[must_use]
-    pub fn glyph_for_cid(&self, cid: u32) -> Option<u32> {
+    pub fn glyph_for_cid(&self, cid: u32, map: &CidToGid) -> Option<u32> {
+        let glyph = map.glyph_for(cid).filter(|&glyph| glyph != 0)?;
+        match Face::parse(&self.data, 0) {
+            Ok(face) => (glyph < u32::from(face.number_of_glyphs())).then_some(glyph),
+            // A bare CID-keyed CFF has no `sfnt` and therefore no glyph count to check
+            // against, and the specification makes `/CIDToGIDMap` the identity map for it;
+            // `identity_cid` is that map expressed as the question the CFF charset allows.
+            Err(_) => self.identity_cid(glyph),
+        }
+    }
+
+    /// The outline a two-byte character code names in a **simple** font, in ems.
+    ///
+    /// A simple font with a CMap `/Encoding` has codes two bytes wide, and they are
+    /// character codes — which is the whole difference from a composite font's, and why this
+    /// is not [`Self::outline_for_cid`]. There is no identifier to map and no
+    /// `/CIDToGIDMap` to map it with.
+    #[must_use]
+    pub fn outline_for_code16(&mut self, code: u32, name: Option<&str>) -> Option<(Outline, u16)> {
+        let glyph = self.glyph_for_code16(code, name)?;
+        self.outline(glyph)
+    }
+
+    /// The glyph number one two-byte character code names in a **simple** font.
+    ///
+    /// The same lookup [`Self::glyph_for_code_named`] makes, and deliberately **without its
+    /// last step**. That step reads a code no subtable answered as a glyph number outright,
+    /// which is right for a single-byte code — a subsetted symbolic font's codes are its own
+    /// 0-to-255 symbol codes, and treating one as a glyph number is the specification's own
+    /// provision for a font with no usable `cmap` — and wrong here. A two-byte code in a
+    /// simple font came out of a CMap `/Encoding`, which names *characters*; a code that
+    /// names no character is a code the font does not have, and turning it into a glyph
+    /// number would draw a glyph at a place on the page where the document asked for none.
+    ///
+    /// That is not a rare shape. `/CIDToGIDMap` streams are indexed by CID and run to
+    /// hundreds, so a string that has been through the wrong reader arrives here as a
+    /// plausible CID, and `0x00F0` is both a perfectly good CID and a character code that
+    /// means nothing.
+    #[must_use]
+    pub fn glyph_for_code16(&self, code: u32, name: Option<&str>) -> Option<u32> {
+        self.named_code_glyph(code, name)
+    }
+
+    /// A character code as a glyph number, through the font's own tables and no further.
+    ///
+    /// The shared half of [`Self::glyph_for_code_named`] and [`Self::glyph_for_code16`]:
+    /// what the font itself says about the code, with nothing added to it. Three routes, in
+    /// this order:
+    ///
+    /// * **The font's own `post` table**, whose entries are `glyphNNN` rather than names —
+    ///   matched only when the file named a glyph that is actually there, which is the rare
+    ///   case of a symbolic font remapped to a numbered glyph.
+    /// * **The Unicode subtables**, through the AGL: a name like `/adieresis` is a
+    ///   character, and the (3, 1) subtable is the map from characters to glyphs. This is how
+    ///   a remapped code reaches a glyph in a TrueType font.
+    /// * **The code through the three subtables** a simple font uses, which is what a font
+    ///   with no `/Encoding` is addressed by.
+    fn named_code_glyph(&self, code: u32, name: Option<&str>) -> Option<u32> {
+        if let Some(font) = self.type1() {
+            return font.glyph_for_named_code(code, name);
+        }
         match Face::parse(&self.data, 0) {
             Ok(face) => {
-                for subtable in face.tables().cmap?.subtables {
-                    if subtable.platform_id == PlatformId::Windows
-                        && subtable.encoding_id == 0
-                        && let Some(glyph) = subtable.glyph_index(cid)
-                    {
-                        return Some(u32::from(glyph.0));
-                    }
+                if let Some(name) = name
+                    && let Some(glyph) = glyph_by_post_name(&face, name)
+                {
+                    return Some(glyph);
                 }
-                let in_range = u32::from(face.number_of_glyphs());
-                (cid < in_range).then_some(cid)
+                name.and_then(|n| glyph_by_unicode_name(&face, n))
+                    .or_else(|| glyph_from_subtables(&face, code))
             }
-            Err(_) => self.identity_cid(cid),
+            Err(_) => name.and_then(|n| self.glyph_for_name(n)),
         }
     }
 
@@ -834,6 +885,23 @@ mod tests {
     /// Assemble a font program around a set of `glyf` entries, with a (3, 1) `cmap`
     /// mapping each listed code to the glyph of the same number.
     fn font(glyphs: &[Vec<u8>], codes: &[(u32, u16)], units_per_em: u16) -> Vec<u8> {
+        font_with_symbol(glyphs, codes, &[], units_per_em)
+    }
+
+    /// The same font, with a Windows Symbol `(3, 0)` subtable as well.
+    ///
+    /// This is the shape a **symbolic** font has, and the shape
+    /// `pdfjs__issue16263.pdf`'s embedded SymbolMT has: two subtables, one of them the
+    /// symbol one, neither of them the numbering the file declared. A reader that reaches a
+    /// CID through `(3, 0)` is answering with the font author's character codes rather than
+    /// with the identifiers the PDF gave, and this font is built so that the two answers
+    /// differ.
+    fn font_with_symbol(
+        glyphs: &[Vec<u8>],
+        codes: &[(u32, u16)],
+        symbol: &[(u32, u16)],
+        units_per_em: u16,
+    ) -> Vec<u8> {
         // loca: short format, so every offset is a multiple of two and the glyph data is
         // padded to two bytes.
         let mut glyf: Vec<u8> = Vec::new();
@@ -869,7 +937,7 @@ mod tests {
         hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
         hhea[34..36].copy_from_slice(&u16::try_from(glyphs.len()).unwrap().to_be_bytes());
 
-        cmap_format4(codes).map_or_else(Vec::new, |cmap| {
+        cmap(codes, symbol).map_or_else(Vec::new, |cmap| {
             assemble(&[
                 ("cmap", cmap),
                 ("glyf", glyf),
@@ -880,6 +948,38 @@ mod tests {
                 ("maxp", maxp),
             ])
         })
+    }
+
+    /// A `cmap` table holding a Windows Unicode `(3, 1)` subtable and, when asked for, a
+    /// Windows Symbol `(3, 0)` one.
+    fn cmap(codes: &[(u32, u16)], symbol: &[(u32, u16)]) -> Option<Vec<u8>> {
+        let mut tables: Vec<(u16, u16, Vec<u8>)> = Vec::new();
+        if let Some(unicode) = cmap_format4(codes) {
+            tables.push((3, 1, unicode));
+        }
+        if let Some(symbol) = cmap_format4(symbol) {
+            tables.push((3, 0, symbol));
+        }
+        if tables.is_empty() {
+            return None;
+        }
+        // Each encoding record is eight bytes after the two-word header, so the subtables
+        // start at 4 + 8 × count.
+        let header = 4 + 8 * tables.len();
+        let mut table: Vec<u8> = Vec::with_capacity(header);
+        table.extend_from_slice(&0u16.to_be_bytes()); // version
+        table.extend_from_slice(&u16::try_from(tables.len()).ok()?.to_be_bytes());
+        let mut at = header;
+        for (platform, encoding, sub) in &tables {
+            table.extend_from_slice(&platform.to_be_bytes());
+            table.extend_from_slice(&encoding.to_be_bytes());
+            table.extend_from_slice(&u32::try_from(at).ok()?.to_be_bytes());
+            at += sub.len();
+        }
+        for (_, _, sub) in &tables {
+            table.extend_from_slice(sub);
+        }
+        Some(table)
     }
 
     /// A format 4 `cmap`: one segment per code, all sharing a delta.
@@ -941,16 +1041,7 @@ mod tests {
             sub.extend_from_slice(&0u16.to_be_bytes()); // idRangeOffset
         }
         debug_assert_eq!(sub.len(), length);
-
-        // The table: version, then one encoding record pointing at the subtable.
-        let mut table: Vec<u8> = Vec::with_capacity(12 + sub.len());
-        table.extend_from_slice(&0u16.to_be_bytes()); // version
-        table.extend_from_slice(&1u16.to_be_bytes()); // one encoding record
-        table.extend_from_slice(&3u16.to_be_bytes()); // platform: Windows
-        table.extend_from_slice(&1u16.to_be_bytes()); // encoding: Unicode BMP
-        table.extend_from_slice(&12u32.to_be_bytes()); // offset of the subtable
-        table.extend_from_slice(&sub);
-        Some(table)
+        Some(sub)
     }
 
     /// Put tables into a `sfnt` container: a header, a table directory, and the tables.
@@ -996,6 +1087,54 @@ mod tests {
             &[(65, 1), (66, 2)],
             units_per_em,
         )
+    }
+
+    /// A CID-keyed font: five glyphs, and a Windows Symbol `(3, 0)` subtable that
+    /// **disagrees** with the identity map on the identifiers it covers.
+    ///
+    /// Glyphs 1, 2 and 4 are rectangles of different sizes, so *which* glyph came back is
+    /// observable in the outline and not only in a number. The `(3, 0)` subtable maps code 1
+    /// to glyph 4 and code 2 to glyph 1 — the shape a subsetted symbolic font has, and the
+    /// shape the SymbolMT in `pdfjs__issue16263.pdf` has, whose `(3, 0)` subtable covers only
+    /// `U+F021` and its five neighbours while the file declares `/CIDToGIDMap /Identity`. A
+    /// CID lookup that consults the `cmap` answers 4 and 1 here, and both are wrong.
+    fn cid_font() -> Vec<u8> {
+        font_with_symbol(
+            &[
+                Vec::new(),
+                glyf_rectangle(125, 125, 375, 375),
+                glyf_rectangle(500, 500, 750, 750),
+                Vec::new(),
+                glyf_rectangle(250, 250, 500, 500),
+            ],
+            &[(65, 1), (66, 2)],
+            &[(1, 4), (2, 1)],
+            1000,
+        )
+    }
+
+    /// The bounds of a glyph's outline in ems, for saying *which* glyph came back.
+    fn bounds(program: &mut Program, glyph: u32) -> Option<(f64, f64, f64, f64)> {
+        let (outline, _) = program.outline(glyph)?;
+        let mut at = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for segment in &outline.segments {
+            let points: Vec<(f64, f64)> = match *segment {
+                Segment::Move(x, y) | Segment::Line(x, y) => vec![(x, y)],
+                Segment::Curve(a, b, c, d, e, f) => vec![(a, b), (c, d), (e, f)],
+            };
+            for (x, y) in points {
+                at.0 = at.0.min(x);
+                at.1 = at.1.min(y);
+                at.2 = at.2.max(x);
+                at.3 = at.3.max(y);
+            }
+        }
+        Some(at)
     }
 
     // ── The tests ────────────────────────────────────────────────────────────
@@ -1239,9 +1378,197 @@ mod tests {
         );
     }
 
-    // ── the refusal, and what it is for ────────────────────────────────────────
+    // ── two-byte codes: a CID, or a character code ──────────────────────────────
 
-    /// A CFF font somewhere on this machine, unwrapped from its `sfnt` if it has one.
+    /// With no `/CIDToGIDMap`, a CID is the glyph number — and never the `cmap`'s answer.
+    ///
+    /// The specification's default map is the identity map, so a font that names none says
+    /// its identifiers *are* its glyph numbers. This font's `(3, 0)` subtable says otherwise —
+    /// it maps CID 1 to glyph 4 and CID 2 to glyph 1 — and a reader that consulted it would
+    /// draw the wrong two glyphs. The outline is checked as well as the number, because the
+    /// point is which shape reaches the page.
+    #[test]
+    fn a_cid_with_no_cid_to_gid_map_is_the_glyph_number() {
+        let mut program = Program::new(cid_font());
+        assert_eq!(
+            program.glyph_for_cid(2, &CidToGid::Identity),
+            Some(2),
+            "CID 2 is glyph 2, whatever the symbol subtable says"
+        );
+        assert_eq!(
+            bounds(&mut program, 2),
+            Some((0.5, 0.5, 0.75, 0.75)),
+            "and the outline that comes back is glyph 2's rectangle, not glyph 1's"
+        );
+        assert_eq!(
+            program.glyph_for_cid(1, &CidToGid::Identity),
+            Some(1),
+            "and CID 1 is glyph 1, not the 4 the symbol subtable would have given"
+        );
+        assert_eq!(
+            program.glyph_for_code(2),
+            Some(1),
+            "while the *same number* as a single-byte character code is answered by the \
+             symbol subtable, because that is what a character code is"
+        );
+    }
+
+    /// A `/CIDToGIDMap` stream is the file's own numbering, and it overrides everything.
+    ///
+    /// Two entries: CID 0 maps to GID 0 and CID 1 maps to GID 2. So CID 1 is glyph 2, where
+    /// the identity map would have said glyph 1 and the symbol subtable would have said glyph
+    /// 4 — three different answers, and only one of them is the file's.
+    #[test]
+    fn a_cid_to_gid_map_stream_is_the_numbering_the_file_declared() {
+        let map = CidToGid::Stream(vec![0x00, 0x00, 0x00, 0x02]);
+        let mut program = Program::new(cid_font());
+        assert_eq!(
+            program.glyph_for_cid(1, &map),
+            Some(2),
+            "CID 1 is glyph 2 through the stream, and not glyph 4 through the symbol subtable"
+        );
+        assert_eq!(
+            bounds(&mut program, 2),
+            Some((0.5, 0.5, 0.75, 0.75)),
+            "and the outline that comes back is glyph 2's rectangle"
+        );
+        // The identity map would have said 1 for the same CID, so this is the assertion that
+        // the stream is being read at all rather than being ignored in favour of identity.
+        assert_eq!(
+            program.glyph_for_cid(1, &CidToGid::Identity),
+            Some(1),
+            "the same CID through the identity map is glyph 1, which is what makes the two \
+             answers different"
+        );
+    }
+
+    /// A simple font's two-byte code is a character code, so it goes through the encoding.
+    ///
+    /// The font is the same one: its `(3, 1)` subtable has code 65, and its `(3, 0)` subtable
+    /// has codes 1 and 2. All three are answered as character codes, because that is what
+    /// they are.
+    #[test]
+    fn a_two_byte_character_code_in_a_simple_font_is_a_character_code() {
+        let program = Program::new(cid_font());
+        assert_eq!(
+            program.glyph_for_code16(65, None),
+            Some(1),
+            "code 65 is the character the Unicode subtable names"
+        );
+        assert_eq!(
+            program.glyph_for_code16(2, None),
+            Some(1),
+            "and code 2 is the character the *symbol* subtable names, because a simple font's \
+             codes are the font's own and the symbol subtable is where they are"
+        );
+        // And code 3 names no character, even though it is a number the font has a glyph
+        // for. This is where the two routes part company: a single-byte code may be read as
+        // a glyph number, because a symbolic font's codes are its author's own 0-to-255
+        // choice, and a two-byte code may not, because a CMap `/Encoding` names characters.
+        assert_eq!(
+            program.glyph_for_code16(3, None),
+            None,
+            "while code 3 names no character, even though this font has a glyph 3"
+        );
+        // And the same two-byte code reaches an outline rather than only a number, which is
+        // what a renderer actually asks for.
+        let mut program = program;
+        let (outline, units) = program
+            .outline_for_code16(65, None)
+            .expect("code 65 is glyph 1 and glyph 1 is a rectangle");
+        assert!(!outline.is_empty());
+        assert_eq!(units, 1000);
+        assert!(
+            program.outline_for_code16(3, None).is_none(),
+            "and code 3 has no outline either, because it names no glyph"
+        );
+    }
+
+    /// A two-byte code the font has no character for is not a glyph number in disguise.
+    ///
+    /// Code 44 is a perfectly plausible CID — it is inside the range a `/CIDToGIDMap` stream
+    /// is indexed over, and this font has glyph 44 nowhere near it — and it names no character
+    /// in this font. The old answer was "it is below the glyph count, so it is glyph 44", and
+    /// that is what puts a glyph on a page at a place the document never asked for. So this
+    /// is the assertion the two cases turn on.
+    #[test]
+    fn a_plausible_cid_that_names_no_character_is_not_turned_into_a_glyph_number() {
+        let program = Program::new(cid_font());
+        assert_eq!(
+            program.glyph_for_code16(44, None),
+            None,
+            "code 44 names no character in this font, so it names no glyph"
+        );
+        // The single-byte route still has the glyph-number answer, because a symbolic font's
+        // codes are its author's own 0-to-255 choice. That is the whole difference between
+        // the two routes, and this font is small enough to make it observable: it has five
+        // glyphs, so code 44 is past them all and only the font's own tables can answer.
+        assert_eq!(
+            program.glyph_for_code(44),
+            None,
+            "the single-byte route agrees here only because this font has no glyph 44"
+        );
+        assert_eq!(
+            program.glyph_for_code(3),
+            Some(3),
+            "and where this font *does* have a glyph of the code's number, the single-byte \
+             route gives it"
+        );
+        assert_eq!(
+            program.glyph_for_code16(3, None),
+            None,
+            "while the two-byte route does not, because glyph 3 is not what code 3 names"
+        );
+        assert_eq!(
+            program.glyph_for_code16(65, None),
+            Some(1),
+            "and a code a subtable really does name gives the same answer either way"
+        );
+    }
+
+    /// A code the font does not have is reported, and `.notdef` is never drawn.
+    ///
+    /// `.notdef` is a decision here, not a fallback. The specification maps a CID past the
+    /// last entry of a stream to GID 0 so that "this font has no glyph here" has an answer,
+    /// and GID 0 is the font's `.notdef` — a hollow box in most TrueType fonts. Drawing it
+    /// would paint a character the document never asked for, so a code that reaches GID 0
+    /// draws nothing, and a code the font has no glyph for is `None` rather than `Some(0)`.
+    #[test]
+    fn a_code_the_font_does_not_have_is_reported_rather_than_drawn_as_notdef() {
+        let program = Program::new(cid_font());
+        // Past the last glyph, which is what a CID beyond a subset font's range looks like.
+        assert_eq!(
+            program.glyph_for_cid(9, &CidToGid::Identity),
+            None,
+            "a CID beyond the last glyph is a code the font does not have"
+        );
+        // The identity map's CID 0 is GID 0.
+        assert_eq!(
+            program.glyph_for_cid(0, &CidToGid::Identity),
+            None,
+            "and CID 0 is `.notdef` under the identity map, which is drawn as nothing"
+        );
+        // A stream that says 0 for a CID it covers, and one that simply ends.
+        assert_eq!(
+            program.glyph_for_cid(0, &CidToGid::Stream(vec![0x00, 0x00, 0x00, 0x02])),
+            None,
+            "a stream entry of 0 is the file saying it has no glyph, not a glyph to draw"
+        );
+        assert_eq!(
+            program.glyph_for_cid(7, &CidToGid::Stream(vec![0x00, 0x00, 0x00, 0x02])),
+            None,
+            "and a CID past the last entry is the specification's own GID 0"
+        );
+        // So a code that resolves to nothing produces no outline, which is what a renderer
+        // turns into clean paper rather than a box.
+        let mut program = Program::new(cid_font());
+        assert!(
+            program.outline_for_cid(0, &CidToGid::Identity).is_none(),
+            "and there is no outline to draw for it"
+        );
+    }
+
+    // ── the refusal, and what it is for ────────────────────────────────────
     ///
     /// Deliberately a short candidate list: this is about what a bare CFF program's codes
     /// reach, and a font nobody has installed is a skip rather than a failure.

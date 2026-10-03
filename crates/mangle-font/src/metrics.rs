@@ -1153,6 +1153,99 @@ impl CidWidths {
 /// The width `/DW` means when the descendant font does not say: one em.
 pub const DEFAULT_CID_WIDTH: u16 = 1000;
 
+/// How a CID-keyed font's character identifiers name its glyphs: its `/CIDToGIDMap`.
+///
+/// This is the specification's answer and it is not optional — a composite font's code is a
+/// **CID**, an identifier the font was built to be addressed by, and this is the one thing
+/// that says which glyph the identifier means. It has two shapes and no third:
+///
+/// * **Absent, or the name `Identity`.** The identifier *is* the glyph number. This is the
+///   default, so a file that says nothing is saying this, and every identity-encoded
+///   composite font in the wild relies on it.
+/// * **A stream.** One two-byte big-endian entry per CID, indexed by the CID. A CID past
+///   the last entry maps to GID 0, which is the specification's own way of saying the font
+///   has no glyph for it.
+///
+/// **The font's `cmap` is not one of these shapes**, and reaching a CID through it is
+/// answering a different question. A `cmap` maps character *codes* — Unicode, or the
+/// symbolic codes a font's author chose — to glyphs, and for a symbolic font that mapping is
+/// neither the identity nor anything the PDF declared. `pdfjs__issue16263.pdf`'s embedded
+/// SymbolMT is the case in point: its `(3, 0)` subtable maps `U+F021` and the five codes
+/// beside it to glyphs 4, 5, 14, 32, 48, 71 and 85 while the file declares
+/// `/CIDToGIDMap /Identity`, so a CID of `0xF02B` is glyph 0xF02B and *not* glyph 14.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CidToGid {
+    /// No `/CIDToGIDMap`, or `/CIDToGIDMap /Identity`: the CID is the glyph number.
+    #[default]
+    Identity,
+    /// `/CIDToGIDMap` as a stream: two bytes per CID, big-endian, indexing it gives the GID.
+    Stream(Vec<u8>),
+}
+
+impl CidToGid {
+    /// Read `/CIDToGIDMap` out of a descendant font's dictionary.
+    ///
+    /// Absent is [`CidToGid::Identity`], because that is what absence means. A name other
+    /// than `Identity` is a file this does not understand and is treated as the identity map
+    /// rather than as damage: the map exists to say the numbering is *not* the identity, so
+    /// refusing to read it and drawing nothing would be worse than drawing what a
+    /// `/CIDToGIDMap /Identity` would have drawn.
+    ///
+    /// A stream is decoded through the same path every other stream in the format is, since
+    /// a map is compressed exactly as an image is. A stream that decodes to nothing is the
+    /// identity map: an empty map has no entries, so every CID would map to GID 0, and a
+    /// font that meant that would be one that draws nothing at all.
+    #[must_use]
+    pub fn from_descendant_dict(
+        dict: &mangle_syntax::object::Dict,
+        resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+    ) -> Self {
+        use mangle_syntax::object::Object;
+        let Some(found) = dict.get("CIDToGIDMap") else {
+            return Self::Identity;
+        };
+        let found = resolve(found).unwrap_or_else(|| found.clone());
+        match &found {
+            Object::Name(name) if name.0.as_slice() == b"Identity" => Self::Identity,
+            // Any other name is not a map this can read, and `Identity` is the map the
+            // specification starts from.
+            Object::Name(_) => Self::Identity,
+            Object::Stream(stream) => {
+                let data = mangle_syntax::stream::decode_stream(stream).data;
+                if data.is_empty() {
+                    Self::Identity
+                } else {
+                    Self::Stream(data)
+                }
+            }
+            _ => Self::Identity,
+        }
+    }
+
+    /// The glyph number one character identifier names, before the font is asked whether it
+    /// has that glyph.
+    ///
+    /// `Some(0)` is a real answer and means "no glyph": the specification maps a CID past
+    /// the last entry of a stream to GID 0, and a stream may say 0 for an entry it does
+    /// cover. Deciding what to *do* about that belongs to the caller that draws, which is
+    /// [`crate::outline::Program::glyph_for_cid`].
+    #[must_use]
+    pub fn glyph_for(&self, cid: u32) -> Option<u32> {
+        match self {
+            Self::Identity => Some(cid),
+            Self::Stream(bytes) => {
+                let at = cid.checked_mul(2)?;
+                let high = bytes.get(at as usize)?;
+                let low = bytes.get(at as usize + 1)?;
+                // A CID past the last entry is GID 0, which is the specification's own answer
+                // rather than a reason to say nothing: reading two bytes that are not there
+                // would be reading whatever follows.
+                Some(u32::from(u16::from_be_bytes([*high, *low])))
+            }
+        }
+    }
+}
+
 /// The widths a font declares, in whichever of the two forms the format has.
 ///
 /// A simple font declares a flat run indexed from `/FirstChar`; a composite font's
@@ -1185,6 +1278,75 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// `/CIDToGIDMap` has three spellings in the wild and only two answers, and which two is
+    /// the whole of it.
+    ///
+    /// The file this rule exists for declares `/CIDToGIDMap /Identity` outright, and every
+    /// other identity-encoded composite font omits the entry. Both mean the same thing,
+    /// because the identity map is what absence means. A stream is the third spelling and is
+    /// the only one that is not the identity map.
+    #[test]
+    fn a_cid_to_gid_map_is_the_identity_map_unless_it_is_a_stream() {
+        use mangle_syntax::object::{Dict, Object};
+
+        // Absent: the specification's default, which is the identity map.
+        assert_eq!(
+            CidToGid::from_descendant_dict(&Dict::new(), &|_| None),
+            CidToGid::Identity,
+            "a descendant that names no map means the identity map"
+        );
+
+        let mut named = Dict::new();
+        named.set("CIDToGIDMap", Object::name("Identity"));
+        assert_eq!(
+            CidToGid::from_descendant_dict(&named, &|_| None),
+            CidToGid::Identity,
+            "and the name says the same thing"
+        );
+
+        // A name this does not read is still the identity map rather than a refusal: the map
+        // exists to say the numbering is not the identity, so refusing to read it would draw
+        // nothing at all where a reader should have drawn glyphs.
+        let mut other = Dict::new();
+        other.set("CIDToGIDMap", Object::name("SomethingElse"));
+        assert_eq!(
+            CidToGid::from_descendant_dict(&other, &|_| None),
+            CidToGid::Identity
+        );
+
+        // A stream, uncompressed so the test needs no filter: CID 0 to GID 0 and CID 1 to
+        // glyph 4, which is where the identity map and the stream part company.
+        let mut stream = Dict::new();
+        stream.set(
+            "CIDToGIDMap",
+            Object::Stream(mangle_syntax::object::Stream::new(
+                Dict::new(),
+                vec![0x00, 0x00, 0x00, 0x04],
+            )),
+        );
+        let map = CidToGid::from_descendant_dict(&stream, &|_| None);
+        assert_eq!(
+            map.glyph_for(1),
+            Some(4),
+            "a stream is read, and CID 1 is glyph 4"
+        );
+        assert_eq!(
+            CidToGid::Identity.glyph_for(1),
+            Some(1),
+            "where the identity map would have said glyph 1"
+        );
+        assert_eq!(
+            map.glyph_for(0),
+            Some(0),
+            "and a zero entry is GID 0, said out loud"
+        );
+        assert_eq!(
+            map.glyph_for(7),
+            None,
+            "a CID past the last entry has no entry to read, which the caller decides on"
+        );
+    }
 
     /// The names each table answers to besides its own.
     fn spellings(name: &str) -> Vec<String> {
