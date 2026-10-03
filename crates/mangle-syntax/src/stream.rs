@@ -6,7 +6,7 @@
 
 use mangle_filters::{
     CcittParams, CcittVariant, EarlyChange, FilterError, PredictorParams, ascii_hex_decode,
-    ascii85_decode, ccitt_decode, inflate, lzw_decode, run_length_decode, unpredict,
+    ascii85_decode, ccitt_decode_with_damage, inflate, lzw_decode, run_length_decode, unpredict,
 };
 
 use crate::error::{Error, Result};
@@ -122,12 +122,21 @@ pub fn decode_stream(stream: &Stream) -> Decoded {
             }
             b"CCITTFaxDecode" | b"CCF" => {
                 let p = ccitt_params(stream.dict.get("DecodeParms"), parm, stream);
-                match ccitt_decode(&out.data, &p) {
+                match ccitt_decode_with_damage(&out.data, &p) {
                     Ok(d) => {
+                        // A scan that ran out or hit codes it could not read still shows the
+                        // rows it does contain, but it must not be reported as a whole page
+                        // of content: the note is what says which it was.
+                        if !d.complete {
+                            out.complete = false;
+                            if let Some(n) = d.note {
+                                out.notes.push(format!("CCITTFaxDecode: {n}"));
+                            }
+                        }
                         // The decoder hands back one byte per sample whatever the encoded
                         // depth was, so that is what a consumer has to read it as.
                         out.one_byte_per_sample = true;
-                        Some(d)
+                        Some(d.samples)
                     }
                     Err(e) => {
                         out.notes.push(format!("CCITTFaxDecode: {e}"));

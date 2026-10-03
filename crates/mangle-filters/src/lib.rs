@@ -40,7 +40,9 @@ pub use error::{FilterError, FilterResult};
 pub use inflate::{InflateOutcome, inflate, inflate_raw};
 
 pub use ascii::{ascii_hex_decode, ascii85_decode};
-pub use ccitt::{CcittParams, Variant as CcittVariant, ccitt_decode};
+pub use ccitt::{
+    CcittOutcome, CcittParams, Variant as CcittVariant, ccitt_decode, ccitt_decode_with_damage,
+};
 pub use lzw::{EarlyChange, lzw_decode, lzw_encode};
 pub use predict::{PredictorParams, predict, unpredict};
 pub use runlength::{run_length_decode, run_length_encode};

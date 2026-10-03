@@ -34,6 +34,10 @@
 /assets/cmaps/** -text
 /assets/data/**  -text
 
+# Frozen CCITT ground truth: a compressed stream next to the raster another implementation
+# decoded from it. Binary, and a diff is never readable.
+/crates/mangle-filters/tests/fixtures/**/*.ccf binary
+
 # Scripts
 *.sh  text eol=lf
 *.bat text eol=crlf

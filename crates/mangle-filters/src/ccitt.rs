@@ -301,6 +301,22 @@ impl<'a> Bits<'a> {
         Some(b)
     }
 
+    /// The next `n` bits, most significant first, zero-filled past the end of the data.
+    ///
+    /// Zero-filling is safe for a table of prefix codes, because every code contains a one:
+    /// a match can only ever be a code that lies entirely inside the real bits. Reading the
+    /// window this way is what lets the last code of a stream be read when it ends within
+    /// the last six bits, which a `peek` that insists on `n` bits would refuse.
+    fn peek_padded(&self, n: usize) -> u32 {
+        let mut v = 0u32;
+        for i in 0..n {
+            v <<= 1;
+            let byte = self.data.get((self.pos + i) >> 3).copied().unwrap_or(0);
+            v |= u32::from((byte >> (7 - ((self.pos + i) & 7))) & 1);
+        }
+        v
+    }
+
     fn peek(&self, n: usize) -> Option<u32> {
         let end = self.pos.checked_add(n)?;
         if end > self.data.len() * 8 {
@@ -354,17 +370,24 @@ enum Mode {
     Vertical(i8),
 }
 
-/// The eight 2D mode codes of ITU-T T.4 table 4: the code's bits, its width, and what
-/// it means. Listed longest last so the widths are visible in one place.
-const MODE_CODES: [(&str, Mode); 8] = [
+/// The 2D mode codes of ITU-T T.4 table 4: the code's bits, and what it means.
+///
+/// Read off libtiff's encoder rather than from memory. A stream built from a reference line
+/// holding one black run, and the same line shifted by `d`, can only be a pair of vertical
+/// modes, and the bits libtiff writes for `d = -3` are `0000010`: the table that used to
+/// claim `0000001` for a pass and `0000011` for a negative three was a shifted version of
+/// this one, and it lost rows. Nothing in this repository could see that, because nothing
+/// else in it decoded them.
+const MODE_CODES: [(&str, Mode); 9] = [
+    ("0001", Mode::Pass),
+    ("001", Mode::Horizontal),
     ("1", Mode::Vertical(0)),
     ("011", Mode::Vertical(1)),
     ("010", Mode::Vertical(-1)),
-    ("001", Mode::Horizontal),
-    ("0001", Mode::Vertical(-2)),
     ("000011", Mode::Vertical(2)),
-    ("0000011", Mode::Vertical(-3)),
-    ("0000001", Mode::Pass),
+    ("000010", Mode::Vertical(-2)),
+    ("0000011", Mode::Vertical(3)),
+    ("0000010", Mode::Vertical(-3)),
 ];
 
 fn parse_bits(bits: &str) -> u32 {
@@ -374,7 +397,7 @@ fn parse_bits(bits: &str) -> u32 {
 
 /// Read a 2D mode code. `None` means the bits are not a valid mode.
 fn read_mode(bits: &mut Bits<'_>) -> Option<Mode> {
-    let v = bits.peek(7)?;
+    let v = bits.peek_padded(7);
     for (pattern, mode) in MODE_CODES {
         let width = u32::try_from(pattern.len()).unwrap_or(0);
         // `peek` returns the first bits in the high positions, so the code to match
@@ -416,42 +439,68 @@ fn read_run(bits: &mut Bits<'_>, black: bool) -> Option<u32> {
     }
 }
 
-/// A decoded line: the positions where colour changes, strictly increasing.
+/// A decoded line: the positions at which its colour changes, strictly increasing.
+///
+/// A position in `changes` is where the *new* colour starts, so a change at zero means the
+/// line opens on black. Two things follow from that and both of them are load-bearing:
+///
+/// * the colour of sample `x` is black exactly when an odd number of these are `<= x`;
+/// * the runs of the line start one position *after* the changing element the two-
+///   dimensional rules call `a0`, which at the start of a line is the imaginary white
+///   element at -1.
 #[derive(Debug, Default, Clone)]
 struct Line {
     changes: Vec<i64>,
 }
 
 impl Line {
-    /// Colour of the run containing `at`: `true` is black.
+    /// Colour of the sample at `at`: `true` is black.
     fn colour_at(&self, at: i64) -> bool {
-        self.changes.iter().take_while(|c| **c < at).count() % 2 == 1
+        self.changes.partition_point(|c| *c <= at) % 2 == 1
     }
 
-    /// `b1` and `b2` from T.4: the first and second changing elements to the right of
-    /// `a0` whose colour differs from the colour at `a0`.
-    fn b1_b2(&self, a0: i64) -> (i64, i64) {
-        let base = self.colour_at(a0);
-        let mut found = false;
-        let mut b1 = -1i64;
-        for (j, &p) in self.changes.iter().enumerate() {
-            if p <= a0 {
-                continue;
-            }
-            let colour = j % 2 == 1;
-            if colour != base {
-                b1 = p;
-                found = true;
-                break;
+    /// `b1` and `b2` from T.4: the two positions on the reference line that a mode code is
+    /// measured against. `b1` is the reference line's first *changing element* to the right of
+    /// the coding line's current element `a0` whose colour is not the coding line's colour
+    /// there, and `b2` is the reference line's next changing element after that one.
+    ///
+    /// `a0_colour` is the *coding* line's colour and not the reference line's own colour at
+    /// the same position: the two lines are coded against each other and may disagree there.
+    /// That is why the search skips a reference element of the wrong colour instead of taking
+    /// the first one after `a0`. With a reference holding one black run and a coding line that
+    /// starts inside it, the element to the right of `a0` is black, which is the coding line's
+    /// own colour, and the useful element is the white one after it.
+    ///
+    /// A pixel-by-pixel search for the first place the two lines differ is *not* the rule,
+    /// and it is not a harmless substitute: it answers `a0 + 1` whenever the coding element sits
+    /// inside a reference run of its own colour, and every offset measured from `b1` then
+    /// lands somewhere else entirely.
+    ///
+    /// Either result is `-1` when there is none, which every caller reads as the width: there
+    /// is nothing to the right of the line to code against.
+    fn b1_b2(&self, a0: i64, a0_colour: bool) -> (i64, i64) {
+        // The elements are sorted, so the ones to the right of `a0` start here. One exactly
+        // at `a0` is not to the right of it.
+        let first = self.changes.partition_point(|c| *c <= a0);
+        for (i, &p) in self.changes.iter().enumerate().skip(first) {
+            // A changing element is where the reference line's colour becomes the other one,
+            // so its colour is the colour in force there.
+            if self.colour_at(p) != a0_colour {
+                return (p, self.changes.get(i + 1).copied().unwrap_or(-1));
             }
         }
-        if !found {
-            return (-1, -1);
+        (-1, -1)
+    }
+
+    /// Record a changing element, if it is a sample of this line at all.
+    ///
+    /// A position at or past the width is not an element of the line, and one before zero
+    /// is the imaginary element at -1 that `a0` already stands for. Both are dropped rather
+    /// than clamped: clamping would put a change at the end of the row and recolour the tail.
+    fn push_change(&mut self, at: i64, width: i64) {
+        if (0..width).contains(&at) {
+            self.changes.push(at);
         }
-        // b2 is the element after b1 on the reference line.
-        let idx = self.changes.iter().position(|c| *c == b1).unwrap_or(0);
-        let b2 = self.changes.get(idx + 1).copied().unwrap_or(-1);
-        (b1, b2)
     }
 
     /// Expand to `width` samples, 1 = black.
@@ -489,8 +538,45 @@ impl Line {
     }
 }
 
+/// One line of decoded data, and whether the stream went wrong in the middle of it.
+///
+/// A damaged line is still emitted: what was read before the damage is more of the row
+/// than a blank line would be, and it is reported rather than passed off as content.
+#[derive(Debug, Default, Clone)]
+struct LineOutcome {
+    line: Line,
+    damaged: bool,
+}
+
+/// What a CCITT decode produced, and how much of it was guesswork.
+///
+/// The samples are a prefix of what an undamaged stream would give: a truncated scan must
+/// still show the rows it does contain. `complete` says whether every row asked for came
+/// out of the data with nothing wrong with it, and `note` says what stopped it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CcittOutcome {
+    /// One byte per sample, in the polarity `/BlackIs1` names.
+    pub samples: Vec<u8>,
+    /// Rows `samples` holds.
+    pub rows_decoded: usize,
+    /// Rows where the data ran out or the codes made no sense.
+    pub damaged_rows: usize,
+    /// `true` when every asked-for row came out of the data, undamaged.
+    pub complete: bool,
+    /// Why the decode stopped early, if it did.
+    pub note: Option<String>,
+}
+
 /// Decode CCITT data to one byte per pixel, 0 = white and 1 = black before inversion.
 pub fn ccitt_decode(data: &[u8], p: &CcittParams) -> FilterResult<Vec<u8>> {
+    Ok(ccitt_decode_with_damage(data, p)?.samples)
+}
+
+/// As [`ccitt_decode`], and says how much of the result was damaged.
+///
+/// A stream that ran out, or whose codes stopped making sense, must not come back as a
+/// short page that looks like a page of nothing: the caller has to be able to say so.
+pub fn ccitt_decode_with_damage(data: &[u8], p: &CcittParams) -> FilterResult<CcittOutcome> {
     if p.columns == 0 {
         return Err(FilterError::BadParameters {
             filter: "CCITTFaxDecode",
@@ -505,12 +591,7 @@ pub fn ccitt_decode(data: &[u8], p: &CcittParams) -> FilterResult<Vec<u8>> {
     let mut out: Vec<u8> = Vec::new();
     let mut bits = Bits::new(data);
     let mut reference = Line::default();
-    let mut damaged = 0i32;
-    let max_damage = if p.damaged_rows_before_error > 0 {
-        p.damaged_rows_before_error
-    } else {
-        i32::MAX
-    };
+    let mut damaged_rows = 0usize;
 
     // Leading fill and EOLs.
     while bits.peek(12) == Some(0) && !bits.eod() {
@@ -543,197 +624,272 @@ pub fn ccitt_decode(data: &[u8], p: &CcittParams) -> FilterResult<Vec<u8>> {
             break;
         }
 
-        let line = match p.variant {
-            Variant::G3_1D => decode_line_1d(&mut bits, width, max_damage, &mut damaged),
-            Variant::G3_2D => decode_line_2d(
-                &mut bits,
-                width,
-                &reference,
-                false,
-                max_damage,
-                &mut damaged,
-            ),
-            Variant::G4 => {
-                decode_line_2d(&mut bits, width, &reference, true, max_damage, &mut damaged)
-            }
+        let outcome = match p.variant {
+            Variant::G3_1D => decode_line_1d(&mut bits, width),
+            Variant::G3_2D => decode_line_2d(&mut bits, width, &reference, false),
+            Variant::G4 => decode_line_2d(&mut bits, width, &reference, true),
         };
-        let Some(line) = line else {
-            damaged += 1;
-            if damaged > max_damage {
-                break 'rows;
-            }
-            // Skip to the next line boundary and carry on with a blank line.
-            if bits.eod() {
-                break 'rows;
-            }
-            bits.align();
-            if bits.eod() {
-                break 'rows;
-            }
-            out.extend(std::iter::repeat_n(0u8, width));
-            continue;
-        };
-        let mut row = line.samples(width);
+        let mut row = outcome.line.samples(width);
         if !p.black_is_1 {
             for b in &mut row {
                 *b = u8::from(*b == 0);
             }
         }
+        let damaged = outcome.damaged;
         out.extend_from_slice(&row);
-        reference = line;
+        // The reference for the next line is the line just decoded, damaged or not: it is
+        // the same guess the row above is, so the two cannot disagree.
+        reference = outcome.line;
+
+        if !damaged {
+            continue;
+        }
+        damaged_rows += 1;
+        if p.damaged_rows_before_error > 0
+            && damaged_rows > usize::try_from(p.damaged_rows_before_error).unwrap_or(usize::MAX)
+        {
+            // The document named a number of bad rows it will put up with. This was one
+            // more, so the decode stops here rather than filling a page with noise.
+            break 'rows;
+        }
+        if !resync(&mut bits, p.variant) {
+            break 'rows;
+        }
     }
 
-    Ok(out)
+    let rows_decoded = out.len() / width;
+    let mut notes: Vec<String> = Vec::new();
+    if damaged_rows > 0 {
+        notes.push(format!(
+            "{damaged_rows} damaged row{}",
+            if damaged_rows == 1 { "" } else { "s" }
+        ));
+    }
+    if p.rows > 0 && rows_decoded < p.rows {
+        notes.push(format!(
+            "the data ended after {rows_decoded} of {} rows",
+            p.rows
+        ));
+    }
+    Ok(CcittOutcome {
+        samples: out,
+        rows_decoded,
+        damaged_rows,
+        complete: notes.is_empty(),
+        note: (!notes.is_empty()).then(|| notes.join("; ")),
+    })
 }
 
-fn decode_line_1d(
-    bits: &mut Bits<'_>,
-    width: usize,
-    max_damage: i32,
-    damaged: &mut i32,
-) -> Option<Line> {
+/// Where to pick the stream up again after a line went wrong.
+///
+/// Group 3 has an EOL to look for. Group 4 has no markers at all, so the next byte boundary
+/// is all that is left to aim at — which is a guess, and is why the row it leads to is
+/// counted as damaged and reported rather than passed off as content.
+///
+/// Forward motion is the whole point. A bad mode code costs no bits, so a resync that only
+/// aligned would hand the decoder the same broken line for ever.
+fn resync(bits: &mut Bits<'_>, variant: Variant) -> bool {
+    let from = bits.pos;
+    if variant == Variant::G4 {
+        bits.align();
+    } else {
+        while !bits.eod() && !bits.at_eol() {
+            bits.pos += 1;
+        }
+        if bits.at_eol() {
+            bits.pos += 12;
+        }
+    }
+    if bits.pos <= from {
+        bits.pos = from.saturating_add(8);
+    }
+    !bits.eod()
+}
+
+/// Decode one line of 1D data: alternating runs, each its own colour.
+fn decode_line_1d(bits: &mut Bits<'_>, width: usize) -> LineOutcome {
     let mut line = Line::default();
     let mut x: i64 = 0;
-    let w = i64::try_from(width).ok()?;
+    let w = i64::try_from(width).unwrap_or(i64::MAX);
     let mut guard = 0usize;
-    // Runs alternate white, black, white... so the colour is implicit: an even number
-    // of changes means white. Zero-length runs are legal and must be recorded, because
-    // they are what lets a line start on black.
-    let black = false;
+    // A line opens white and the colours alternate, so the colour is implicit: an even
+    // number of changing elements means white. Zero-length runs are legal and must be
+    // recorded, because they are what lets a line start on black.
     loop {
         guard += 1;
-        if guard > width * 4 + 64 {
-            return None;
+        if guard > width.saturating_mul(4).saturating_add(64) {
+            return LineOutcome {
+                line,
+                damaged: true,
+            };
         }
         if x >= w {
             break;
         }
         if bits.eod() {
-            break;
+            // The line stopped in the middle. What came before it stands.
+            return LineOutcome {
+                line,
+                damaged: true,
+            };
         }
-        let Some(run) = read_run(bits, black) else {
-            *damaged += 1;
-            if *damaged > max_damage {
-                return None;
-            }
-            return Some(line);
+        let Some(first) = read_run(bits, false) else {
+            return LineOutcome {
+                line,
+                damaged: true,
+            };
         };
-        let next = x + i64::from(run);
-        if next < w {
-            line.changes.push(next);
-        }
+        let next = x + i64::from(first);
+        line.push_change(next, w);
         x = next;
         if x >= w {
             break;
         }
         if bits.eod() {
-            break;
+            return LineOutcome {
+                line,
+                damaged: true,
+            };
         }
-        let Some(run) = read_run(bits, !black) else {
-            return Some(line);
+        let Some(second) = read_run(bits, true) else {
+            return LineOutcome {
+                line,
+                damaged: true,
+            };
         };
-        let next = x + i64::from(run);
-        if next < w {
-            line.changes.push(next);
-        }
+        let next = x + i64::from(second);
+        line.push_change(next, w);
         x = next;
         // Two runs were consumed, so the colour is back to where it started.
     }
-    Some(line)
+    LineOutcome {
+        line,
+        damaged: false,
+    }
+}
+
+/// Where the run in progress starts.
+///
+/// `a0` is the position of the coding line's current changing element, and a changing
+/// element sits where its run starts — except at the start of a line, where `a0` is the
+/// imaginary white element at -1 and the first sample is at 0.
+fn run_start(a0: i64) -> i64 {
+    a0.max(0)
+}
+
+/// One pair of 1D runs on a 2D line: the coding line's own colour first, then the other.
+///
+/// The pair leaves two changing elements on the coding line, at `start + r1` and at
+/// `start + r1 + r2`, and the next element is the second of them. The colour is back to what
+/// it was afterwards: two runs, two changes.
+fn read_pair(bits: &mut Bits<'_>, a0: i64, colour: bool) -> Option<(i64, i64)> {
+    let first = read_run(bits, colour)?;
+    let second = read_run(bits, !colour)?;
+    let mid = run_start(a0) + i64::from(first);
+    Some((mid, mid + i64::from(second)))
 }
 
 /// Decode one line of 2D data. `pure_2d` selects T.6, where 1D runs are not allowed.
+///
+/// There are two coordinate systems here and confusing them is the whole of what went wrong
+/// once. `a0` is the *coding* line's current changing element and `colour` is the coding
+/// line's colour at it; the run lengths a 1D pair carries and the `a1` a vertical mode
+/// lands on are both counted from `a0` in the coding line. `b1` and `b2` are the only
+/// things read off the reference line, and they are read as *positions*, never as an offset
+/// to add a run length to — adding one to `b1` instead of to `a0` puts the run outside the
+/// row whenever the reference line is blank, which loses the change point and leaves the
+/// next line to be read against a reference that was never written.
 fn decode_line_2d(
     bits: &mut Bits<'_>,
     width: usize,
     reference: &Line,
     pure_2d: bool,
-    max_damage: i32,
-    damaged: &mut i32,
-) -> Option<Line> {
-    let w = i64::try_from(width).ok()?;
+) -> LineOutcome {
+    let w = i64::try_from(width).unwrap_or(i64::MAX);
     let mut line = Line::default();
+    // The imaginary white element just before the first sample, so the first run starts at 0.
     let mut a0: i64 = -1;
-    let mut colour = false; // colour of the run starting at a0
+    let mut colour = false;
     let mut guard = 0usize;
 
     while a0 < w {
         guard += 1;
-        if guard > width * 4 + 64 {
-            return None;
+        // Every iteration consumes at least one code of at least one bit, so this trips only
+        // on data that is not a fax line at all.
+        if guard > width.saturating_mul(4).saturating_add(64) {
+            return LineOutcome {
+                line,
+                damaged: true,
+            };
         }
         if bits.eod() {
-            break;
+            return LineOutcome {
+                line,
+                damaged: true,
+            };
         }
-        let (mut b1, mut b2) = reference.b1_b2(a0);
-        if b1 < 0 {
-            b1 = w;
-            b2 = w;
-        }
-        if b2 < a0 {
-            b2 = b1;
-        }
+        let (b1, b2) = reference.b1_b2(a0, colour);
+        // No element of the opposite colour to the right: the reference line runs blank to
+        // the end of the row, so the coding line may run to the end of it too.
+        let b1 = if b1 < 0 { w } else { b1 };
+        let b2 = if b2 < 0 { w } else { b2 };
 
-        let use_1d = !pure_2d && b1 - a0 <= 3;
-        if use_1d {
-            let Some(r1) = read_run(bits, colour) else {
-                *damaged += 1;
-                if *damaged > max_damage {
-                    return None;
-                }
-                return Some(line);
+        // T.4: a pair of runs is coded in 1D when the element to the right of `a0` is within
+        // three of `a0` — counted from `a0` itself, which at the start of a line is the
+        // imaginary element at -1. T.6 forbids that, and says so with pure_2d.
+        if !pure_2d && b1 - a0 <= 3 {
+            let Some(pair) = read_pair(bits, a0, colour) else {
+                return LineOutcome {
+                    line,
+                    damaged: true,
+                };
             };
-            let Some(r2) = read_run(bits, !colour) else {
-                return Some(line);
-            };
-            let next = a0 + i64::from(r1) + i64::from(r2);
-            if next < w {
-                line.changes.push(next);
-            }
+            let (mid, next) = pair;
+            line.push_change(mid, w);
+            line.push_change(next, w);
             a0 = next;
-            colour = !colour;
             continue;
         }
 
         let Some(mode) = read_mode(bits) else {
-            *damaged += 1;
-            if *damaged > max_damage {
-                return None;
-            }
-            return Some(line);
+            return LineOutcome {
+                line,
+                damaged: true,
+            };
         };
         match mode {
-            Mode::Pass => {
-                a0 = b2;
-            }
+            // Pass: the coding line's next element is `b2`, in the reference line's
+            // coordinates, and its colour is unchanged.
+            Mode::Pass => a0 = b2,
+            // Horizontal: two 1D runs, measured from `a0` and not from `b1`.
             Mode::Horizontal => {
-                let Some(r1) = read_run(bits, colour) else {
-                    return Some(line);
+                let Some((mid, next)) = read_pair(bits, a0, colour) else {
+                    return LineOutcome {
+                        line,
+                        damaged: true,
+                    };
                 };
-                let Some(r2) = read_run(bits, !colour) else {
-                    return Some(line);
-                };
-                let mid = b1 + i64::from(r1);
-                let next = mid + i64::from(r2);
-                if next < w {
-                    line.changes.push(next);
-                }
+                line.push_change(mid, w);
+                line.push_change(next, w);
                 a0 = next;
-                colour = !colour;
             }
+            // Vertical: one element, `d` to the right of `b1`.
             Mode::Vertical(d) => {
                 let next = b1 + i64::from(d);
-                if next > 0 && next < w {
-                    line.changes.push(next);
-                }
+                line.push_change(next, w);
                 a0 = next;
                 colour = !colour;
             }
         }
     }
+    // A well-formed line is already sorted and free of repeats. Sorting and de-duplicating
+    // costs nothing on one and keeps `samples` deterministic on one that is not.
     line.changes.sort_unstable();
     line.changes.dedup();
-    Some(line)
+    LineOutcome {
+        line,
+        damaged: false,
+    }
 }
 
 #[cfg(test)]
@@ -799,14 +955,15 @@ mod tests {
     #[test]
     fn mode_codes_are_distinct() {
         let cases = [
+            ("0001", Mode::Pass),
+            ("001", Mode::Horizontal),
             ("1", Mode::Vertical(0)),
             ("011", Mode::Vertical(1)),
             ("010", Mode::Vertical(-1)),
-            ("001", Mode::Horizontal),
-            ("0001", Mode::Vertical(-2)),
             ("000011", Mode::Vertical(2)),
-            ("0000011", Mode::Vertical(-3)),
-            ("0000001", Mode::Pass),
+            ("000010", Mode::Vertical(-2)),
+            ("0000011", Mode::Vertical(3)),
+            ("0000010", Mode::Vertical(-3)),
         ];
         for (bits, expect) in cases {
             let mut data = pack(bits);
@@ -926,6 +1083,124 @@ mod tests {
                 let row = line.samples(width);
                 assert_eq!(row.len(), width, "{width} columns from {line:?} is {row:?}");
             }
+        }
+    }
+
+    /// A 2D line built by hand, to T.4.
+    ///
+    /// The frozen cases in `tests/ccitt_libtiff.rs` are worth more than these, because
+    /// nothing in this repository wrote them. They cover G.4 and Group 3 1D; libtiff's Group
+    /// 3 2D codec is not an oracle for T.4 (that file says why), so the two-dimensional mode
+    /// of Group 3 is checked against the rules as written down instead. Every code is named
+    /// in the comment above it, so a reader can check the arithmetic rather than trust it.
+    #[test]
+    fn a_group_3_2d_line_reads_as_written() {
+        let p = CcittParams {
+            variant: Variant::G3_2D,
+            columns: 24,
+            rows: 2,
+            black_is_1: true,
+            ..Default::default()
+        };
+        // Row 0 has no reference to read: a horizontal pair, white 4 (`1011`) and black 10
+        // (`0000100`), puts changing elements at 4 and 14, and a vertical zero measured
+        // against the width ends the line. Black 4 to 13.
+        let row0 = "001101100001001";
+        // Row 1, against elements 4 and 14: its first element is 7, three right of 4, so
+        // vertical three (`0000011`); then 13 is one left of 14, so vertical one (`010`);
+        // then the element that ends the line is at the width, so a vertical zero.
+        // White 0 to 6, black 7 to 12.
+        let row1 = "00000110101";
+        let bits = format!("000000000001{row0}000000000001{row1}");
+        let out = ccitt_decode(&pack(&bits), &p).expect("decode");
+        assert_eq!(out.len(), 2 * 24, "two rows of 24");
+        assert_eq!(
+            &out[..24],
+            &[
+                0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ],
+            "row 0: black from 4 to 13"
+        );
+        assert_eq!(
+            &out[24..],
+            &[
+                0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ],
+            "row 1: black from 7 to 12"
+        );
+    }
+
+    /// Pass mode, and the 1D pair that Group 3 allows where T.6 does not.
+    #[test]
+    fn a_group_3_2d_line_uses_pass_mode_and_one_d_pairs() {
+        let p = CcittParams {
+            variant: Variant::G3_2D,
+            columns: 24,
+            rows: 2,
+            black_is_1: true,
+            ..Default::default()
+        };
+        // Row 0, with nothing to read against: two horizontal pairs — white 4 (`1011`) then
+        // black 4 (`011`), and white 2 (`0111`) then black 6 (`0010`) — put elements at 4, 8,
+        // 10 and 16, and a vertical zero ends the line. Black 4-7 and 10-15.
+        let row0 = "0011011011001011100101";
+        // Row 1, against those four elements: its first element is 10, past the second of
+        // them, so a pass (`0001`) sets `a0` to 8. `b1` is then 10, within three of 8, so the
+        // pair is coded as bare runs — white 2 (`0111`) and black 4 (`011`) — and a vertical
+        // zero ends the line. Black 10-13.
+        let row1 = "000101110111";
+        let bits = format!("000000000001{row0}000000000001{row1}");
+        let out = ccitt_decode(&pack(&bits), &p).expect("decode");
+        assert_eq!(out.len(), 2 * 24, "two rows of 24");
+        assert_eq!(
+            &out[..24],
+            &[
+                0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0
+            ],
+            "row 0: black from 4 to 7 and from 10 to 15"
+        );
+        assert_eq!(
+            &out[24..],
+            &[
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ],
+            "row 1: black from 10 to 13"
+        );
+    }
+
+    /// The same two lines in both variants: `b1` two to the right of the imaginary element at
+    /// -1, so Group 3 codes the pair as bare runs and T.6 has to write a horizontal mode and
+    /// the same two runs. What T.6 forbids is the mode code's absence, and nothing else.
+    #[test]
+    fn group_4_codes_what_group_3_would_have_coded_in_1d() {
+        let p = |v| CcittParams {
+            variant: v,
+            columns: 24,
+            rows: 2,
+            black_is_1: true,
+            ..Default::default()
+        };
+        // Row 0: white 2 (`0111`), black 4 (`011`), white 18 — a horizontal pair and a
+        // vertical zero. Black 2-5.
+        let row0 = "00101110111";
+        // Row 1 repeats it, against elements 2 and 6.
+        let row1_g3 = "01110111"; // bare runs, then the vertical zero that ends the line
+        let row1_g4 = "111"; // vertical zero at 2, at 6, and at the width
+        let want = [
+            0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        for (variant, row1) in [(Variant::G3_2D, row1_g3), (Variant::G4, row1_g4)] {
+            // Group 3 puts an EOL before every line; T.6 has no EOL at all.
+            let eol = if variant == Variant::G4 {
+                ""
+            } else {
+                "000000000001"
+            };
+            let bits = format!("{eol}{row0}{eol}{row1}");
+            let out = ccitt_decode(&pack(&bits), &p(variant)).expect("decode");
+            assert_eq!(out.len(), 2 * 24, "{variant:?}: two rows of 24");
+            assert_eq!(&out[..24], &want, "{variant:?}: row 0");
+            assert_eq!(&out[24..], &want, "{variant:?}: row 1");
         }
     }
 

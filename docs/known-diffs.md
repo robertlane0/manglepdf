@@ -416,24 +416,44 @@ that is worth being able to point at.
 
 ## D5 — the fax scan on a multi-page TIFF page rendered as a black rectangle
 
-**Severity: was high — 0.38414 SSIM, 60.6% of pixels wrong. The black half is FIXED; the
-CCITT T.6 codec underneath it is not.**
+**Severity: was high — 0.38414 SSIM, 60.6% of pixels wrong. FIXED as a codec defect. What is
+left on this page is a placement defect in the image path, which is not this one.**
 
-`pdfbox__multitiff.pdf` page 1, measured against `mutool draw` at 150 DPI after the fix:
-**0.91170 SSIM, RMS 72.09, 173 990 of 2 176 714 pixels above tolerance**, against the oracle's
-8% ink where this renderer now puts 0%. Before the fix the same page measured 0.38414 SSIM,
-RMS 197.78, 1 318 947 pixels above tolerance and 59% ink — the page was black.
+`pdfbox__multitiff.pdf` page 1, measured against `mutool draw` at 150 DPI:
 
-What was wrong is recorded in full in `docs/STATUS.md` and `PLAN.md`, because it is two
-defects with one cause and the second was created by fixing the first: a fax decoder hands
-back one byte per pixel, and *layout* (which byte a pixel lives in) and *value* (what a
+| | SSIM | RMS | above tolerance | ink ours / oracle |
+|---|---|---|---|---|
+| before any of the image work | 0.38414 | 197.78 | 1 318 947 | 59.0% / 8.0% |
+| layout and value split apart | 0.91170 | 72.09 | 173 990 | 0.0% / 8.0% |
+| **and the T.6 codec reading the coding line's coordinates** | **0.86317** | **88.84** | **264 199** | **7.98% / 8.0%** |
+
+The last row scores lower than the one above it and the page is closer to right, which is
+worth being explicit about rather than leaving to be misread: 0.91170 was the score for
+drawing nothing at all, and a page with no ink on it agrees very well with a page that is 92%
+paper. The renderer now decodes the whole scan and puts 173 595 pixels of ink where the
+oracle has 173 990.
+
+What was wrong is recorded in full in `docs/STATUS.md` and `PLAN.md`. There were four defects
+in one place, and each was invisible until the one before it was fixed, because a fax decoder
+hands back one byte per pixel and *layout* (which byte a pixel lives in) and *value* (what a
 sample is worth) are two different facts that only one number was standing in for.
 
-What is still wrong is the codec. Decoding this page's image with `DamagedRowsBeforeError =
-1` recovers **7 of 287 rows**, and our decoder recovers only 15 of 287 rows from `libtiff`'s
-own G.4 encoding of an image libtiff round-trips perfectly. The 8% of the oracle's ink this
-page still does not draw is the numeral, and it is that numeral — the only content on the
-page — that the two-dimensional CCITT path cannot decode.
+The fifth was the codec underneath. Decoding this page's image — object 12, 344 by 287,
+`/K -1` — recovers **287 of 287 rows, byte for byte against `libtiff`, with 0 damaged rows
+and nothing truncated**, where it recovered 15 before. The four defects in `decode_line_2d`
+were: run lengths added to `b1`, a position on the *reference* line, instead of to `a0`, the
+coding line's own current element; `b1_b2` choosing the reference element by the *reference*
+line's colour at `a0` rather than the coding line's; the changing elements' polarity inverted,
+so every element was labelled with the colour it changes away from; and three of the eight
+`MODE_CODES` entries mistranscribed with a ninth — *Vertical(+3)* and the codes `0000010` and
+`0000001` among them — missing or wrong. Against the frozen `libtiff` ground truth, **all 15
+cases now match byte for byte**, 896 of 896 rows.
+
+What is still wrong on this page is **not** the codec and never was. The page's content is a
+full-page colour scan — object 12 is 344 by 287 samples covering the whole 595.28 by 496.64
+point width and height the content stream gives it, not a numeral, and it is fully decoded.
+It lands in the wrong device rows, which is a placement defect in the image path rather
+than a codec one.
 
 ---
 

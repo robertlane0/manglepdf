@@ -291,11 +291,10 @@ renderer that never has to ask the machine for a font.
 Tier B is now standing — see "The wild corpus found" below — and it has overtaken everything
 else on this list, because nothing else in the project can see the problems it can see.
 
-## A fax image is two facts, not one (settled for layout and value; the codec is next)
+## A fax image is two facts, not one — and the two-dimensional codec reads two coordinate systems as one
 
 The wild corpus found four defects in one place, and they are written down together because
-each of them was invisible until the one before it was fixed, and because two of the four
-are the same mistake made twice.
+each of them was invisible until the one before it was fixed.
 
 **Layout and value are different facts.** How many bits of each byte a sample occupies —
 which decides which byte a pixel lives in — is not the same question as what a sample is
@@ -310,7 +309,8 @@ successor:
 |---|---|---|---|---|
 | read as the declared one bit per sample | 0.38414 | 197.78 | 60.59% | 59.0% / 8.0% |
 | read as eight bits and divided by 255 | 0.38414 | 197.78 | 60.59% | 59.0% / 8.0% |
-| **layout from the decoder, value from `/BitsPerComponent`** | **0.91170** | **72.09** | **7.99%** | **0.0% / 8.0%** |
+| layout from the decoder, value from `/BitsPerComponent` | 0.91170 | 72.09 | 7.99% | 0.0% / 8.0% |
+| **and the T.6 codec reading the coding line's coordinates** | **0.86317** | **88.84** | **12.14%** | **7.98% / 8.0%** |
 
 (`pdfbox__multitiff.pdf` page 1 at 150 DPI.) The first row is a barcode — eight pixels come
 out of every byte and the image smears sideways by a factor of eight. The second is a black
@@ -320,6 +320,13 @@ says which layout it produced, and `image::decode` carries layout and value apar
 `SampleRange` rather than as one `bits`. A stencil is the same split again: its sample *is* a
 bit however wide the byte a codec wrote it into, so it is tested on the stored bit and never
 on a value normalised over 255.
+
+**The last row scores lower than the one above it, and the page is much closer to right.** The
+third row's 0.91170 was the score for drawing *nothing*: a blank page agrees with a page that
+is 92% paper, which is a flattering number for a page with no content on it. The fourth row
+draws the right amount of ink (7.98% against the oracle's 7.99%) in the right horizontal band,
+in the wrong rows, which is a placement defect in the image path rather than a codec one and
+which predates everything on this page. The codec is settled; the placement is not.
 
 **An `/ImageMask` painted nothing.** `Do` names no colour, so the graphics state's fill
 colour has to travel with the mark, and the painter had been given black unconditionally —
@@ -332,18 +339,55 @@ one was left at the row's opening colour: a row coded `white 3, black 5` came ou
 white pixels. Every fax fixture in the project ended on a white run, which is the one case
 where leaving the tail alone looks right.
 
-**The T.6 two-dimensional path still has a further defect, and is not fixed.** Decoding
-`pdfbox__multitiff.pdf` page 1's image with `DamagedRowsBeforeError = 1` recovers **7 of 287
-rows, before and after the last-run fix** — the last-run defect does not move that figure,
-because on this file the row that trips the decoder is a horizontal-mode pair whose black run
-is being placed relative to `b1`, a position on the *reference* line, which for an all-white
-reference line is the line width: the run lands outside the row, the line decodes as blank,
-and every later line is then read against a blank reference until the bit reader meets a
-sequence that is not a mode code, at bit 24. This is not the PDFBox file being odd: our
-decoder recovers only **15 of 287 rows from libtiff's own G.4 encoding of an image libtiff
-itself round-trips perfectly**. Group 3 1D is unaffected, which is why the fixtures never
-showed it. This is the next thing in the image work, ahead of JBIG2 and JPEG 2000, because
-every fax scan in the corpus goes through it.
+**The T.6 two-dimensional path read two coordinate systems as one, and had the mode table
+wrong besides.** This was not the PDFBox file being odd. Our decoder recovered only **15 of
+287 rows from libtiff's own G.4 encoding of an image libtiff itself round-trips perfectly**,
+and Group 3 1D was unaffected, which is why the hand-written fixtures never showed it. Four
+defects were in `decode_line_2d`, and every one of them is a way of being wrong that a
+specification-derived test cannot see, because each is a perfectly good reading of a rule
+nobody had written down wrong:
+
+1. **A run length was added to the reference line's position.** `a0` is the *coding* line's
+   current changing element and `b1` and `b2` are positions on the *reference* line; the run
+   lengths a horizontal-mode pair carries are counted from `a0`. They were being added to
+   `b1`. On the corpus file the reference line is blank at row 4, so `b1` is the line width,
+   344, the black run lands outside the row, no change point is recorded, the line comes out
+   blank, and every later line is read against a reference that was never written. That is
+   272 of a page's 287 rows. The pair also recorded only its *last* changing element, so the
+   first run's colour was lost along with it.
+2. **`b1_b2` read the reference line's colour at `a0`.** `b1` is the reference's first changing
+   element to the right of `a0` whose colour differs from the **coding** line's colour there,
+   and the two lines are coded against each other and may disagree there. The search compared
+   against the reference's own colour at that position, so it returned an element of the
+   coding line's own colour, which is never the useful one. It also located `b1` by walking
+   pixels for the first place the two lines differ, which answers `a0 + 1` whenever the coding
+   element sits inside a reference run of its own colour.
+3. **The elements' polarity was inverted.** `b1_b2` called a changing element black when its
+   index in the change list was odd. The first change from a line that opens white *is* black,
+   so every element was labelled with the colour it changes *away* from.
+4. **Three of the eight `MODE_CODES` entries were mistranscribed and a ninth was missing.**
+   `0001` was read as `Vertical(-2)` and is *Pass*; `000011` was read as `Vertical(2)` and is
+   *Horizontal*; `0000011` was read as `Vertical(-3)` and is *Vertical(+3)*; `0000001` was read
+   as *Pass* and is not a T.4 code at all, while `0000010` — *Vertical(-3)* — was missing, as
+   was *Vertical(+3)*. T.4 table 4 has nine mode codes and the table had eight.
+
+The table is now read off libtiff's encoder rather than from memory, which is how a shifted
+version of a correct table survives review: a reference line holding one black run and the
+same line shifted by `d` can only be a pair of vertical modes, and the bits libtiff writes for
+`d = -3` are `0000010`. What settles a rule this size is not a specification-derived test but
+one whose expectations were **written by another implementation**: `scripts/make-ccitt-fixtures.py`
+has `tiffcp -c g4` encode and `tiffcp -c none` decode, and freezes the stream and the raster
+together under `crates/mangle-filters/tests/fixtures/ccitt-g4/`.
+`crates/mangle-filters/tests/ccitt_libtiff.rs` reads the pair back.
+
+Against that ground truth the corpus image — object 12 of `pdfbox__multitiff.pdf`, 344 by 287,
+`/K -1` — now decodes to **287 of 287 rows, byte for byte, with 0 damaged rows and nothing
+truncated**, at `DamagedRowsBeforeError` of both 0 and 1, and **all 15 libtiff cases match
+byte for byte** (896 of 896 rows across them). Group 3 2D is the one thing libtiff is not an
+oracle for — its decoder rejects every first line built to T.4 and its encoder writes that
+line as a vertical zero where T.4 requires the horizontal pair — so that path is still checked
+against hand-written bit strings in `src/ccitt.rs`, with every code named in the comment above
+it.
 
 ## The wild corpus found
 

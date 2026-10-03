@@ -475,21 +475,22 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    first attempt at this model was shown to be wrong: the specification's `Tc` and `Tw` are
    added raw, not divided by the size, and getting that backwards matched 29 of 400 cases
    where the implemented model matches all 400.
-4. **JBIG2 and JPEG 2000 have no decoder.** An image needing one is reported by name rather
+5. **JBIG2 and JPEG 2000 have no decoder.** An image needing one is reported by name rather
    than drawn as a blank rectangle, because a page with a conspicuous hole is a bug report
    and a page with a missing photograph is a wrong answer. CCITT does decode, through the
-   filter crate.
-5. **Tiling patterns and mesh shadings draw nothing.** A shading names one of types 1, 4, 5,
+   filter crate, and its two-dimensional path is now checked against `libtiff` — the
+   expectations are rasters `libtiff` decoded, not assertions derived from the specification.
+6. **Tiling patterns and mesh shadings draw nothing.** A shading names one of types 1, 4, 5,
    6 or 7, or a pattern needs a tiling loop, and each is reported as a note against the mark
    rather than skipped silently, so a page that used one is visibly incomplete instead of
-   quietly wrong. Images and axial/radial shadings now draw.
-6. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
+   quietly wrong.
+7. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the marks the content layer produces.
-7. **An object that came out of an object stream cannot keep its original bytes**,
+8. **An object that came out of an object stream cannot keep its original bytes**,
    because it had none: it was compressed with everything else in its container. A full
    save writes it as a direct object, which every reader accepts but which is a
    re-serialisation rather than a copy.
-8. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
+9. **No signature writing.** `ByteRange`, CMS and DocMDP all still have to be built.
 
 ## Metric-compatible aliases
 
@@ -685,7 +686,7 @@ of `crates/mangle-render/tests/wild_corpus.rs`. A threshold on a document nobody
 yet turns the first surprise into a permanent red build, and the response to a permanent red
 build is to raise the threshold, which is the one thing the corpus was for.
 
-### Four defects in one place, found by measuring the fax pages against an oracle
+### Five defects in one place, found by measuring the fax pages against an oracle
 
 `pdfbox__multitiff.pdf` page 1 is a page-sized CCITT G.4 scan. Against `mutool draw` at
 150 DPI it scored 0.38414 SSIM with 59% of the page's ink against the oracle's 8%, and it is
@@ -693,7 +694,8 @@ the clearest single illustration in this project of a fixture-shaped blind spot:
 project's own fax fixtures all end on a white run**, and a defect that only shows on a row
 ending in black is invisible to every one of them.
 
-Four defects, in the order they had to be found:
+Four defects, in the order they had to be found, and a fifth that only became visible once
+the fourth was fixed:
 
 1. **A fax decoder's output was read as a packed bit stream.** `ccitt_decode` returns one
    byte per pixel, and reading that as `/BitsPerComponent` claims — one bit — takes eight
@@ -714,7 +716,14 @@ Four defects, in the order they had to be found:
    | | SSIM | RMS | above tol | ink ours / oracle |
    |---|---|---|---|---|
    | before (one number for both) | 0.38414 | 197.78 | 60.59% | 59.0% / 8.0% |
-   | **after (layout from the decoder, value from `/BitsPerComponent`)** | **0.91170** | **72.09** | **7.99%** | **0.0% / 8.0%** |
+   | layout from the decoder, value from `/BitsPerComponent` | 0.91170 | 72.09 | 7.99% | 0.0% / 8.0% |
+   | **and the T.6 codec reading the coding line's coordinates** | **0.86317** | **88.84** | **12.14%** | **7.98% / 8.0%** |
+
+   The third row scores *lower* than the second and the page is closer to right. 0.91170 was
+   the score for drawing nothing at all, and a page with no ink on it agrees very well with a
+   page that is 92% paper. The third row draws the oracle's amount of ink in the oracle's
+   horizontal band and puts it in the wrong rows, which is a placement defect in the image
+   path and not a codec one, and which predates every defect on this page.
 
 3. **An `/ImageMask` painted the wrong bits, and with a colour nobody asked for.** `Do` names
    no colour, so a mask's colour comes from the graphics state and has to travel with the
@@ -729,25 +738,64 @@ Four defects, in the order they had to be found:
    one kept the row's opening colour: `white 3, black 5` decoded as eight white pixels. Every
    fax fixture here ends on a white run, which is the one case where that looks right.
 
-### The T.6 two-dimensional path is still broken, and it is not this file
+### The T.6 two-dimensional path, which was broken in four ways at once
 
-Fixing 4 did **not** move the row-recovery figure. Decoding `pdfbox__multitiff.pdf` page 1
-with `DamagedRowsBeforeError = 1` recovers **7 of 287 rows before and after** the fix. That
-is the whole of the honest answer and it is not a win: **the T.6 two-dimensional path has a
-further defect and it is not fixed.**
+Fixing 4 did **not** move the row-recovery figure, because the last-run defect and the
+two-dimensional defect were independent. What is below is the whole of it, and the claim that
+used to sit here — that the two-dimensional path was still broken — was wrong: it was broken in
+four ways, every one of them invisible to a specification-derived test, and all four are fixed.
 
-What is known. Rows 0–3 decode correctly as all white. Row 4 is a horizontal-mode pair, and
-`decode_line_2d` adds the two run lengths to `b1` — a position on the *reference* line — which
-for an all-white reference is the line width, 344. The black run therefore lands outside the
-row, no change point is recorded, and the line comes out blank; every later line is then read
-against a blank reference until the bit reader meets a sequence that is not a mode code, at
-bit 24 of 1768. The two runs really are the ones the file encodes: reading them out by hand
-against `libtiff`'s decode of the same image gives 199 white then 9 black, and `libtiff`'s
-row 4 is white to 199, black for 9, white after.
+Decoding `pdfbox__multitiff.pdf` page 1's image now recovers **287 of 287 rows, byte for byte
+against libtiff, with 0 damaged rows and nothing truncated**, at `DamagedRowsBeforeError` of
+both 0 and 1. Against the whole of the frozen ground truth, **all 15 libtiff cases match byte
+for byte** — 896 of 896 rows. Before the fix the same fixture gave 15 of 287.
 
-This is not the PDFBox file being unusual. Our decoder recovers only **15 of 287 rows from
-`libtiff`'s own G.4 encoding of an image libtiff itself round-trips perfectly**. Group 3 1D
-is unaffected, which is why the fixtures never showed it and why the corpus has almost no
-Group 4 in it. Group 4 is the most common fax format in the wild, so this is the next thing
-in the image work — ahead of JBIG2 and JPEG 2000 — and it needs the specification read rather
-than the code guessed at.
+**Four defects were in `decode_line_2d`.**
+
+1. **A run length was added to the reference line's position.** `a0` is the *coding* line's
+   current changing element; `b1` and `b2` are positions on the *reference* line. The two run
+   lengths a horizontal-mode pair carries are counted from `a0` in the coding line, and they
+   were being added to `b1`. Rows 0–3 of this image decode correctly as all white; row 4 is a
+   horizontal-mode pair, so `b1` is the line width, 344, the black run lands outside the row,
+   no change point is recorded, the line comes out blank, and every later line is read against
+   a reference that was never written until the bit reader meets a sequence that is not a mode
+   code, at bit 24 of 1768. The runs really are the ones the file encodes — 199 white then
+   9 black, against `libtiff`'s row 4 of white to 199, black for 9, white after. This one
+   defect is 272 of the page's 287 rows. The pair also recorded only its *last* changing
+   element, so the first run's colour was lost with it.
+2. **`b1_b2` read the reference line's colour at `a0`.** `b1` is the reference line's first
+   changing element to the right of `a0` whose colour differs from the **coding** line's colour
+   there, and the two lines are coded against each other and may disagree there. The search
+   compared against the reference line's own colour at that position, so it returned an element
+   that is the coding line's *own* colour, which is never the useful one; it also located `b1`
+   by walking pixels for the first place the two lines differ, which answers `a0 + 1` whenever
+   the coding element sits inside a reference run of its own colour.
+3. **The elements' polarity was inverted.** An element was called black when its index in the
+   change list was odd. A line opens white, so the *first* change is the black one: every
+   element was labelled with the colour it changes away from.
+4. **Three of the eight `MODE_CODES` entries were mistranscribed and a ninth was missing.**
+   `0001` was read as `Vertical(-2)` and is *Pass*; `000011` was read as `Vertical(2)` and is
+   *Horizontal*; `0000011` was read as `Vertical(-3)` and is *Vertical(+3)*; `0000001` was read
+   as *Pass* and is not a T.4 code at all, while `0000010` — *Vertical(-3)* — was missing, as
+   was *Vertical(+3)*. T.4 table 4 has nine mode codes; the table had eight.
+
+The table is now read off libtiff's encoder rather than from memory, which is the only reason
+to trust it: a reference line holding one black run and the same line shifted by `d` can only
+be a pair of vertical modes, and the bits libtiff writes for `d = -3` are `0000010`. A shifted
+version of a correct table survives review, and no assertion derived from the specification
+can tell one from the other.
+
+**What makes a rule this size testable is an expectation another implementation wrote.**
+`scripts/make-ccitt-fixtures.py` has `tiffcp -c g4` encode a raster and `tiffcp -c none` decode
+the identical bytes back, and freezes the stream and the raster together under
+`crates/mangle-filters/tests/fixtures/ccitt-g4/`; `crates/mangle-filters/tests/ccitt_libtiff.rs`
+reads the pair and asks whether our decoder produces the second from the first. The fixtures
+are checked in, so the test runs on a machine with no libtiff at all — a test that only runs
+where the oracle is installed is not a test.
+
+Group 3 2D is the one variant libtiff is **not** an oracle for: its decoder rejects every
+first line built to T.4 with `Line length mismatch at line 0`, including an all-white one,
+and its encoder writes that line as a vertical zero where T.4 requires the horizontal pair.
+Its encoder and decoder agree with each other and with neither T.4 nor anything else, so
+freezing a fixture from them would freeze the disagreement. That path is still checked against
+hand-written bit strings in `src/ccitt.rs`, with every code named in the comment above it.
