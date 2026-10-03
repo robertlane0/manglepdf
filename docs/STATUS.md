@@ -584,13 +584,48 @@ by SHA-256 in `corpus/wild/MANIFEST.toml` and measured against `mutool draw -r 1
 `pdftotext`. One run, 77 files and 542 pages, produced **two clusters** and almost nothing
 else — which is the point of having it.
 
-**34 files do not open.** 29 of them say `dangling reference: the page tree root is
-missing`, 4 say `no catalogue`, and 1 is `the document is encrypted: incorrect password`.
-So this is one dominant bug and a long tail, not 34 separate ones: the cross-reference
-*stream* path cannot be used, the reader falls back to scanning for `N G obj` headers, and
-an object stream hides `/Pages` from a scan. Between them those 34 files cover live
-government forms (IRS 1040 and W-4, NIST FIPS 197 and SP 800-88), two 1:25000 USGS topo
-sheets and every Adobe InDesign output in the set.
+**34 files did not open. 73 of the 77 open now.** 29 of them said `dangling reference: the
+page tree root is missing`, 4 said `no catalogue`, and 1 was `the document is encrypted:
+incorrect password`. That was one dominant bug, and it was not the one first written down.
+
+The reader could not read a cross-reference *stream* at all. A cross-reference stream is an
+indirect stream object, `N G obj << dict >> stream …`, and `Parser::next_object` parses
+**direct** objects only — it stops at the `<<` and never reaches the `stream` keyword, so it
+can never return a stream. `xref::read_section` asked it for one, which is unsatisfiable.
+Underneath that was a second defect: the test for whether `/Index` was present asked
+`get("Index").and_then(Object::as_i64)`, and `as_i64` of an array is always `None`, so
+`/Index` was ignored in every case and an incremental update's seven entries were numbered
+from zero. With no usable table the reader fell back to scanning for `N G obj` headers, a
+scan cannot see inside an object stream, `/Pages` was unreachable, and the error named the
+page tree while the fault was two layers above it.
+
+The first account of this said the PNG predictor in `/DecodeParms` was not decoded. The
+correlation was exact — every xref stream with a predictor failed, the one without opened —
+and it was wrong: most PDF 1.5+ producers emit Flate with `/Predictor 12`, so the
+correlation described who writes these files, not what broke them. Three experiments
+exonerated the predictor before anyone asked what `next_object` actually returns for
+`N G obj <<…>> stream`. D2 in `docs/known-diffs.md` keeps the correlation table and the
+disproved theory, because a plausible story that survives three experiments is worth being
+able to point at.
+
+| | before | after |
+|---|---|---|
+| files opened | 43 | **73** |
+| files not opened | 34 | **4** |
+
+Every file this bug broke now reports **`as written`** — the reader uses the file's own
+cross-reference information and repairs nothing — and page counts match `pdfinfo` on all 73.
+That includes live government forms (IRS 1040 and W-4, NIST FIPS 197 and SP 800-88), two
+1:25000 USGS topo sheets and every Adobe InDesign output in the set. The four that still
+fail are two fuzzed files `qpdf` also cannot read, one correctly-reported encrypted file,
+and one encrypted file this reader misdiagnoses; all four are itemised in
+`docs/known-diffs.md`.
+
+Two smaller defects in the same code were ways of *inventing* structure, which is the one
+thing this reader must never do: a cross-reference stream that decoded to a third of what
+`/Index` promised was believed anyway, and an object number too large for a `u32` was
+silently renumbered onto object 0, overwriting the free-list head. Both now refuse the
+section and let recovery rebuild, reporting the damage.
 
 **80 pages could not be compared at all, from one off-by-one.** They rendered 1275×1651
 where `mutool` renders 1275×1650 — 70 of them exactly that pair, the rest on other page

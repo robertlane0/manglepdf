@@ -7,13 +7,24 @@ cause and evidence."*
 **The Tier-B target is not met, and not narrowly.** Against `mutool draw` at 150 DPI over the
 77-file wild corpus: **460 of 542 pages were compared** and the median SSIM is **0.6929**, and
 **436 of those 460 pages (94.8%) are below 0.95**. Thirty-four of the 77 files could not be
-opened at all. This page records what the corpus found and the evidence for each claim.
+opened at all; **four cannot** now that D2 is fixed. This page records what the corpus found
+and the evidence for each claim.
 
 The corpus is `corpus/wild/`, pinned by SHA-256 in `corpus/wild/MANIFEST.toml`, fetched with
 `cargo xtask corpus fetch`, and measured by `crates/mangle-render/tests/wild_corpus.rs`.
 That test asserts nothing: the numbers below come from `corpus/wild/report/SUMMARY.md` and
 the per-file reports beside it, which are git-ignored and regenerated on every run. Oracle
 versions: `mutool 1.28.5`, `pdftotext` (poppler), `qpdf` (system).
+
+> **The SSIM figures below predate [D2](#d2--a-cross-reference-stream-could-never-be-read-at-all-so-every-pdf-15-file-reported-zero-pages)
+> and are now too pessimistic by one file in three.** They were measured when 34 of the 77
+> files could not be opened at all, and a file that cannot be opened contributes no pages
+> and so no SSIM. **73 of 77 now open**, against 43 before, and every one of them reports
+> `as written` — the reader uses the file's own cross-reference information and repairs
+> nothing. The 460-of-542 comparison count, the 0.6929 median and the 94.8%-below-0.95
+> figure all describe a corpus with a third of it missing, and none of them should be read
+> as a fidelity number until the corpus is re-run. The two-hour re-run is the next thing
+> wanted, and this file will be wrong again until it happens.
 
 **The test is `#[ignore]`d, on purpose.** One run over the corpus takes about two hours, so
 leaving it in the default suite makes `cargo test --workspace` unusable. The two cheap tests
@@ -29,6 +40,18 @@ cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture
 The 460/542 split matters as much as the SSIM does: **80 pages produced no SSIM at all**,
 because their buffers came out one pixel larger than the oracle's and `compare()` refuses
 images of different sizes. That was D3, and D3 is now fixed.
+
+### The four files that still do not open
+
+All four are reported, none is guessed at, and each is listed here so the count of 73 is
+auditable rather than asserted.
+
+| file | reason | why that is the right answer |
+|---|---|---|
+| `pdfjs__issue21579.pdf` | `the document is encrypted: incorrect password` | Encrypted, and the password is not derivable. Correct behaviour. |
+| `pdfjs__bug1020226.pdf` | `no catalogue` | A 184-byte stub. `qpdf --check` ends `unable to find trailer dictionary while recovering damaged file`. There is nothing to read. |
+| `pdfjs__REDHAT-1531897-0.pdf` | `no catalogue` | 871 bytes of fuzzed xref stream. `qpdf --check` ends `unable to find /Root dictionary`, having already rejected object 13 for `overflow/underflow converting 166666666666666666666666666`. |
+| `pdfjs__issue19484_1.pdf` | `dangling reference: the page tree root is missing` | **A misdiagnosis, and the one real thing left here.** The file is encrypted — its xref stream carries `/Encrypt 16 0 R`, its manifest lists `encrypted`, and `qpdf` also refuses it with `invalid password`. This reader accepts an empty user password and then cannot read the content: the catalogue resolves, but `/Pages` is object 13 inside object stream 4, and that container decodes to **0 bytes** from 50. So a document that needs a password is reported as one with a broken page tree. The error is in the encrypted-content path, not in the cross-reference reader, and fixing it means deciding whether an empty password that validates should be trusted. Left as it is rather than papered over. |
 
 ---
 
@@ -127,9 +150,19 @@ substitute drawn in place of content that could not be read.
 
 ---
 
-## D2 — a cross-reference stream with a PNG predictor is not decoded, so the file reports zero pages
+## D2 — a cross-reference stream could never be read at all, so every PDF 1.5+ file reported zero pages
 
-**Severity: critical. 29 of the 34 files that would not open.**
+**Severity: was critical — 34 of the 77 files. FIXED. The corpus now opens 73 of 77.**
+
+> **This entry previously named the wrong cause.** It said the PNG predictor in
+> `/DecodeParms` was not decoded, and the corpus correlation below made that look
+> airtight: every file with an xref stream and a predictor failed, and the one file with
+> an xref stream and no predictor opened. That correlation was a coincidence of who writes
+> xref streams — most PDF 1.5+ producers emit Flate with `/Predictor 12` — and the
+> predictor decoder was never at fault. It is exercised by `stream::tests::` and works.
+> Two defects sat between `startxref` and the predictor, both upstream of it. The
+> correlation table is kept below as a record of how a plausible story survived three
+> bisection experiments that all exonerated the thing it blamed.
 
 The 34 failures, by the reader's own reason string:
 
@@ -139,34 +172,55 @@ The 34 failures, by the reader's own reason string:
 | `no catalogue` | 4 |
 | `the document is encrypted: incorrect password` | 1 |
 
-The middle two rows are related but not the same failure and are recorded elsewhere: the
-`no catalogue` four include the uncompressed cross-reference stream of D4 and three files
-with no reachable trailer at all, and the encrypted one is legitimately unreadable without a
-password. Everything below is about the 29, which is one bug.
+All of the first two rows were this one bug; the encrypted file is legitimately unreadable
+without a password.
 
-When the reader cannot use the cross-reference stream at the `startxref` offset it falls
-back to scanning for `N G obj` headers. That scan cannot see objects stored inside object
-streams, so `/Pages` is unreachable and the document reports **0 pages** with the note
-`dangling reference: the page tree root is missing`.
+### The first defect: `next_object` cannot return a stream
 
-Correlation over the corpus is exact (characterised by hand on an earlier run; the totals
-are 77 files, 43 opened and 34 not):
+A cross-reference stream is an *indirect stream object* — `N G obj << dict >> stream …`.
+`Parser::next_object` is a parser for **direct** objects: it sees `<<`, returns the
+dictionary, and stops. It never looks for the `stream` keyword, so it can only ever return
+an `Object::Dict`, never an `Object::Stream`. `Document::parse_at` knows this and assembles
+the stream itself; `xref::read_section` did not, and asked:
 
-| cross-reference stream | PNG predictor | result |
-|---|---|---|
-| no | no | 39 opened |
-| yes | **yes** | **30 failed** |
-| yes | no | 3 opened |
-| no | no | 3 failed — a 184-byte stub, a fuzzed file and an encrypted file, all legitimately broken |
-| yes | yes | 1 opened — a hybrid file whose `startxref` points at a classic table with `/XRefStm` |
+```rust
+let Some(Object::Stream(stream)) = p.next_object().ok()? else {
+    return None;
+};
+```
 
-The one apparent exception (`pdfjs__issue20324.pdf`) is a hybrid-reference file read through
-the classic-table path, not the predictor path.
+which is unsatisfiable. Every xref stream therefore failed to parse, `read_section`
+returned `None`, and the chain came back with no entries and no `/Root`.
 
-Evidence, `gov__irs-fw4.pdf` — **live IRS Form W-4**, which `qpdf --check` reports as clean:
+### The second defect: `/Index` was tested in a way that can never be true
+
+Even once the stream parsed, its entries were numbered from zero regardless of `/Index`:
+
+```rust
+let index: Vec<i64> = match stream.dict.get("Index").and_then(Object::as_i64) {
+    Some(_) => /* read the array */,
+    None => vec![0, size],          // ← always this branch
+};
+```
+
+`/Index` is an array, and `as_i64` of an array is always `None`, so `get(..).and_then(..)`
+is `None` whether or not `/Index` is present. Both cases fell through to `vec![0, size]`.
+An incremental update that touches two objects — `/Index [2399 1 2422 1 2448 2 2451 3]` —
+had its seven entries attributed to objects 0 through 6, which is how
+`pdfbox__acroform.pdf` came to resolve its `/Root 12 0 R` to a **font**.
+
+### Why the symptom was `the page tree root is missing`
+
+With no usable cross-reference information, recovery falls back to scanning for `N G obj`
+headers. That scan cannot see objects stored inside object streams, so `/Pages` is
+unreachable and the document reports **0 pages** with the note
+`dangling reference: the page tree root is missing`. The error names the page tree; the
+fault was two layers above it, in the file's table of contents.
+
+### Evidence, `gov__irs-fw4.pdf` — **live IRS Form W-4**, which `qpdf --check` reports as clean
 
 ```
-$ manglepdf-cli info corpus/wild/gov__irs-fw4.pdf
+$ manglepdf-cli info corpus/wild/gov__irs-fw4.pdf          # before
 pages       0
 structure   repaired (3 note(s))
             - no cross-reference section at offset 208493
@@ -178,29 +232,71 @@ structure   repaired (3 note(s))
 `3594 0 obj <</Length 44/Type/XRef/Root 3540 0 R/… /Index[3540 1 3563 1 3589 2 3592 3]/W[1 3 1]/DecodeParms<</Columns 5/Predictor 12>>/Filter/FlateDecode>>`.
 A well-formed cross-reference stream that qpdf reads without a warning.
 
-The decisive experiment — rewrite the *same content* with the streams expanded and nothing
-else changed:
+Two experiments, run before the cause was found, are what sent the investigation after the
+predictor rather than past it. Rewriting the *same content* with the streams expanded and
+nothing else changed:
 
 ```
 $ qpdf --object-streams=disable irs-fw4.pdf irs-fw4-nostream.pdf
-$ manglepdf-cli info irs-fw4-nostream.pdf
+$ manglepdf-cli info irs-fw4-nostream.pdf                    # then
 pages       5
 structure   as written
 ```
 
-Same for `pdfjs__annotation-highlight.pdf` (0 → 1 page) and `gov__nist-fips197.pdf`
-(0 → 52 pages).
+and bisection on `pdfjs__bug1885505.pdf`, which reports `no cross-reference section at
+offset 116` over a valid stream: removing `/DecodeParms`, removing `/ID`, removing
+`/Index`, changing `/W`, correcting `/Length` by ±3 bytes, and rewriting every bare CR as
+LF each left the failure in place. Every one of those edits was upstream of the predictor
+and none touched the actual fault, which is that the stream object was never assembled at
+all. The fix was found by asking what `next_object` returns for `N G obj <<…>> stream`, not
+by reading the file harder.
 
-Also affected: **IRS Form 1040**, **NIST FIPS 197** (52 pp), **NIST SP 800-88** (44 pp),
+### The result
+
+```
+$ manglepdf-cli info corpus/wild/gov__irs-f1040.pdf
+pages       2
+structure   as written
+objects     2452
+```
+
+The reader now uses the file's own cross-reference information: **`as written`, with no
+repair at all**, on every file this bug had broken. Page counts match `pdfinfo` on every one
+of the 73 files that open.
+
+| | before | after |
+|---|---|---|
+| files opened | 43 | **73** |
+| files not opened | 34 | **4** |
+| of the 29, `the page tree root is missing` | 29 | **0** |
+
+Of the 29, 27 write a cross-reference stream and two (`pdfjs__issue19484_1.pdf`,
+`pdfjs__GHOSTSCRIPT-698804-1-fuzzed.pdf`) write a classic table with no `/Root` at all; the
+latter now opens by rebuild and is reported as repaired.
+
+Also fixed by this: **IRS Form 1040**, **NIST FIPS 197** (52 pp), **NIST SP 800-88** (44 pp),
 NIST IR 7657, both USGS 1:25000 topo sheets, all six Microsoft Word 2013 exports carrying
 annotations, both JPEG 2000 files, every Adobe InDesign output in the corpus, and
-`bug1885505.pdf` (a pdfeTeX paper).
+`bug1885505.pdf` (a pdfTeX paper).
 
-Bisection already run on `pdfjs__bug1885505.pdf`, which reports
-`no cross-reference section at offset 116` over a valid stream: removing `/DecodeParms`,
-removing `/ID`, removing `/Index`, changing `/W`, correcting `/Length` by ±3 bytes, and
-rewriting every bare CR as LF each left the failure in place. The predictor itself has not
-been isolated by direct experiment yet.
+### Two smaller defects the same code was hiding
+
+Both were ways of *inventing* structure, which is the one thing this reader must never do,
+and both were found by the fix above rather than looked for.
+
+**A damaged cross-reference stream was accepted as if it were whole.** `read_xref_stream`
+returned whatever entries it managed to read when the decoded body ran out early, so a
+stream that decoded to a third of what `/Index` promised produced a third of a table and
+was believed. `pdfjs__PDFBOX-3148-2-fuzzed.pdf` has exactly this: a corrupt `/ASCII85Decode`
+body that qpdf also rejects, promising `/Index [0 18]` and delivering three entries. The
+section is now refused, so recovery rebuilds the file by scanning and says so.
+
+**An object number a `u32` cannot hold was renumbered onto object 0.** Both the classic
+table reader and the stream reader did `u32::try_from(start.saturating_add(i)).unwrap_or(0)`,
+so a corrupt subsection header silently overwrote the free-list head with an unrelated
+offset and the rest of the file looked intact. `pdfjs__GHOSTSCRIPT-698804-1-fuzzed.pdf`
+carries the header `4294967296`; the table is now refused and the file opens by rebuild,
+correctly reported as repaired.
 
 ---
 
@@ -289,19 +385,32 @@ The existing fixtures did not catch this either: they are 200 × 200 pt and simi
 
 ## D4 — an uncompressed cross-reference stream is not read
 
-**Severity: high. One file, and a whole class.**
+**Severity: was high. FIXED by [D2](#d2--a-cross-reference-stream-could-never-be-read-at-all-so-every-pdf-15-file-reported-zero-pages) — it was the same bug.**
 
 `pdfjs__bug1539074.pdf`, a pdfTeX-1.40.17 page, whose only cross-reference section is
 `<</Type /XRef /Index [0 18] /Size 18 /W [1 2 1] /Length 72>>` — **no `/Filter` at all**, so
 the entries are raw bytes.
 
 ```
-$ qpdf --check bug1539074.pdf
-No syntax or stream encoding errors found
-$ manglepdf-cli info bug1539074.pdf
+$ manglepdf-cli info bug1539074.pdf                         # before
 pages       0
             - no cross-reference section at offset 5715
 ```
+
+The absence of `/Filter` had nothing to do with it. This file has no `/DecodeParms` either,
+which is what made it look like the odd one out that would separate "uncompressed" from
+"predictor", and it is the reason D2's correlation looked exact. The section failed for the
+same reason as every other: `next_object` returns the stream's dictionary and never the
+stream. Now:
+
+```
+$ manglepdf-cli info bug1539074.pdf                         # after
+pages       1
+structure   as written
+```
+
+It is left as its own entry because it is the file that falsified the predictor theory, and
+that is worth being able to point at.
 
 ---
 

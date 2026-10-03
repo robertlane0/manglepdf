@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::error::Result;
 use crate::lexer::{Lexer, Token};
 use crate::object::{Dict, Name, Object, Stream};
-use crate::parser::Parser;
+use crate::parser::{Parser, make_stream};
 
 /// Where one object lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,16 +260,7 @@ fn read_section(data: &[u8], offset: usize) -> Option<Section> {
         Token::Keyword(k) if k == b"xref" => read_table(data, save),
         _ => {
             // Probably "N G obj" holding an xref stream.
-            let mut p = Parser::at(data, save);
-            let Ok(Some(Object::Int(_num))) = p.next_object() else {
-                return None;
-            };
-            if p.next_object().ok()? != Some(Object::Int(0)) || !p.next_keyword(b"obj") {
-                return None;
-            }
-            let Some(Object::Stream(stream)) = p.next_object().ok()? else {
-                return None;
-            };
+            let stream = read_indirect_stream(data, save)?;
             let entries = read_xref_stream(&stream)?;
             let mut trailer = stream.dict.clone();
             trailer.remove("W");
@@ -284,6 +275,38 @@ fn read_section(data: &[u8], offset: usize) -> Option<Section> {
             })
         }
     }
+}
+
+/// Read `N G obj << dict >> stream ... endstream` at `pos` as one stream object.
+///
+/// `Parser::next_object` parses direct objects only, so it stops at the `<<` and never
+/// reaches the `stream` keyword; an indirect stream has to be assembled here, the way
+/// `Document::parse_at` does for every other object.
+///
+/// `/Length` is only trusted when it is an integer. An indirect `/Length` cannot be
+/// resolved without the document, so `parse_stream` falls back to scanning for
+/// `endstream`, which is what the specification requires anyway.
+fn read_indirect_stream(data: &[u8], pos: usize) -> Option<Stream> {
+    let mut p = Parser::at(data, pos);
+    let Ok(Some(Object::Int(_num))) = p.next_object() else {
+        return None;
+    };
+    let Ok(Some(Object::Int(0))) = p.next_object() else {
+        return None;
+    };
+    if !p.next_keyword(b"obj") {
+        return None;
+    }
+    let dict_start = p.position();
+    let Ok(Some(Object::Dict(dict))) = p.next_object() else {
+        return None;
+    };
+    if !p.next_keyword(b"stream") {
+        return None;
+    }
+    let len = dict.get("Length").and_then(Object::as_i64);
+    let (dict, raw, _) = Parser::parse_stream(data, dict_start, len).ok()?;
+    Some(make_stream(dict, raw, Some(pos)))
 }
 
 fn read_table(data: &[u8], mut pos: usize) -> Option<Section> {
@@ -323,7 +346,12 @@ fn read_table(data: &[u8], mut pos: usize) -> Option<Section> {
                     let (Token::Int(o), Token::Int(g)) = (&off.token, &generation.token) else {
                         return None;
                     };
-                    let num = u32::try_from(start.saturating_add(i)).unwrap_or(0);
+                    // A subsection header naming an object number this reader cannot
+                    // represent is damage. Renumbering it onto object 0 would overwrite the
+                    // free-list head with an unrelated offset and leave the rest of the file
+                    // looking intact, so the table is refused instead and recovery reports
+                    // the damage and rebuilds.
+                    let num = u32::try_from(start.saturating_add(i)).ok()?;
                     let g16 = u16::try_from(*g).unwrap_or(0);
                     let entry = match kind.token {
                         Token::Keyword(k) if k == b"n" => XrefEntry::InFile {
@@ -363,17 +391,29 @@ fn read_xref_stream(stream: &Stream) -> Option<Vec<(u32, XrefEntry)>> {
         .and_then(Object::as_i64)
         .unwrap_or(0)
         .max(0);
-    let index: Vec<i64> = match stream.dict.get("Index").and_then(Object::as_i64) {
-        Some(_) => stream
-            .dict
-            .get("Index")
-            .and_then(Object::as_array)
-            .map(|a| a.iter().filter_map(Object::as_i64).collect())
-            .unwrap_or_default(),
+    // `/Index` is pairs of (first object, count). Absent means the stream covers
+    // objects 0 to /Size. Asking `as_i64` of an array can never succeed, so testing
+    // for the array itself is what decides which branch runs.
+    let index: Vec<i64> = match stream.dict.get("Index").and_then(Object::as_array) {
+        Some(a) => a.iter().filter_map(Object::as_i64).collect(),
         None => vec![0, size],
     };
     let decoded = crate::stream::decode_stream(stream).data;
     let width: usize = widths.iter().sum();
+    // `/Index` says how many entries the stream carries, so the decoded body has to be
+    // exactly long enough for them. A short body means the stream is damaged — a filter
+    // that failed to decode, most often — and the entries that did survive would be
+    // attributed to whichever object numbers happened to come first. Report the section
+    // as unusable instead, which hands the file to the scan and keeps the damage visible.
+    let wanted: usize = index
+        .chunks(2)
+        .map(|c| usize::try_from(c.get(1).copied().unwrap_or(0).max(0)).unwrap_or(0))
+        .sum::<usize>()
+        .saturating_mul(width);
+    if decoded.len() < wanted {
+        return None;
+    }
+
     let mut out = Vec::new();
     let mut pos = 0usize;
     for chunk in index.chunks(2) {
@@ -381,7 +421,7 @@ fn read_xref_stream(stream: &Stream) -> Option<Vec<(u32, XrefEntry)>> {
         let count = chunk.get(1).copied().unwrap_or(0);
         for i in 0..count.max(0) {
             if pos + width > decoded.len() {
-                return Some(out);
+                return None;
             }
             let mut fields = [0u64; 3];
             for (k, w) in widths.iter().take(3).enumerate() {
@@ -395,7 +435,9 @@ fn read_xref_stream(stream: &Stream) -> Option<Vec<(u32, XrefEntry)>> {
                     *slot = v;
                 }
             }
-            let num = u32::try_from(start.saturating_add(i)).unwrap_or(0);
+            // As in a classic table, an object number this reader cannot represent
+            // is damage rather than something to renumber onto object 0.
+            let num = u32::try_from(start.saturating_add(i)).ok()?;
             let generation = u16::try_from(fields[2]).unwrap_or(0);
             let entry = match fields[0] {
                 0 => XrefEntry::Free {
@@ -594,6 +636,123 @@ mod tests {
                 }
             ))
         );
+    }
+
+    /// A whole file whose last section is an xref stream, as PDF 1.5 and later write it.
+    fn xref_stream_file(dict_body: &str, entries: &[u8]) -> Vec<u8> {
+        let head = b"%PDF-1.5\n1 0 obj\n<< /Type /Catalog /Pages 3 0 R >>\nendobj\n";
+        let mut data = head.to_vec();
+        let offset = data.len();
+        data.extend_from_slice(
+            format!(
+                "2 0 obj\n<< {dict_body} /Length {} >>\nstream\n",
+                entries.len()
+            )
+            .as_bytes(),
+        );
+        data.extend_from_slice(entries);
+        data.extend_from_slice(b"\nendstream\nendobj\nstartxref\n");
+        data.extend_from_slice(offset.to_string().as_bytes());
+        data.extend_from_slice(b"\n%%EOF\n");
+        data
+    }
+
+    /// An xref stream is an indirect *stream* object, and `next_object` parses direct
+    /// objects only, so a section reader that asks it for one never sees a stream.
+    #[test]
+    fn xref_stream_section_is_read_from_a_real_file() {
+        // /W [1 2 1]; object 0 free, object 1 at the catalogue's offset.
+        let catalog = b"%PDF-1.5\n1 0 obj\n".len();
+        let mut entries = vec![0u8, 0, 0, 0];
+        entries.push(1);
+        entries.extend_from_slice(&(catalog as u16).to_be_bytes());
+        entries.push(0);
+        let data = xref_stream_file("/Type /XRef /Size 2 /Root 1 0 R /W [1 2 1]", &entries);
+        let mut notes = Vec::new();
+        let x =
+            read_xref(&data, find_startxref(&data).expect("startxref"), &mut notes).expect("xref");
+        assert_eq!(notes, Vec::<String>::new());
+        assert_eq!(x.kind(), SectionKind::Stream);
+        assert_eq!(
+            x.get(1),
+            Some(XrefEntry::InFile {
+                offset: catalog,
+                generation: 0
+            })
+        );
+        assert_eq!(
+            x.trailer().get("Root").and_then(Object::as_ref_id),
+            Some(crate::object::Ref::new(1, 0))
+        );
+    }
+
+    /// `/Index` decides which object numbers the entries belong to. An incremental
+    /// update that touches two objects must not renumber every entry from zero, which is
+    /// what reading the array as "present or absent" without looking at it does.
+    #[test]
+    fn xref_stream_index_places_entries_at_the_right_object_numbers() {
+        let mut dict = Dict::new();
+        dict.set("Type", Object::name("XRef"));
+        dict.set("Size", Object::Int(9));
+        dict.set(
+            "Index",
+            Object::Array(vec![
+                Object::Int(7),
+                Object::Int(1),
+                Object::Int(8),
+                Object::Int(1),
+            ]),
+        );
+        dict.set(
+            "W",
+            Object::Array(vec![Object::Int(1), Object::Int(2), Object::Int(1)]),
+        );
+        // Object 7 in the file at offset 100, object 8 compressed in stream 4.
+        let stream = Stream::new(dict, vec![1, 0, 100, 0, 2, 0, 4, 0]);
+        let entries = read_xref_stream(&stream).expect("entries");
+        let nums: Vec<u32> = entries.iter().map(|(n, _)| *n).collect();
+        assert_eq!(nums, vec![7, 8]);
+        assert_eq!(
+            entries.first().copied(),
+            Some((
+                7,
+                XrefEntry::InFile {
+                    offset: 100,
+                    generation: 0
+                }
+            ))
+        );
+    }
+
+    /// A stream that decodes to less than `/Index` promises is damaged, most often by a
+    /// filter that failed. The entries that did survive would be attributed to whichever
+    /// object numbers came first, so the section is refused and recovery takes over.
+    #[test]
+    fn truncated_xref_stream_is_refused() {
+        let mut dict = Dict::new();
+        dict.set("Type", Object::name("XRef"));
+        dict.set("Size", Object::Int(19));
+        dict.set(
+            "Index",
+            Object::Array(vec![Object::Int(0), Object::Int(18)]),
+        );
+        dict.set(
+            "W",
+            Object::Array(vec![Object::Int(1), Object::Int(2), Object::Int(1)]),
+        );
+        // Four bytes per entry, promised eighteen, delivered three.
+        let stream = Stream::new(dict, vec![1, 0, 16, 0, 1, 0, 87, 0, 1, 0, 138, 0]);
+        assert!(read_xref_stream(&stream).is_none());
+    }
+
+    /// A subsection header naming an object number a `u32` cannot hold is damage. Mapping
+    /// it onto object 0 would replace the free-list head and hide the damage.
+    #[test]
+    fn classic_table_with_an_unrepresentable_object_number_is_refused() {
+        let data = build(
+            "xref\n0 2\n0000000000 65536 f \n0000000016 00000 n \n4294967296 1\n0000000138 00000 n \ntrailer\n<< /Size 7 /Root 1 0 R >>\n",
+        );
+        assert!(read_section(&data, 0).is_none());
     }
 
     #[test]
