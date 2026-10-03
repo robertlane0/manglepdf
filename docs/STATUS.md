@@ -604,10 +604,79 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
     score barely registers a change confined to dashes. What the oracle comparison above is for
     is the direct check, and it is exact.
 
-    One further find, recorded because it is a page that draws nothing at all:
-    `pdfjs__issue13325_reduced` is one page with `[11.376 11.376] 0 d` in it and the largest
-    dashes in the corpus, and this renderer puts **zero ink** on it — 11 marks recorded and
-    nothing composited. That is a separate defect, not a dash one, and it is worth a look.
+    One further find, recorded because it was a page that drew nothing at all:
+    `pdfjs__issue13325_reduced` put **zero ink** on the page — 11 marks recorded and nothing
+    composited. That was not a dash defect, and it is now fixed; see
+    [the entry below](#a-stroke-painted-in-a-pattern-was-dropped-and-the-page-was-blank).
+
+## A stroke painted in a pattern was dropped, and the page was blank
+
+The zero-ink page above is fixed, and the cause was not one of the four a blank page usually
+turns out to be. It was not a clip (the clip on every mark is the whole mediabox), not a
+placement (our CTM for the first stroke is `1 0 0 1 299.3702 566.1895`, which is `mutool
+trace`'s `1 0 0 -1 299.3702 275.7005` with the page's height taken off), not an alpha of zero
+(`/GS0` is `ca 1 CA 1`), and not content hiding in an XObject (the one form, `/Fm0`, is
+`0 TL q Q` — empty).
+
+The renderer said what was wrong, seven times, once per stroke:
+
+```
+a stroke colour in Pattern could not be converted, so the outline was not drawn
+```
+
+The page's seven strokes are set with `/CS1 CS /P0 SCN`, where `/CS1` is `[/Pattern]` and
+`/P0` is a `/PatternType 2` shading. **`SCN` naming a pattern as the stroke colour is ordinary
+PDF** — it is the only operator that can, since `G`, `RG`, `K` and `g`/`rg`/`k` cannot name a
+pattern resource at all — and a gradient rule is how a design tool draws a rule. The fill arm of
+`draw_mark` already read a `Pattern` fill and evaluated its shading per pixel. The **stroke** arm
+asked a colour converter for one colour, and `Colour::to_rgba` answers `None` for a `Pattern`
+space by design, because a pattern is not a colour. So every mark that carried the page's ink was
+dropped, and a page whose ink is entirely patterned strokes renders blank.
+
+The fix is one outline and two paints. `Device::stroke_outline` now builds the stroke's outline —
+dashes, caps, joins — and returns it per subpath; `Device::stroke_polygon` fills it with one
+colour as before, and `fill::stroke` fills the same outline through `fill::polygon` with a
+`FillColour` that may be a shading. One piece of code computes the outline, so a patterned stroke
+cannot come out dashed differently from a flat one, and
+`a_pattern_stroke_covers_exactly_where_a_one_colour_stroke_does` pins that by comparing the two
+pixel for pixel.
+
+Page 1 of `pdfjs__issue13325_reduced.pdf` against `mutool draw -r 150`, 1241×1754:
+
+| | SSIM | RMS | pixels above tolerance | our ink |
+|---|---|---|---|---|
+| before | 0.99644 | 4.85033 | 2 643 | **0** |
+| after | **0.99741** | **3.69345** | **2 466** | **3 439** |
+| `mutool` | — | — | — | 2 743 |
+
+Read the ink column and not the SSIM column. The page is **99.9% white**, so a blank page and a
+page with all of its marks drawn score 0.996 against each other, and an SSIM that moves in the
+fifth decimal is what a whole page appearing looks like here. Zero ink became a page that draws.
+
+What is left on the page is a different defect, and chasing it is how it turned up.
+**A two-point dash run drawn in the negative x direction is a bowtie**, hollow in the middle,
+while the same dash drawn left to right is solid:
+
+```
+80 50 m 20 50 l S    ....................034689986430............034689986430...
+20 50 m 80 50 l S    ....................000000000000............000000000000...
+```
+
+`offset_sides` asks `normal_at(path, i - 1, 0)` for the normal of the segment arriving at vertex
+`i`, but `normal_at(_, index, 0)` *already* means "the segment ending at `index`", so the call is
+one segment too early. At a path's last vertex both lookups miss and the normal falls back to a
+fixed `(0, 1)` — right for a segment running in the positive x direction, wrong for one running
+in the negative x direction, which is the whole of the l2r/r2l split above. It predates the
+pattern fix, reproduces with a plain `0 0 0 RG` stroke, and is **not fixed here**: it changes
+every stroked path on every page, so it wants its own entry and its own corpus measurement
+rather than a second change to `stroke_outline` inside a commit about one. Both are written up in
+`docs/known-diffs.md`, as D12 and D13.
+
+Two smaller things the same page exposed, both left open: **`Do` of a `/Subtype /Form` XObject
+is not implemented** — `/Fm0 Do` became an image mark and reported `an image claims to be 0 by 0
+pixels and was not drawn`, harmless here because the form is empty and wrong in general — and
+**`/CS0` cannot be converted**, twice, because it is an `[/ICCBased]` space whose profile is not
+read. The two fills it names are white, so neither costs anything on this page.
 
 ## Metric-compatible aliases
 

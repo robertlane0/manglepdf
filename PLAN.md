@@ -278,8 +278,12 @@ renderer that never has to ask the machine for a font.
    closed, plausible, wrong glyph rather than an error. Encodings are done on top of all of
     that: a code now becomes a glyph *name* through the standard tables and `/Differences`
     before it becomes a glyph number, at 0.98780 SSIM against `mutool` (see "Encodings").
-2. **Patterns**: the tiling loop. A *shading* pattern as a fill colour is done and evaluated
-   per pixel where the fill lands, sharing `sh`'s evaluator; a `/PatternType 1` tiling
+2. **Patterns**: the tiling loop. A *shading* pattern as a **fill** colour is done and evaluated
+   per pixel where the fill lands, sharing `sh`'s evaluator, and it is done as a **stroke**
+   colour too — `SCN` names a pattern resource exactly as `scn` does, and a page whose only ink
+   was patterned strokes used to render blank ([D12](docs/known-diffs.md)); `Device::stroke_outline`
+   now builds the outline once and both paints fill it, so a patterned stroke cannot come out
+   dashed differently from a flat one. A `/PatternType 1` tiling
    pattern needs a loop over cells in the pattern's own space — `/Matrix`, `/BBox`, `/XStep`,
    `/YStep` and paint type — and is reported by name rather than approximated with one cell.
    Two defects found while building the fill have since been fixed: [D9](docs/known-diffs.md)
@@ -322,6 +326,18 @@ renderer that never has to ask the machine for a font.
    is 0.97348 → 0.97408 and `gov__arxiv-1512.03385` page 1 does not move, because most corpus
    dash patterns are sub-pixel or on another page. One case is left and recorded: an array that
    sums to zero is drawn solid here, where both oracles draw nothing at all.
+   **And the outline itself has a defect the dash work exposed**, now
+   [D13](docs/known-diffs.md): a **two-point** dash run — one `m` and one `l` — drawn in the
+   negative x direction comes out a **bowtie**, hollow in the middle, while the identical dash
+   drawn left to right is solid. `offset_sides` asks `normal_at(path, i - 1, 0)` for the normal of
+   the segment arriving at vertex `i`, but `normal_at(_, index, 0)` already means "the segment
+   ending at `index`", so the call is one segment too early; at a path's last vertex both
+   lookups miss and the normal falls back to a fixed `(0, 1)`, which is right for a segment
+   running in the positive x direction and wrong for one running in the negative x direction.
+   It predates D12 and reproduces with a plain `0 0 0 RG` stroke. It is **not fixed yet**, and it
+   is the next thing on this item: one argument in one place, but it changes `stroke_outline`,
+   which every stroked path on every page goes through, so it wants its own corpus measurement
+   rather than a second change inside a commit about a pattern colour.
 3. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
    not going to be built.
 4. **Fill the Inspector's right-hand region** from the object model, which is the window work
@@ -329,6 +345,12 @@ renderer that never has to ask the machine for a font.
 5. **Break the symmetry of the remaining fixtures.** The diagonal-clip page is asymmetric now
    and scored 0.51652 when its clip was a box, where every symmetric fixture had scored above
    0.99 through the same bug. The rest still need the same treatment.
+6. **`Do` of a form XObject.** A `Do` whose `/Subtype` is `/Form` is read as an image today, so a
+   page's real content inside a form is never descended into — the corpus file that exposed
+   D12 is one, and its form happens to be empty (`0 TL q Q`), which is the only reason it was
+   harmless there. A form's `/Matrix`, `/BBox` clip and own `/Resources` all matter, and this is
+   a page-level feature rather than a paint one, so it belongs beside the clip work rather than
+   in the patterns item.
 
 Tier B is now standing — see "The wild corpus found" below — and it has overtaken everything
 else on this list, because nothing else in the project can see the problems it can see.
@@ -498,7 +520,7 @@ because a corpus's job is to find things and a threshold on a document nobody ha
 turns the first surprise into a permanent red build.
 
 The measurements and their evidence are in `docs/known-diffs.md`. In short: 460 pages
-compared, median SSIM 0.6929, 94.8% of pages below 0.95, 35 of 77 files unopenable. Three
+compared, median SSIM 0.6929, 94.8% of pages below 0.95, 35 of 77 files unopenable. Four
 findings dominate, in this order:
 
 1. **`render_page` renders a blank page for any Flate-compressed content stream.** All 542
@@ -515,6 +537,14 @@ findings dominate, in this order:
    be a whole number** — `792.0 * (150.0/72.0)` is `1650.0000000000002` in f64 and the `.ceil()`
    turns it into 1651, where `mutool` gives 1650. 80 pages across 17 files became uncomparable,
    including every page of both arXiv papers. **Done** — see above.
+4. **A stroke painted in a `/Pattern` colour space was dropped entirely**, because the stroke arm
+   asked a colour converter for one colour and `Colour::to_rgba` answers `None` for a pattern by
+   design — the fill arm already special-cased it and the stroke arm did not. `SCN` naming a
+   pattern as the stroke colour is ordinary PDF, so a page whose ink is entirely patterned
+   strokes rendered **blank**: 11 marks recorded, nothing composited. **Done** — see above, and
+   see [D12](docs/known-diffs.md) for the four other explanations that were ruled out first, and
+   for the two further defects the same page exposed ([D13](docs/known-diffs.md) and the missing
+   `Do` of a form).
 
 (1) is fixed, and it turned out to be the smaller of the two render defects. Re-measured with
 it fixed, 103 of 542 pages draw and 439 are still blank — 422 of those because of a font, 17

@@ -1205,7 +1205,22 @@ impl Device {
 
     /// Stroke a polygon's outline, with caps, joins and dashes.
     pub fn stroke_polygon(&mut self, polygon: &Polygon, style: &StrokeStyle, colour: [u8; 4]) {
+        for outline in self.stroke_outline(polygon, style) {
+            self.fill_polygon(&outline, FillRule::NonZero, colour);
+        }
+    }
+
+    /// A stroked polygon's outline, one filled polygon per subpath, in the order they ink.
+    ///
+    /// Split out from [`Self::stroke_polygon`] because a stroke is not always painted in one
+    /// colour — one in a shading pattern gives every pixel its own — and the outline is the
+    /// part both answers must share. The dashes, the caps and the joins are computed here by
+    /// exactly one piece of code, so a patterned stroke cannot come out dashed differently
+    /// from a flat one.
+    #[must_use]
+    pub fn stroke_outline(&self, polygon: &Polygon, style: &StrokeStyle) -> Vec<Polygon> {
         let pairs = dash_pairs(&style.dash);
+        let mut out = Vec::new();
         for subpath in &polygon.subpaths {
             let closed: Vec<(f64, f64)> = if subpath.len() > 2 {
                 let mut c = subpath.clone();
@@ -1233,11 +1248,11 @@ impl Device {
                 let piece = stroke_outline(run, style);
                 outline.subpaths.extend(piece.subpaths);
             });
-            if outline.is_empty() {
-                continue;
+            if !outline.is_empty() {
+                out.push(outline);
             }
-            self.fill_polygon(&outline, FillRule::NonZero, colour);
         }
+        out
     }
 }
 

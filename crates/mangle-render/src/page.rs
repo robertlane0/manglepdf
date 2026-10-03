@@ -547,36 +547,38 @@ fn unconvertible_space(shading: &Object, doc: &Document) -> Option<String> {
 /// over cells in the pattern's own space. That is not implemented, so it is refused **by
 /// name**: one cell of a tiling is a texture that looks plausible and is wrong everywhere.
 fn pattern_fill(
+    paint: Paint,
     name: &str,
     resources: &Resources,
     doc: &Document,
     placement: &Matrix,
 ) -> Result<FillColour, String> {
+    let op = paint.name();
     let source = pattern_source(name, resources, doc)?;
     match source.kind {
         PatternKind::Shading => {}
         PatternKind::Tiling => {
             return Err(format!(
-                "a fill in the PatternType 1 tiling pattern `/{name}` was found and not \
-                 drawn: a tiling pattern as a fill colour is not drawn yet"
+                "a {op} in the PatternType 1 tiling pattern `/{name}` was found and not \
+                 drawn: a tiling pattern as a {op} colour is not drawn yet"
             ));
         }
         PatternKind::Other(kind) => {
             return Err(format!(
-                "a fill in the PatternType {kind} pattern `/{name}` was found and not drawn: \
-                 only PatternType 1 and 2 patterns can be a fill colour"
+                "a {op} in the PatternType {kind} pattern `/{name}` was found and not drawn: \
+                 only PatternType 1 and 2 patterns can be a {op} colour"
             ));
         }
     }
     if let Some(space) = unconvertible_space(&source.shading, doc) {
         return Err(format!(
-            "a fill in the pattern `/{name}` is in the {space} colour space, which this \
+            "a {op} in the pattern `/{name}` is in the {space} colour space, which this \
              cannot convert without a tint transform, so the shape was not drawn"
         ));
     }
     let resolver = |o: &Object| doc.resolve_object(o);
     let shading = Shading::parse(&source.shading, &resolver).ok_or_else(|| {
-        format!("the shading in the fill pattern `/{name}` is of a kind this does not paint yet")
+        format!("the shading in the {op} pattern `/{name}` is of a kind this does not paint yet")
     })?;
     Ok(FillColour::Shading {
         shading,
@@ -584,6 +586,27 @@ fn pattern_fill(
         // that order and the gradient is sampled in its own space throughout.
         to_shading: placement.concat(source.matrix),
     })
+}
+
+/// Which paint operator named a pattern, which is what a refusal has to say.
+///
+/// A note that reads "a fill in the PatternType 1 tiling pattern was not drawn" when the
+/// content stream stroked a line is a note pointing at the wrong operator, and a note is
+/// read by someone looking for the line they asked for. The word costs one enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Paint {
+    Fill,
+    Stroke,
+}
+
+impl Paint {
+    /// The word a note about this operator uses.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Fill => "fill",
+            Self::Stroke => "stroke",
+        }
+    }
 }
 
 /// The name a `Pattern`-coloured mark carries, or the reason it does not.
@@ -993,7 +1016,7 @@ fn draw_mark(
                 // the per-pixel one.
                 if colour.space.name == "Pattern" {
                     match pattern_name(colour)
-                        .and_then(|name| pattern_fill(name, resources, doc, placement))
+                        .and_then(|name| pattern_fill(Paint::Fill, name, resources, doc, placement))
                     {
                         Ok(paint) => {
                             fill::polygon(device, &polygon, rule, &paint, record.fill_alpha);
@@ -1020,27 +1043,45 @@ fn draw_mark(
                 // `to_device`. `record.device_line_width` is the content stream's own
                 // factor; the placement's is applied alongside the geometry.
                 let width = device_line_width(record.device_line_width, placement);
-                match colour.to_rgba(None) {
-                    Some(rgba) => {
-                        let style = line_style_of(record.line_cap, record.line_join);
-                        let style = StrokeStyle {
-                            width,
-                            // The dash lengths are user-space lengths too, and they are
-                            // carried into device space by the same code that carries the
-                            // width and beside the geometry they are drawn along.
-                            dash: device_dash(&record.dash, &record.ctm, placement),
-                            ..style
-                        };
-                        device.stroke_polygon(
-                            &polygon,
-                            &style,
-                            rgba.to_rgba8(record.stroke_alpha),
-                        );
+                let style = line_style_of(record.line_cap, record.line_join);
+                let style = StrokeStyle {
+                    width,
+                    // The dash lengths are user-space lengths too, and they are
+                    // carried into device space by the same code that carries the
+                    // width and beside the geometry they are drawn along.
+                    dash: device_dash(&record.dash, &record.ctm, placement),
+                    ..style
+                };
+                // A stroke's paint is a paint operator's paint, and `SCN` names a pattern
+                // here exactly as `scn` does for the fill above. The shape is the stroke's
+                // own outline either way, so the only question is whether one colour answers
+                // for every pixel of it — and asking a colour converter for a pattern's
+                // colour answers nothing, which is why a page whose ink was all patterned
+                // strokes came out blank.
+                if colour.space.name == "Pattern" {
+                    match pattern_name(colour).and_then(|name| {
+                        pattern_fill(Paint::Stroke, name, resources, doc, placement)
+                    }) {
+                        Ok(paint) => {
+                            fill::stroke(device, &polygon, &style, &paint, record.stroke_alpha);
+                        }
+                        Err(reason) => notes.push(reason),
                     }
-                    None => notes.push(format!(
-                        "a stroke colour in {} could not be converted, so the outline was not drawn",
-                        colour.space.name
-                    )),
+                } else {
+                    match colour.to_rgba(None) {
+                        Some(rgba) => {
+                            device.stroke_polygon(
+                                &polygon,
+                                &style,
+                                rgba.to_rgba8(record.stroke_alpha),
+                            );
+                        }
+                        None => notes.push(format!(
+                            "a stroke colour in {} could not be converted, so the outline was not \
+                             drawn",
+                            colour.space.name
+                        )),
+                    }
                 }
             }
         }
@@ -1086,10 +1127,11 @@ fn draw_mark(
                     let paint = if raster.is_stencil && fill.space.name == "Pattern" {
                         // A pattern colour is a reference to a pattern rather than a colour
                         // value, and the pattern's colour varies with position: the mask is
-                        // painted in whatever the pattern says at each pixel it covers.
-                        match pattern_name(fill)
-                            .and_then(|name| pattern_fill(name, resources, doc, placement))
-                        {
+                        // painted in whatever the pattern says at each pixel it covers. The
+                        // mask is filled rather than stroked, so it names itself as a fill.
+                        match pattern_name(fill).and_then(|name| {
+                            pattern_fill(Paint::Fill, name, resources, doc, placement)
+                        }) {
                             Ok(paint) => Some(paint),
                             Err(reason) => {
                                 notes.push(format!(

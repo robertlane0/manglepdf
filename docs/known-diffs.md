@@ -1186,3 +1186,172 @@ exactly that — 9 / 4 at 72 DPI and 36 / 16 at 288 DPI, as we do.
   `stroke_polygon`.
 - **A non-uniform `cm`** is D11's compromise: the true dash lengths are the ellipse the matrix
   gives a segment, and a scalar takes `sqrt(|det|)` — right between the two axes, wrong on both.
+
+---
+
+## D12 — a stroke painted in a pattern was dropped, so a page whose only ink was patterned strokes rendered blank
+
+**Severity: every page whose only ink is stroked in a `/Pattern` colour space. FIXED.**
+
+`corpus/wild/pdfjs__issue13325_reduced.pdf` came out with **zero ink** while `mutool draw`
+drew a full page of marks. It was worth chasing, and the cause was not one of the four a blank
+page usually turns out to be — it was not a clip, not a placement, not an alpha of zero, and not
+content hiding inside an XObject.
+
+### The evidence
+
+The page's content stream is one form XObject, seven stroked paths, and two white rectangles.
+The seven strokes are the page's entire ink, and they are set up like this:
+
+```
+/CS1 CS /P0 SCN        % /CS1 is [/Pattern], /P0 is a /PatternType 2 shading
+2 w 4 M [11.133 11.133]0 d
+q 1 0 0 1 299.3702 566.1895 cm  0 0 m  -12.097 -5.016 -21.376 -15.455 -24.806 -28.285 c  S  Q
+```
+
+So every one of the seven is stroked with a **pattern**, which is what `SCN` is for: `G`, `RG`,
+`K` and `g`/`rg`/`k` cannot name a pattern resource at all, and `SCN` is the operator that does.
+
+The four candidate causes, each ruled out by what the renderer reported rather than by argument:
+
+| candidate | what the renderer said | verdict |
+|---|---|---|
+| a clip that computes to empty | the clip on all seven strokes is the whole mediabox, `0 0 595.276 841.89` | not it |
+| marks placed off-page | our CTM for the first stroke is `1 0 0 1 299.3702 566.1895`; `mutool trace` gives `1 0 0 -1 299.3702 275.7005`, and `841.89 − 275.7005 = 566.1895` | not it |
+| alpha zero everywhere | `/GS0` is `ca 1 CA 1`, and no note mentions alpha | not it |
+| content in a form XObject | `/Fm0 Do` is object 33, and its whole content stream is `0 TL q Q` — empty | not it |
+
+What the renderer *did* say, seven times, once per stroke:
+
+```
+a stroke colour in Pattern could not be converted, so the outline was not drawn
+```
+
+`Colour::to_rgba` answers `None` for a `Pattern` space **on purpose** — `state.rs` says so
+("a `Pattern` space is not a colour at all … a caller asking here is a caller that could only
+paint one flat colour, so the honest answer is nothing"). The fill arm of `draw_mark` already
+knew that and special-cased `Pattern`, reading the pattern and evaluating its shading per pixel.
+The **stroke** arm did not: it called `to_rgba` unconditionally, got `None`, and dropped the
+mark. On a page whose every mark was a patterned stroke that is a blank page, and the note
+named the cause exactly.
+
+The fourth row above is a **real defect of its own** that this page happened to expose: `Do`
+of a `/Subtype /Form` XObject is not implemented, so `/Fm0 Do` became `Mark::Image` and
+produced `an image claims to be 0 by 0 pixels and was not drawn`. That form draws nothing, so
+it is not this page's blankness, but a `Do` that reads a form as an image is wrong and is
+recorded separately.
+
+### What fixing it meant
+
+`Device::stroke_polygon` builds the stroke's outline — dashes, caps, joins — and fills it with
+one colour. That outline is now `Device::stroke_outline`, returning the outline per subpath, and
+`fill::stroke` fills it through `fill::polygon` with a `FillColour`, which already knows how to
+be a shading. So the outline is computed by **one** piece of code and a patterned stroke cannot
+come out dashed differently from a flat one; `a_pattern_stroke_covers_exactly_where_a_one_colour_stroke_does`
+pins that by comparing a patterned stroke against a one-colour one pixel for pixel.
+
+A refusal now names the operator that asked for the pattern — `a stroke in the PatternType 1
+tiling pattern /P0 was found and not drawn` rather than `a fill in …` — because the two reach
+the same function and the note is read by someone looking for the line they asked for.
+
+### What the oracles draw, measured
+
+Page 1 of `pdfjs__issue13325_reduced.pdf`, `mutool draw -r 150` against `render_page`, 1241×1754:
+
+| | SSIM | RMS | pixels above tolerance | our ink |
+|---|---|---|---|---|
+| before | 0.99644 | 4.85033 | 2 643 | **0** |
+| after | **0.99741** | **3.69345** | **2 466** | **3 439** |
+| `mutool` | — | — | — | 2 743 |
+
+Zero ink became a page that draws, which is the whole of this entry. The metrics moved far less
+than the ink did, and that is worth saying plainly rather than letting the SSIM imply a smaller
+change than it was: **the page is 99.9% white**, so a blank page and a page with all its marks
+score 0.996 between them. Of the 2 466 pixels still above tolerance, most are the marks landing
+in slightly the wrong place or the wrong colour rather than marks that are missing — and that
+residual is not this defect. It is [D13](#d13--a-two-point-dash-run-drawn-in-the-negative-x-direction-becomes-a-bowtie),
+which this page was the first to expose because until now nothing here drew a stroke in a
+pattern at all.
+
+### What is still not right on this page
+
+- **`/Fm0 Do` is read as an image**, not descended into as a form. Harmless here because the
+  form is empty; wrong in general, and it is a page-level feature rather than a paint one.
+- **`/CS0` cannot be converted**, twice: `a fill colour in CS0 could not be converted`. `/CS0` is
+  `[/ICCBased …]`, and the ICC profile is not read. Both fills are white (`1 1 1`), so this costs
+  nothing on this page and is not a fidelity problem here — but it is the same missing feature
+  for any page that fills in an ICC colour, which is most of them.
+
+---
+
+## D13 — a two-point dash run drawn in the negative x direction becomes a bowtie
+
+**Severity: any dash run whose path segment runs in the negative x direction — which is half of
+all horizontal and vertical dashes. Open, found while diagnosing D12, and recorded rather than
+closed.**
+
+`stroke_outline` offsets a polyline on both sides and joins the ends. For a **two-point** path —
+one `m` and one `l` — the two offset points at each end are supposed to pair up into a
+rectangle. They do not always.
+
+### The evidence
+
+A 100×100 page, `2 w [12 12] 0 d`, the line at y = 50. Each row is 100 pixels of one row of the
+render, `0` darkest and `.` paper, at 1 pixel per point:
+
+```
+80 50 m 20 50 l S     ....................034689986430............034689986430...........
+20 50 m 80 50 l S     ....................000000000000............000000000000...........
+```
+
+The same line, the same dashes, drawn in the two directions. One is solid; the other is a
+**bowtie** — dark at the ends and hollow in the middle, every dash, every time. A horizontal
+dash drawn left-to-right is right and the same dash drawn right-to-left is wrong, which is
+enough to say the geometry and not the paint.
+
+It reproduces through `Device::stroke_polygon` with a plain `0 0 0 RG` stroke, so it predates
+D12 and is independent of it. It also reproduces only for the two-point path: the same line
+written as `80 50 m 70 50 l 60 50 l 50 50 l 40 50 l 30 50 l 20 50 l S` — six collinear points,
+so the offset sides have interior vertices to work with — draws every dash solid.
+
+And the outline says why. Asking `stroke_outline` for the two runs' polygons gives:
+
+```
+80 50 m 20 50 l   [(80,49), (20,51), (20,49), (80,51)]     <- a bowtie
+20 50 m 80 50 l   [(20,51), (80,51), (80,49), (20,49)]     <- a rectangle
+```
+
+### The root cause
+
+`offset_sides` asks for the normal of the segment *arriving* at each vertex:
+
+```rust
+let before = normal_at(path, i.wrapping_sub(1), 0);
+```
+
+`normal_at(points, index, after)` already means "the normal of the segment ending at `index`"
+when `after == 0` — it computes `(index - 1, index)` internally. So the call above asks for the
+segment ending at `i - 1`, **one segment too early**, and the correct call is
+`normal_at(path, i, 0)`. `add_joins` makes the same call and is wrong the same way.
+
+Two things follow, and only the first is visible on the two-point case:
+
+- At the **last** vertex of every open path, `before` is `None` (the index is out of range) and
+  `after` is `None` too, so the normal falls back to the fixed `(0, 1)`. That happens to be right
+  for a segment running in the positive x direction and wrong for one running in the negative x
+  direction — which is exactly the l2r/r2l split above.
+- At an **interior** vertex, the bisector is taken between the normals of segments `i - 2` and
+  `i` rather than `i - 1` and `i`, so a genuine corner is mitred against the wrong direction and
+  the outline is wrong on every polyline with three or more points and a turn in it. That one is
+  not visible above only because the fixture's interior points are collinear.
+
+### What fixing it would mean
+
+One argument in one place, and its own measurements. It changes `stroke_outline`, which every
+stroked path on every page goes through, so it moves the corpus a second time and wants its own
+entry and its own run rather than a line inside D12's — the same reasoning
+[D11](#d11--a-strokes-width-is-one-number-where-a-non-uniform-cm-makes-it-an-ellipse) gives for
+why the non-uniform-`cm` compromise is not fixed in passing. It was found while diagnosing D12
+and is recorded here rather than fixed there, because D12 was the defect asked about and a second
+change to the stroke outline in the same commit would have been two defects with one
+measurement between them.

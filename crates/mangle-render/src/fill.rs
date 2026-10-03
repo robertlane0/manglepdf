@@ -9,6 +9,18 @@
 //! rather than approximated by one cell — a page with a visible hole in it is a bug report,
 //! and a page with a wrong texture is a wrong answer.
 //!
+//! # A stroke is a fill too
+//!
+//! `SCN` names a pattern as the *stroke* colour exactly as `scn` names one as the fill
+//! colour, so both paint operators reach this module and neither is a special case of the
+//! other: they differ in how the shape is arrived at, not in what colour it takes. A
+//! stroke's shape is its own outline — the dashes, the caps and the joins — which
+//! [`Device::stroke_outline`] computes and this module then fills.
+//!
+//! That gap was found the way gaps in a renderer usually are: a page whose every mark was a
+//! patterned stroke came out with no ink on it at all, because the stroke asked a colour
+//! converter for one colour and a pattern has none to give.
+//!
 //! ## One evaluator, and why that matters
 //!
 //! The inverse-mapping and the antialiased edge of a shading were written for `sh`, and they
@@ -31,7 +43,7 @@ use mangle_content::{Matrix, Rgba};
 
 use crate::coverage::{FillRule, rasterise};
 use crate::shading::Shading;
-use crate::{Device, Polygon, over};
+use crate::{Device, Polygon, StrokeStyle, over};
 
 /// The colour a fill paints in, which is not always a single colour.
 #[derive(Debug, Clone)]
@@ -266,4 +278,30 @@ pub fn polygon(
         drawn += 1;
     }
     drawn > 0
+}
+
+/// Stroke a polygon in a colour that changes from pixel to pixel.
+///
+/// `SCN` can name a pattern as the *stroke* colour just as `scn` can name one as the fill
+/// colour, so a stroke is as capable of being a gradient as a fill is — and a gradient rule
+/// is how a design tool draws a rule. Nothing about the outline differs: it comes from
+/// [`Device::stroke_outline`], which is the same outline a one-colour stroke is filled from,
+/// dashes and caps and joins included.
+///
+/// Returns whether anything was drawn.
+pub fn stroke(
+    device: &mut Device,
+    shape: &Polygon,
+    style: &StrokeStyle,
+    colour: &FillColour,
+    alpha: f64,
+) -> bool {
+    let outlines = device.stroke_outline(shape, style);
+    let mut drawn = false;
+    for outline in &outlines {
+        // The non-zero rule, because that is the rule a one-colour stroke's outline is
+        // filled under, and a dash's own winding has to come out the same either way.
+        drawn |= polygon(device, outline, FillRule::NonZero, colour, alpha);
+    }
+    drawn
 }

@@ -2735,6 +2735,201 @@ fn a_pattern_fill_in_a_separation_colour_is_reported() {
     );
 }
 
+// ── A pattern as a stroke colour ──────────────────────────────────────────────
+
+/// A stroke's paint is a paint operator's paint, exactly as a fill's is.
+///
+/// `/Pattern CS` and `/P0 SCN` name a pattern resource as the *stroke* colour, and
+/// `SCN`/`SCN*` are the only operators that set one: `G`, `RG`, `K` and `g`/`rg`/`k` cannot
+/// name a pattern at all. So a page that strokes a line in a gradient is ordinary, and it is
+/// how a design tool draws a gradient rule — and a dashed gradient rule is a common way to
+/// draw one.
+///
+/// The bug this is for: a `Pattern` colour has no single colour behind it, so the stroke arm
+/// asked a colour converter for one, was told there was none, and dropped the mark. On a
+/// page whose only ink was such a stroke that is a blank page.
+#[test]
+fn a_pattern_stroke_paints_the_gradient_along_the_line() {
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"/Pattern CS /P0 SCN 8 w 0 50 m 100 50 l S",
+        &[rgb_gradient_pattern()],
+    );
+    let render = render(page, 1.0);
+    assert!(
+        render.notes.is_empty(),
+        "a shading pattern as a stroke colour should draw without complaint: {:?}",
+        render.notes
+    );
+    // The line runs along the gradient's own axis, so every pixel of it takes the colour the
+    // gradient gives at that x — the same closed form the fill test uses.
+    for x in [0usize, 1, 25, 50, 75, 98, 99] {
+        assert_eq!(
+            render.image.get(x, 50).map(|p| [p[0], p[1], p[2]]),
+            Some(gradient_rgb(x, 100.0)),
+            "at x = {x} the parameter is {} so the colour is {:?}",
+            (x as f64 + 0.5) / 100.0,
+            gradient_rgb(x, 100.0)
+        );
+    }
+    // The stroke is 8 points wide, so the paper above and below it is still paper. Without
+    // this the test would also pass for a fill of the whole page, which is the opposite
+    // defect wearing the same fixture.
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.30, [255, 255, 255]),
+        "above a line 8 points wide at the middle of the page is paper"
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.70, 0.95, 0.95, [255, 255, 255]),
+        "and so is below it"
+    );
+}
+
+/// A dashed stroke in a pattern is one drawing, not two: the dashes are where the ink is
+/// and the gaps are paper.
+///
+/// This is the shape the corpus file that first showed this uses — a dashed rule stroked in
+/// a shading pattern — and it is the case where the two halves have to be right together.
+/// The outline is walked for dashes before it is filled, so getting the gradient right and
+/// the dashes wrong (or the reverse) is possible; a solid line would not tell them apart.
+#[test]
+fn a_dashed_pattern_stroke_dashes_and_gradients_together() {
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"/Pattern CS /P0 SCN 4 w [8 8] 0 d 0 50 m 100 50 l S",
+        &[rgb_gradient_pattern()],
+    );
+    let render = render(page, 1.0);
+    assert!(
+        render.notes.is_empty(),
+        "a dashed shading pattern as a stroke colour should draw without complaint: {:?}",
+        render.notes
+    );
+    // The dash array starts at the line's beginning, so the run from 0 to 8 is ink, the run
+    // from 8 to 16 is paper, and the run from 16 to 24 is ink again. A pixel's centre decides
+    // it, so `x = 7` is the last inked column of the first dash and `x = 8` is already in the
+    // gap.
+    for (x, inked) in [
+        (0usize, true),
+        (3, true),
+        (7, true),
+        (8, false),
+        (12, false),
+        (16, true),
+        (20, true),
+        (24, false),
+    ] {
+        let pixel = render.image.get(x, 50).unwrap_or([255, 255, 255, 255]);
+        let black = pixel[0] < 128 || pixel[1] < 128 || pixel[2] < 128;
+        assert_eq!(
+            black,
+            inked,
+            "x = {x} is {} in an 8-on 8-off dash pattern (pixel {pixel:?})",
+            if inked { "ink" } else { "gap" }
+        );
+    }
+    // An inked pixel takes the gradient's colour at its own x, which is the point of painting
+    // per pixel rather than flattening the pattern to one colour.
+    assert_eq!(
+        render.image.get(20, 50).map(|p| [p[0], p[1], p[2]]),
+        Some(gradient_rgb(20, 100.0)),
+        "the second dash carries the gradient's colour where it lands"
+    );
+}
+
+/// A `/PatternType 2` pattern whose gradient is black at both ends, so every pixel it paints
+/// is black.
+///
+/// This is the control for the coverage comparison below. A gradient stroke cannot be
+/// compared against a one-colour stroke pixel for pixel, because the two put down different
+/// *colours* and a pixel's value then says as much about the gradient as about the shape. A
+/// pattern that paints one colour everywhere is the same paint either side of the two code
+/// paths, so any difference in the result is a difference in the shape.
+fn flat_black_pattern() -> &'static [u8] {
+    b"<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 /ColorSpace /DeviceRGB \
+      /Coords [0 0 100 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] \
+      /C1 [0 0 0] /N 1 >> /Extend [true true] >> /Matrix [1 0 0 1 0 0] >>"
+}
+
+/// The paint must not change the shape.
+///
+/// A patterned stroke and a one-colour stroke go down different code paths — one through
+/// `fill::stroke`, one through `Device::stroke_polygon` — and the only thing keeping them the
+/// same shape is that both fill the outline `Device::stroke_outline` builds. If a dash, a cap
+/// or a join were computed twice, once per path, the two could drift apart and nothing else
+/// would say so.
+///
+/// The pattern is the flat black one, so the comparison is exact rather than approximate: a
+/// difference in a single byte is a difference in coverage and not in colour.
+#[test]
+fn a_pattern_stroke_covers_exactly_where_a_one_colour_stroke_does() {
+    // Dashes and two subpaths, so the outline has something to be wrong about.
+    let geometry = "4 w [8 8] 0 d 0 50 m 100 50 l 20 80 m 80 20 l S";
+    let flat = render(
+        pattern_page(
+            "/Pattern << /P0 5 0 R >>",
+            format!("0 0 0 RG {geometry}").as_bytes(),
+            &[flat_black_pattern()],
+        ),
+        1.0,
+    );
+    let patterned = render(
+        pattern_page(
+            "/Pattern << /P0 5 0 R >>",
+            format!("/Pattern CS /P0 SCN {geometry}").as_bytes(),
+            &[flat_black_pattern()],
+        ),
+        1.0,
+    );
+    assert!(
+        flat.notes.is_empty() && patterned.notes.is_empty(),
+        "{:?} {:?}",
+        flat.notes,
+        patterned.notes
+    );
+    let ink = flat
+        .image
+        .pixels
+        .chunks_exact(4)
+        .filter(|p| *p != [255, 255, 255, 255])
+        .count();
+    assert!(
+        ink > 100,
+        "the fixture must put down real ink, or it proves nothing: {ink}"
+    );
+    assert_eq!(
+        flat.image.pixels, patterned.image.pixels,
+        "the two strokes put ink on exactly the same pixels, at exactly the same values"
+    );
+}
+
+/// A tiling pattern as a stroke colour is the same unimplemented feature it is as a fill, and
+/// the note must say so by name rather than blaming the colour.
+#[test]
+fn a_tiling_pattern_stroke_is_reported_by_name() {
+    let tiling = b"<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
+                  /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >> \
+                  stream\n1 0 0 rg 0 0 20 20 re f\nendstream";
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"/Pattern CS /P0 SCN 4 w 0 50 m 100 50 l S",
+        &[tiling.as_slice()],
+    );
+    let render = render(page, 1.0);
+    assert!(
+        render
+            .notes
+            .iter()
+            .any(|n| n.contains("PatternType 1") && n.contains("not drawn")),
+        "the note names the kind of pattern it did not draw: {:?}",
+        render.notes
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
+        "and nothing is drawn in its place"
+    );
+}
+
 // ── Text, from a real font program ───────────────────────────────────────────
 
 /// TrueType fonts to embed, in the order they are tried.
