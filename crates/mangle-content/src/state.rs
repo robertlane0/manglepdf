@@ -287,9 +287,15 @@ impl Colour {
             // A tint or a device-N colour has one component per colorant, and neither can
             // be converted without the colorant list and the alternate space. The
             // fallback is what a reader is expected to draw instead.
-            "Separation" | "DeviceN" | "Pattern" => {
-                ink.and_then(|i| i.to_rgba(None)).or(Some(Rgba::BLACK))
-            }
+            "Separation" | "DeviceN" => ink.and_then(|i| i.to_rgba(None)).or(Some(Rgba::BLACK)),
+            // A `Pattern` space is not a colour at all: its operand named a pattern resource,
+            // and the pattern decides what is painted — a shading varies with position across
+            // the shape, a tiling repeats a cell. There is no single colour to hand back, and
+            // a caller asking here is a caller that could only paint one flat colour, so the
+            // honest answer is nothing and the mark is reported. Where a pattern *can* be
+            // painted — a fill, or the colour of an image mask — it is read as a pattern and
+            // evaluated per pixel, and does not come through here at all.
+            "Pattern" => None,
             // Lab: CIE lightness with chromaticity, which the specification defines
             // relative to a white point this does not know. Returning nothing is honest.
             _ => None,

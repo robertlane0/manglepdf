@@ -16,7 +16,7 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 |---|---|---|
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
-| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw; patterns and `Symbol`/`ZapfDingbats` still draw nothing |
+| **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw, a shading pattern used as a fill colour draws per pixel, and tiling patterns and `Symbol`/`ZapfDingbats` still draw nothing |
 | **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint, and TrueType, composite, CFF and Type 1 outlines all draw. Twelve of the standard fourteen draw from bundled metric-compatible faces when a document names one without embedding it. Type 3, mesh shadings, tiling patterns and transparency do not |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
@@ -209,6 +209,31 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
   A page names a *pattern* and the pattern names a shading, so both shapes are accepted,
   and the pattern's own `/Matrix` composes inside the mark's transformation rather than
   replacing it. Types 1, 4, 5, 6 and 7 are reported as notes rather than painted wrongly.
+
+  **A pattern colour is not one colour.** A `/Pattern` colour space means the operands named
+  a pattern resource rather than a colour value, so there is nothing for a colour-space
+  converter to convert: a `/PatternType 2` pattern's colour changes with position across the
+  shape being filled and has to be evaluated per pixel where the fill lands. It is evaluated
+  by the *same* evaluator `sh` uses — one inverse mapping, one antialiased edge, one set of
+  rules — because two evaluators that agree today drift apart tomorrow, and the symptom is a
+  gradient that looks right in a `sh` and wrong in a fill. A test asserts that the two produce
+  identical pixels, which is the property that says they are one evaluator. The pattern's
+  `/Matrix` maps into the page's *default* user space and not through the mark's own
+  transformation: a `cm` that moves the shape leaves the pattern where it was, which is the
+  specification's rule, `mutool` agrees with, and the one a test pins by watching a mask
+  placed under a scaling `cm` come out with the gradient the page asked for.
+
+  This draws an image mask painted in a pattern colour, which is what
+  `pdfjs__issue13372.pdf` is: a portrait whose every pixel is a gradient rather than a
+  sample. A `/PatternType 1` tiling pattern is **reported by name** rather than approximated
+  with a single cell, and a shading whose colour space is `/Separation`, `/DeviceN` or
+  `/Indexed` is reported rather than read as the grey its one-component function looks like.
+  A pattern used as a *stroking* colour, or as the colour of text, is reported and not
+  painted: this is a fill feature, and `Colour::to_rgba` now says a `Pattern` space is not a
+  colour at all rather than handing a caller black, which is what a stroke in one used to get
+  silently. A bare `/Separation` **tint** (`0.5 scn` in a separation space rather than a
+  pattern name) is a different question and still takes its pre-existing fallback — the
+  alternate colour, or black.
 - **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`.
   This is how "what does ManglePDF think of this file?" is asked without a window.
 - **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one
@@ -220,7 +245,7 @@ the shape of a fixture decides how much of a renderer's arithmetic it actually e
 
 ## Tests
 
-722 passing, 1 ignored, none failing, no warnings. The ignored one is the Tier-B wild
+788 passing, 1 ignored, none failing, no warnings. The ignored one is the Tier-B wild
 corpus — a two-hour job, run deliberately with
 `cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture`; the two cheap
 tests in the same file check the harness itself and run by default. Ten kinds matter:
@@ -252,7 +277,13 @@ tests in the same file check the harness itself and run by default. Ten kinds ma
   scale-independent fractions, and so is an axial shading reached through a pattern — for
   that one the expectation is the gradient's own closed form evaluated at each pixel's
   centre rather than a snapshot, so the assertion states what the gradient should be rather
-  than what this renderer last produced.
+  than what this renderer last produced. A *pattern as a fill colour* is checked the same
+  way, at both ends of the fill and at points between, and its most important test is not a
+  colour at all: the same gradient filled as a shape and painted by `sh` through a clip must
+  produce **identical pixels**, because that equality is what says the two are one evaluator
+  rather than two that happen to agree. An image mask in a pattern colour draws; a tiling
+  pattern is reported by name; a shading in a `/Separation` colour space is reported rather
+  than read as the grey its one-component function looks like.
   Two of those fixtures are about the clip: a diagonal-clip page scores **0.99639** against
   `mutool`, and so does a page whose clip outlives the mark that set it, which is the case a
   per-mark reset got wrong. Both are deliberately asymmetric — nothing is mirrored in either
@@ -483,7 +514,10 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
 6. **Tiling patterns and mesh shadings draw nothing.** A shading names one of types 1, 4, 5,
    6 or 7, or a pattern needs a tiling loop, and each is reported as a note against the mark
    rather than skipped silently, so a page that used one is visibly incomplete instead of
-   quietly wrong.
+   quietly wrong. A *shading* pattern as a fill colour does draw, per pixel; the tiling loop
+   is what is missing, and a note about a fill in a tiling says which pattern type it did not
+   draw, because one cell of a tiling is a texture that looks plausible and is wrong
+   everywhere. The type-2 function's own rule is a separate matter and is recorded as D10.
 7. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the marks the content layer produces.
 8. **An object that came out of an object stream cannot keep its original bytes**,
@@ -734,7 +768,8 @@ the fourth was fixed:
    compared a *normalised* sample against one half, so a CCITT mask's every sample read as
    ≤ 1/255 and nothing distinguished a bit that paints from one that does not. A stencil's
    sample is a bit however wide a byte the codec wrote it into, so it is now tested on the
-   stored bit. A pattern colour is reported rather than guessed at.
+   stored bit. A pattern colour is *evaluated* rather than guessed at: a shading pattern is now
+  painted per pixel, which is the third thing this row once refused and now draws.
 
 4. **The CCITT decoder dropped a line's final run.** `Line::samples` fills up to each change
    point and stops, but a change point says where a run *ends*, so everything after the last

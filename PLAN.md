@@ -278,8 +278,15 @@ renderer that never has to ask the machine for a font.
    closed, plausible, wrong glyph rather than an error. Encodings are done on top of all of
     that: a code now becomes a glyph *name* through the standard tables and `/Differences`
     before it becomes a glyph number, at 0.98780 SSIM against `mutool` (see "Encodings").
-2. **Patterns**: the tiling loop and the colour-space converter, for the painting and
-   shading pattern types.
+2. **Patterns**: the tiling loop. A *shading* pattern as a fill colour is done and evaluated
+   per pixel where the fill lands, sharing `sh`'s evaluator; a `/PatternType 1` tiling
+   pattern needs a loop over cells in the pattern's own space — `/Matrix`, `/BBox`, `/XStep`,
+   `/YStep` and paint type — and is reported by name rather than approximated with one cell.
+   Two defects that were found while building the fill, and are recorded but not fixed, are
+   [D9](docs/known-diffs.md) (a filled path is transformed by the content stream's `cm`
+   twice) and [D10](docs/known-diffs.md) (the type-2 function adds `C1` where the
+   specification adds `C1 − C0`). D9 is the more urgent of the two: it moves every filled
+   shape on every page that uses a `cm`.
 3. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
    not going to be built.
 4. **Fill the Inspector's right-hand region** from the object model, which is the window work
@@ -383,7 +390,11 @@ raster of four colours.
 **An `/ImageMask` painted nothing.** `Do` names no colour, so the graphics state's fill
 colour has to travel with the mark, and the painter had been given black unconditionally —
 which is right only where the page was black. The mark now carries the colour it was drawn
-with; a pattern colour is reported rather than guessed at.
+with. A pattern colour was reported here first, and is now *evaluated* instead: a `/PatternType 2`
+pattern as a mask's colour changes with position across the mask, so it is sampled per pixel
+through the same evaluator `sh` uses, which is what draws `pdfjs__issue13372.pdf` — a
+portrait whose every pixel is a gradient rather than a sample — at 0.83738 against `mutool`
+where it was 0.74347 with no ink at all.
 
 **The CCITT decoder dropped a line's last run.** `Line::samples` fills up to each change
 point and stops, and a change point says where a run *ends*, so everything after the last

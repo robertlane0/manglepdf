@@ -1727,8 +1727,8 @@ fn image_page() -> Vec<u8> {
 /// paints the whole of a mask paints the right half too, and one that paints the wrong
 /// bits paints nothing at all. Either shows up in the regions below.
 ///
-/// `pattern` makes the fill a pattern rather than a colour, which is the case that must be
-/// reported rather than guessed at.
+/// `pattern` makes the fill a pattern rather than a colour, which is a different kind of
+/// paint altogether: the mask then takes whatever colour the pattern says at each pixel.
 fn mask_page(colour: &str, pattern: bool) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
     let mut at = [0usize; 7];
@@ -1766,9 +1766,9 @@ fn mask_page(colour: &str, pattern: bool) -> Vec<u8> {
     image.extend_from_slice(&samples);
     image.extend_from_slice(b"\nendstream\nendobj\n");
     out.extend_from_slice(&image);
-    // A shading pattern, which the page only names when it is the fill colour in force. It
-    // is never painted — the point is that a mask painted in one is reported instead — but a
-    // file that names one names a real one.
+    // A shading pattern, which the page only names when it is the fill colour in force. Its
+    // own matrix stretches the unit-square axis across the whole page, so the gradient runs
+    // from the left edge to the right one.
     at[6] = out.len();
     out.extend_from_slice(
         b"6 0 obj\n<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 \
@@ -1827,22 +1827,35 @@ fn an_image_mask_takes_the_fill_colour_the_graphics_state_set() {
     }
 }
 
-/// A pattern colour is a pattern, not a colour. Drawing the mask in anything else puts a
-/// flat block where the page asked for a shading, so the answer is to say so.
+/// A pattern colour is not one colour, so a mask painted in one is painted in whatever the
+/// pattern says at each pixel — which is the point of a pattern, and the reason painting
+/// the mask in a single flat ink is not a small loss but a different picture.
 #[test]
-fn an_image_mask_in_a_pattern_colour_is_reported_rather_than_drawn() {
+fn an_image_mask_painted_in_a_pattern_colour_is_painted_in_that_pattern() {
     let render = render(mask_page("", true), 1.0);
     assert!(
-        render
-            .notes
-            .iter()
-            .any(|n| n.contains("pattern colour") && n.contains("not drawn")),
-        "the pattern colour is reported: {:?}",
+        render.notes.is_empty(),
+        "a mask in a shading pattern should draw without complaint: {:?}",
         render.notes
     );
+    // The mask's zero bits are the left half of every row, and the pattern is a black to
+    // white gradient across the page's own width, so the parameter at device x is
+    // `(x + ½) / 100` and the grey is that fraction of white. Stating the closed form keeps
+    // the check about the gradient rather than about one resolution of it.
+    let level = |x: usize| -> u8 { ((x as f64 + 0.5) / 100.0 * 255.0).round() as u8 };
+    for x in [8usize, 25, 45] {
+        assert_eq!(
+            render.image.get(x, 30).map(|p| p[0]),
+            Some(level(x)),
+            "at x = {x} the gradient's parameter is {} and that is the grey",
+            (x as f64 + 0.5) / 100.0
+        );
+    }
+    // The mask's one bits are still paper: a pattern says what colour to paint in, not
+    // which of the mask's bits to paint.
     assert!(
-        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
-        "and no block of any colour is drawn in its place"
+        region_is_fraction(&render.image, 0.55, 0.05, 0.95, 0.95, [255, 255, 255]),
+        "the one bits are paper however the fill colour was set"
     );
 }
 
@@ -2409,6 +2422,316 @@ fn a_shading_is_painted_through_its_pattern() {
     assert!(
         region_is_fraction(&render.image, 0.25, 0.55, 0.75, 0.95, [255, 255, 255]),
         "below the rectangle is untouched paper"
+    );
+}
+
+// ── A pattern as a fill colour ───────────────────────────────────────────────
+
+/// A file with one page, built from its resource dictionary, its content stream and the
+/// objects the content names.
+///
+/// The content stream is object 4 and the objects run from 5 in the order they are given,
+/// so a test refers to them by position. Writing the object numbers out by hand in every
+/// test is how a page and the resources it names drift apart without anyone noticing.
+fn pattern_page(resources: &str, content: &[u8], objects: &[&[u8]]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at: Vec<usize> = Vec::new();
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at.push(out.len());
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at.push(out.len());
+    out.extend_from_slice(
+        format!(
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] \
+             /Resources << {resources} >> >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    at.push(out.len());
+    out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+    at.push(out.len());
+    let mut body = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    body.extend_from_slice(content);
+    body.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&body);
+    for object in objects {
+        at.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", at.len()).as_bytes());
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let size = at.len() + 1;
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 1\n0000000000 65535 f \n1 {}\n", at.len()).as_bytes());
+    for offset in &at {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// A `/PatternType 2` pattern: an axial black-to-magenta gradient running left to right
+/// across the page's own default space, which is what an identity `/Matrix` means.
+///
+/// `C0` is all zeros, so the type-2 function's own rule (`C0 + x^N·(C1 − C0)`) and the
+/// simpler `C0 + x^N·C1` this codebase currently evaluates agree at every `t`. This test is
+/// about the *fill*, and a fixture whose expected colour depended on which of the two
+/// readings of a function is in force would be about two things at once — see the note on
+/// the type-2 function in `docs/known-diffs.md`.
+///
+/// `/Extend` is on at both ends so the gradient reaches the whole of whatever it is asked to
+/// paint, and the pattern says nothing the closed form below cannot also state.
+fn rgb_gradient_pattern() -> &'static [u8] {
+    b"<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 /ColorSpace /DeviceRGB \
+      /Coords [0 0 100 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] \
+      /C1 [1 0 1] /N 1 >> /Extend [true true] >> /Matrix [1 0 0 1 0 0] >>"
+}
+
+/// The colour the gradient above puts at a device column, from the closed form.
+///
+/// Black at the left edge, magenta at the right, and linear in between because `N` is 1 and
+/// `C0` is black. Stated rather than sampled, so the test says what a gradient should be at
+/// every resolution and not what one render of it happened to produce.
+fn gradient_rgb(x: usize, width: f64) -> [u8; 3] {
+    let t = (x as f64 + 0.5) / width;
+    let v = (t * 255.0).round() as u8;
+    [v, 0, v]
+}
+
+/// A pattern colour is not one colour. Filling a shape with one has to give each pixel its
+/// own colour from the gradient, which is what this checks at both ends of the fill and at
+/// points in between.
+#[test]
+fn a_pattern_fill_paints_the_gradient_across_the_shape() {
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"/Pattern cs /P0 scn 0 0 100 100 re f",
+        &[rgb_gradient_pattern()],
+    );
+    let render = render(page, 1.0);
+    assert!(
+        render.notes.is_empty(),
+        "a shading pattern as a fill colour should draw without complaint: {:?}",
+        render.notes
+    );
+    for x in [0usize, 1, 25, 50, 75, 98, 99] {
+        let want = gradient_rgb(x, 100.0);
+        assert_eq!(
+            render.image.get(x, 50).map(|p| [p[0], p[1], p[2]]),
+            Some(want),
+            "at x = {x} the parameter is {} so the colour is {want:?}",
+            (x as f64 + 0.5) / 100.0
+        );
+    }
+    // The gradient runs along the page, so a row above or below carries the same colours:
+    // one number decides a pixel's colour, not a position in a scanline.
+    for y in [5usize, 50, 94] {
+        assert_eq!(
+            render.image.get(30, y).map(|p| [p[0], p[1], p[2]]),
+            Some(gradient_rgb(30, 100.0)),
+            "the colour at (30, {y}) follows the gradient's own axis"
+        );
+    }
+}
+
+/// A pattern colour and a `sh` through the same pattern must reach the same pixels.
+///
+/// The two are the same mathematics reached two ways — one evaluating the gradient across
+/// the shape being filled, the other across the clip — and this is the property that says
+/// so. Two evaluators that agree today can disagree tomorrow, and only equality of the
+/// pixels they produce catches that.
+///
+/// The geometry is on whole pixels on purpose: the fill antialiases its own edge against
+/// the paper while `sh` writes its edge straight into the buffer, so a fractional boundary
+/// would report a difference in compositing that has nothing to do with the gradient. Every
+/// pixel inside the rectangle is fully covered in both, and outside it both leave the paper.
+#[test]
+fn a_pattern_fill_and_a_shading_through_the_same_pattern_are_the_same_pixels() {
+    let fill = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"/Pattern cs /P0 scn 0 50 100 50 re f",
+        &[rgb_gradient_pattern()],
+    );
+    let shading = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"0 50 100 50 re W n /P0 sh",
+        &[rgb_gradient_pattern()],
+    );
+    let one = render(fill, 1.0);
+    let other = render(shading, 1.0);
+    assert!(
+        one.notes.is_empty() && other.notes.is_empty(),
+        "neither page has anything to report: {:?} / {:?}",
+        one.notes,
+        other.notes
+    );
+    assert_eq!(
+        (one.image.width, one.image.height),
+        (other.image.width, other.image.height),
+        "the two pages are the same size"
+    );
+    let mut differing = Vec::new();
+    for y in 0..one.image.height {
+        for x in 0..one.image.width {
+            if one.image.get(x, y) != other.image.get(x, y) {
+                differing.push((x, y, one.image.get(x, y), other.image.get(x, y)));
+            }
+        }
+    }
+    assert!(
+        differing.is_empty(),
+        "the fill and the shading are one evaluator, not two: the first difference is {:?}",
+        differing.first()
+    );
+}
+
+/// A pattern fill paints the current clip and nothing outside it, exactly as any other fill
+/// does. The clip here is a half-page rectangle and the shape is the whole page, so a fill
+/// that ignored the clip would put the gradient where the page drew nothing.
+#[test]
+fn a_pattern_fill_respects_the_clip() {
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"0 50 100 50 re W n /Pattern cs /P0 scn 0 0 100 100 re f",
+        &[rgb_gradient_pattern()],
+    );
+    let render = render(page, 1.0);
+    assert!(
+        render.notes.is_empty(),
+        "the fill should draw without complaint: {:?}",
+        render.notes
+    );
+    // The clip is `0 50 100 50`, the page's upper half, and a canvas counts down where a page
+    // counts up, so it is the top half of the image. The shape covers the whole page, so
+    // anything in the bottom half is the clip doing its job.
+    assert_eq!(
+        render.image.get(30, 80).map(|p| [p[0], p[1], p[2]]),
+        Some([255, 255, 255]),
+        "below the clip the paper is intact"
+    );
+    for x in [0usize, 50, 99] {
+        assert_eq!(
+            render.image.get(x, 20).map(|p| [p[0], p[1], p[2]]),
+            Some(gradient_rgb(x, 100.0)),
+            "inside the clip the gradient is painted at x = {x}"
+        );
+    }
+}
+
+/// A pattern is in the page's own space, not in the space a transformation builds.
+///
+/// The rule is stated here because the other answer looks right and is not. The mask this
+/// uses is placed by a `cm` that scales it up to the whole page, and the pattern says
+/// nothing about that `cm`: its own matrix is the identity and its shading runs across the
+/// page's 100 points. Read through the mask's placement — which is what the mark's own
+/// transformation would do — the gradient would be spread over 10,000 points and the whole
+/// mask would come out the colour at one end of it. In the page's space, which is what the
+/// specification says, the mask covers exactly the gradient's own extent.
+#[test]
+fn a_pattern_is_in_the_pages_space_and_not_the_transforms() {
+    // The pattern's own matrix is the identity and its shading runs across the page's own
+    // 100 points, which is how a page that wants a gradient over a whole page says so. The
+    // mask is a separate object placed by a `cm` that has nothing to do with it.
+    let pattern = b"<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 \
+                   /ColorSpace /DeviceGray /Coords [0 0 100 0] /Function << /FunctionType 2 \
+                   /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> /Extend [true true] >> \
+                   /Matrix [1 0 0 1 0 0] >>";
+    // Eight by eight one-bit stencil: each byte is one row and its first four bits are zero,
+    // which is the half of every row that paints.
+    let mask = b"<< /Type /XObject /Subtype /Image /ImageMask true /Width 8 /Height 8 \
+                 /BitsPerComponent 1 /Length 8 >>\nstream\n\
+                 \x0f\x0f\x0f\x0f\x0f\x0f\x0f\x0f\nendstream";
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >> /XObject << /Im0 6 0 R >>",
+        b"q /Pattern cs /P0 scn 100 0 0 100 0 0 cm /Im0 Do Q",
+        &[pattern.as_slice(), mask.as_slice()],
+    );
+    let render = render(page, 1.0);
+    assert!(
+        render.notes.is_empty(),
+        "the mask should draw without complaint: {:?}",
+        render.notes
+    );
+    // The gradient's parameter at a device column is that column's own fraction of the page.
+    // Read through the mask's `cm` of 100 it would be a hundredth of that, so every column
+    // would be the gradient's first colour and the portrait would be a flat block.
+    let level = |x: usize| -> u8 { ((x as f64 + 0.5) / 100.0 * 255.0).round() as u8 };
+    for x in [8usize, 20, 35, 45] {
+        assert_eq!(
+            render.image.get(x, 30).map(|p| p[0]),
+            Some(level(x)),
+            "at page x = {x} the gradient's parameter is {} and that is the grey",
+            (x as f64 + 0.5) / 100.0
+        );
+    }
+    // And the mask still says which of its bits paint.
+    assert_eq!(
+        render.image.get(80, 30).map(|p| p[0]),
+        Some(255),
+        "the mask's one bits are paper, and that is not the pattern's doing"
+    );
+}
+
+/// A tiling pattern is a content stream repeated across the fill, which needs a loop over
+/// cells and the pattern's own space in each of them. That is not implemented, so the page
+/// has to say which kind of pattern it found and left alone — a name is the difference
+/// between a missing feature and a missing picture.
+#[test]
+fn a_tiling_pattern_fill_is_reported_by_name() {
+    // A tiling pattern stream that paints one red square per cell. A renderer that ran it
+    // would show red squares; a renderer that refuses must show nothing at all.
+    let tiling = b"<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
+                  /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >> \
+                  stream\n1 0 0 rg 0 0 20 20 re f\nendstream";
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"/Pattern cs /P0 scn 0 0 100 100 re f",
+        &[tiling.as_slice()],
+    );
+    let render = render(page, 1.0);
+    assert!(
+        render
+            .notes
+            .iter()
+            .any(|n| n.contains("PatternType 1") && n.contains("not drawn")),
+        "the note names the kind of pattern it did not draw: {:?}",
+        render.notes
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
+        "and nothing is drawn in its place, rather than one cell of it repeated wrongly"
+    );
+}
+
+/// A shading whose colour space is a separation is one component wide, which is exactly what
+/// a grey function also produces. Reading it as grey would paint a spot colour as a picture
+/// of it, so the page is told the space instead.
+#[test]
+fn a_pattern_fill_in_a_separation_colour_is_reported() {
+    let separation = b"<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 \
+                      /ColorSpace [/Separation /PANTONE 123 /TintTransform << \
+                      /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>] \
+                      /Coords [0 0 100 0] /Function << /FunctionType 2 /Domain [0 1] \
+                      /C0 [0] /C1 [1] /N 1 >> >> /Matrix [1 0 0 1 0 0] >>";
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"/Pattern cs /P0 scn 0 0 100 100 re f",
+        &[separation.as_slice()],
+    );
+    let render = render(page, 1.0);
+    assert!(
+        render
+            .notes
+            .iter()
+            .any(|n| n.contains("Separation") && n.contains("not drawn")),
+        "the note names the colour space it cannot convert: {:?}",
+        render.notes
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
+        "and the shape is not filled with a guess at what the tint looks like"
     );
 }
 

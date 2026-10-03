@@ -595,17 +595,27 @@ placement. Three more of the same shape are unit tests in `image.rs` itself, ove
 raster whose four samples are four colours, so the placement is pinned at the pixel rather than
 only through a page.
 
-**Also unresolved, and a separate defect: `pdfjs__issue13372.pdf` page 1 draws nothing at
-all.** It is not this one, and the fix above did not move it: the page is still **0.74347**,
-because it draws zero ink pixels and drew zero before. Object 18 is a 646 by 761 CCITT G.4
+**Also unresolved, and a separate defect: `pdfjs__issue13372.pdf` page 1 drew nothing at
+all.** It is not this one, and the fix above did not move it: the page was **0.74347**,
+because it drew zero ink pixels and drew zero before. Object 18 is a 646 by 761 CCITT G.4
 `/ImageMask`, and the content stream draws it in a *pattern* colour — `/R9` is a `PatternType 2`
-axial shading over `/DeviceRGB`. `page.rs` declines to draw an image mask whose fill colour
-space is `Pattern` and records `an image mask painted in a pattern colour was found and not
+axial shading over `/DeviceRGB`. `page.rs` declined to draw an image mask whose fill colour
+space was `Pattern` and recorded `an image mask painted in a pattern colour was found and not
 drawn`. The placement rectangle is right (device rows 329..1530 against the oracle's ink at
-329..1529), so nothing is misplaced; there is simply nothing drawn. The cause is that pattern
-colours are not implemented as fills. It is not caused by, and does not cause, the placement
-defect above — and when pattern colours are implemented, this page will be subject to it, because
-its rectangle starts at row 329 rather than at 0.
+329..1529), so nothing was misplaced; there was simply nothing drawn. The cause was that
+pattern colours were not implemented as fills.
+
+**Now drawn, at 0.83738.** A `/PatternType 2` pattern used as a fill colour — including the
+colour of an image mask — evaluates the shading per pixel where the fill lands, and this
+page's gradient is in the right place at the right strength: our ink over the mask's rectangle
+is 1.96% and the oracle's is 11.87%, both measured the same way at 150 DPI. The difference
+between those two numbers is not a missing region — it is that the oracle's colour is
+**dithered**, so half its pixels are saturated ink and half are paper, where ours is a smooth
+average of the same two. What is still missing from this page is the type-2 function's own
+rule, which puts it at **0.92924** when that one line is corrected — see
+[D10](#d10--the-type-2-function-adds-c1-where-the-specification-adds-c1-c0). It is not
+caused by, and does not cause, the placement defect above — and it remains subject to it,
+because its rectangle starts at row 329 rather than at 0.
 
 ---
 
@@ -797,3 +807,100 @@ against pages with ink. It is a real measurement of the defect it describes, and
 it describes is overwhelmingly not the one named at the top of it. Nothing in the SSIM
 figures in this file should be read as a fidelity claim until D7 is fixed, because a corpus
 that cannot draw a single glyph cannot say anything about fidelity.
+---
+
+## D9 — a filled path is transformed by the content stream's `cm` twice
+
+**Severity: critical, and it is not confined to one operator. Found while implementing
+pattern fills; deliberately not fixed in that change, because it changes every page.**
+
+`GraphicsState::device_path` applies the current transformation to each point of a path
+before the mark is built, so a `Mark::Path`'s segments are already in the space that mark's
+own CTM produces. `page.rs` then does this:
+
+```rust
+let to_device = placement.matrix.concat(record.ctm);   // render_page
+let polygon = transform_path(segments, to_device);      // draw_mark, Mark::Path
+```
+
+so the CTM is applied to the shape **twice**, and a fill under `q 50 0 0 50 10 10 cm` lands at
+2500 units across instead of 50 — off the page, and drawn nowhere. The evidence is a page of
+its own, and `mutool` disagrees with us on every pixel of it:
+
+```
+q 50 0 0 50 10 10 cm 1 0 0 rg 0 0 1 1 re f Q      # a red square on the lower right
+ours:   no ink at all
+mutool: a 50 by 50 red square at page (10, 10) to (60, 60)
+```
+
+The fix is one line — pass `placement` rather than `to_device` to `transform_path` in the
+`Mark::Path` arm, since the placement is the only part of the composite the segments have not
+seen. Measured on the first page of eight corpus files at 150 DPI against `mutool`, with
+that one line changed and nothing else:
+
+| file | before | after | our ink → oracle ink |
+|---|---|---|---|
+| `pdfjs__bug1795263.pdf` | 0.96332 | **0.98826** | 0.2% → 3.9% (oracle 4.0%) |
+| `pdfjs__issue20324.pdf` | 0.97993 | **0.99366** | 0.2% → 0.5% (oracle 0.7%) |
+| `pdfjs__ArabicCIDTrueType.pdf` | 0.96460 | 0.96460 | 0.0% (oracle 1.6%) |
+| `pdfbox__PDFA3A.pdf` | 0.99923 | 0.99923 | 0.1% |
+
+**It is not left in place out of indifference.** It is left because it is a different change:
+it moves every filled shape on every page that uses `cm`, which is most of them, and the
+number that says whether that is an improvement is a two-hour run over the whole corpus
+rather than eight files. It also interacts with strokes — the same polygon feeds
+`stroke_polygon`, whose width is already scaled once by `record.device_line_width` — so a
+correct fix wants its own test, its own measurement and its own entry here.
+
+The clip is *not* affected, which is how it survived this long:
+`a_clip_under_a_scaled_ctm_is_not_transformed_twice` passes because a clip is installed from
+`placement` alone. That test would still pass with the fix, because its fill (`0 0 50 50 re`
+under a doubled CTM) is exactly its clip.
+
+---
+
+## D10 — the type-2 function adds `C1` where the specification adds `C1 − C0`
+
+**Severity: every gradient whose function has a non-zero `C0`. Found while measuring
+`pdfjs__issue13372.pdf`; deliberately not fixed in that change, because the test that pins the
+wrong rule is named after it.**
+
+ISO 32000-1 Table 42 defines a type 2 (exponential) function as
+
+```
+y = C0 + x^N × (C1 − C0)
+```
+
+where `C0` is the output at `x = 0` and `C1` the output at `x = 1`. `shading.rs` evaluates
+
+```rust
+out.push(c0 + c1 * power);   // Exponential::apply
+```
+
+which is the same formula only when `C0` is zero, which is why it went unnoticed: hand-written
+gradients very often are, and the two rules agree there.
+
+`pdfjs__issue13372.pdf` is the counter-example, and it is a test file Adobe wrote for exactly
+this feature — `Pattyp2.ps`, a gradient portrait. Its two type-2 functions are
+
+```
+<< /FunctionType 2 /Domain [0 1] /C0 [0 1 1] /C1 [1 1 0] /N 1 >>   # cyan -> yellow
+<< /FunctionType 2 /Domain [0 1] /C0 [1 1 0] /C1 [1 0 1] /N 1 >>   # yellow -> magenta
+```
+
+which the specification reads as cyan → yellow → magenta and the code reads as cyan → white →
+yellow → white. `mutool` agrees with the specification: at the gradient's `t = 0.1` it paints
+`(50, 255, 205)`, and `C0 + 0.2·(C1 − C0)` is exactly `(51, 255, 204)`.
+
+**Measured.** `pdfjs__issue13372.pdf` page 1 against `mutool` at 150 DPI, with that one
+expression corrected and nothing else: **0.83738 → 0.92924**. What is left after that is the
+dither, which is a separate rasteriser feature this project does not have: the oracle paints
+the gradient as ink dots at the coverage it wants and we paint the same average smoothly, and
+`compare()` scores two correct answers differently for that reason alone.
+
+The test that pins the current behaviour is `an_exponential_function_is_c0_plus_c1_times_t_to_the_n`
+in `shading.rs`, which uses `C0 = 0.25`, `C1 = 0.75` and asserts `at(1.0) == 1.0`. Under the
+specification that is `0.75`. Fixing this means renaming that test and changing its expectation,
+which is why it did not ride along with a change about pattern colours — but the pattern-fill
+fixtures here use `C0 = [0 0 0]` for exactly this reason, so that what they assert is the
+specification's closed form rather than this codebase's.

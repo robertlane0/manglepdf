@@ -23,6 +23,7 @@ use mangle_content::{
 use mangle_doc::Page;
 use mangle_syntax::{Document, Object, Rect as PageRect, object::Dict, stream::decode_stream};
 
+use crate::fill::{self, FillColour};
 use crate::image::{self, Raster};
 use crate::shading::{self, Shading};
 use crate::{
@@ -383,6 +384,8 @@ pub fn render_page(
             &mut lookup,
             &mut shade_lookup,
             &mut font_lookup,
+            resources,
+            doc,
         );
         render.marks += 1;
     }
@@ -400,6 +403,61 @@ fn shading_for(
     resources: &Resources,
     doc: &Document,
 ) -> Result<(Shading, Matrix), String> {
+    let source = pattern_source(name, resources, doc)?;
+    let resolver = |o: &Object| doc.resolve_object(o);
+    let shading = Shading::parse(&source.shading, &resolver)
+        .ok_or_else(|| format!("the shading `/{name}` is of a kind this does not paint yet"))?;
+    Ok((shading, source.matrix))
+}
+
+/// Which kind of pattern a page named.
+///
+/// `/PatternType` is optional and its default is **1**, which is the part that matters: a
+/// pattern that omits the key is a tiling pattern, and reading it as a shading would look
+/// for a `/Shading` entry that is not there and report the wrong thing — "a kind this does
+/// not paint yet" instead of "a tiling pattern", which is a feature rather than a fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternKind {
+    /// `/PatternType 1`: a content stream tiled across the fill.
+    Tiling,
+    /// `/PatternType 2`: a shading, clipped to what is being filled.
+    Shading,
+    /// A `/PatternType` this does not know. Carried rather than refused, so the note can
+    /// quote the number the file actually used.
+    Other(i64),
+}
+
+impl PatternKind {
+    /// Read `/PatternType`, defaulting to 1 as the specification requires.
+    fn read(dict: &Dict) -> Self {
+        match dict.get("PatternType").and_then(Object::as_i64) {
+            Some(1) | None => Self::Tiling,
+            Some(2) => Self::Shading,
+            Some(other) => Self::Other(other),
+        }
+    }
+}
+
+/// A pattern resource, resolved: what kind it is, what is inside it, and how to reach it.
+struct PatternSource {
+    kind: PatternKind,
+    /// The shading inside it, or the pattern itself where a shading pattern carries its own
+    /// shading dictionary.
+    shading: Object,
+    /// The pattern's own transformation, which maps its space into the page's default space.
+    matrix: Matrix,
+}
+
+/// Resolve a named pattern to its kind, its contents and its own transformation.
+///
+/// Shared by `sh` and by a pattern used as a fill colour, because both read the same
+/// resource and both need the pattern's `/Matrix`: the difference between them is what they
+/// do with the shading afterwards, not where it comes from.
+fn pattern_source(
+    name: &str,
+    resources: &Resources,
+    doc: &Document,
+) -> Result<PatternSource, String> {
     let Some(object) = resources.patterns.get(name).cloned() else {
         return Err(format!(
             "the page names a shading `/{name}` that its resources do not define"
@@ -409,8 +467,9 @@ fn shading_for(
     // The pattern's own transformation maps its space into the page's default space, which
     // the mark's transformation then carries to the pixels. Both are needed and neither
     // substitutes for the other.
-    let (shading_object, pattern_matrix) = match &resolved {
+    let (kind, shading, matrix) = match &resolved {
         Object::Stream(s) => (
+            PatternKind::read(&s.dict),
             match s.dict.get("Shading") {
                 Some(inner) => doc.resolve_object(inner).unwrap_or_else(|| inner.clone()),
                 // No `/Shading`: the pattern stream is itself one, which is how a
@@ -421,10 +480,11 @@ fn shading_for(
         ),
         Object::Dict(d) => match d.get("Shading") {
             Some(inner) => (
+                PatternKind::read(d),
                 doc.resolve_object(inner).unwrap_or_else(|| inner.clone()),
                 read_matrix(d.get("Matrix")),
             ),
-            None => (resolved.clone(), Matrix::IDENTITY),
+            None => (PatternKind::read(d), resolved.clone(), Matrix::IDENTITY),
         },
         _ => {
             return Err(format!(
@@ -432,10 +492,108 @@ fn shading_for(
             ));
         }
     };
+    Ok(PatternSource {
+        kind,
+        shading,
+        matrix,
+    })
+}
+
+/// The colour space a shading's function produces that this cannot convert, if it names one.
+///
+/// Gray, RGB and CMYK are converted by counting what the function produces, which is why a
+/// shading with no readable `/ColorSpace` still paints. `Indexed` needs its palette and
+/// `Separation` and `DeviceN` need a tint transform, and all three are one component wide —
+/// exactly what a grey function produces. Reading one as grey would paint a spot colour as a
+/// picture of a grey, so the space is reported instead.
+fn unconvertible_space(shading: &Object, doc: &Document) -> Option<String> {
+    let dict = match shading {
+        Object::Dict(d) => d,
+        Object::Stream(s) => &s.dict,
+        _ => return None,
+    };
+    let object = dict.get("ColorSpace")?;
+    let resolved = doc.resolve_object(object).unwrap_or_else(|| object.clone());
+    // A space is named either by a name (`/DeviceRGB`) or by an array whose first entry is
+    // one (`[/Separation /PANTONE 123 /TintTransform …]`), and the array form is the one
+    // that carries the transform this cannot use.
+    let name = match resolved.as_name() {
+        Some(name) => String::from_utf8_lossy(name).into_owned(),
+        None => {
+            let first = resolved.as_array()?.first()?;
+            let first = doc.resolve_object(first).unwrap_or_else(|| first.clone());
+            String::from_utf8_lossy(first.as_name()?).into_owned()
+        }
+    };
+    matches!(name.as_str(), "Separation" | "DeviceN" | "Indexed").then_some(name)
+}
+
+/// The colour a fill in a pattern paints in, or why there is none.
+///
+/// A `/Pattern` colour space means `scn`'s operands named a pattern rather than a colour
+/// value, so there is nothing to convert: the pattern decides, and its colour varies with
+/// position.
+///
+/// `placement` is the transformation from the page's *default* user space to the device,
+/// which is what a pattern's own `/Matrix` maps into — **not** the mark's own `to_device`.
+/// That difference is the whole of the rule here and it is easy to get backwards: a pattern
+/// says where it lives in the page's space, so a `cm` that moves or scales the *shape* leaves
+/// the pattern where it was, and a page that means to put a gradient into a scaled square
+/// says so with the pattern's `/Matrix`. `sh` is the opposite case — a shading painted by
+/// that operator is in the CTM in force at the operator — which is why the same pattern
+/// resource reaches the device by two different routes on one page.
+///
+/// A `/PatternType 1` pattern is a content stream tiled across the fill, which needs a loop
+/// over cells in the pattern's own space. That is not implemented, so it is refused **by
+/// name**: one cell of a tiling is a texture that looks plausible and is wrong everywhere.
+fn pattern_fill(
+    name: &str,
+    resources: &Resources,
+    doc: &Document,
+    placement: &Matrix,
+) -> Result<FillColour, String> {
+    let source = pattern_source(name, resources, doc)?;
+    match source.kind {
+        PatternKind::Shading => {}
+        PatternKind::Tiling => {
+            return Err(format!(
+                "a fill in the PatternType 1 tiling pattern `/{name}` was found and not \
+                 drawn: a tiling pattern as a fill colour is not drawn yet"
+            ));
+        }
+        PatternKind::Other(kind) => {
+            return Err(format!(
+                "a fill in the PatternType {kind} pattern `/{name}` was found and not drawn: \
+                 only PatternType 1 and 2 patterns can be a fill colour"
+            ));
+        }
+    }
+    if let Some(space) = unconvertible_space(&source.shading, doc) {
+        return Err(format!(
+            "a fill in the pattern `/{name}` is in the {space} colour space, which this \
+             cannot convert without a tint transform, so the shape was not drawn"
+        ));
+    }
     let resolver = |o: &Object| doc.resolve_object(o);
-    let shading = Shading::parse(&shading_object, &resolver)
-        .ok_or_else(|| format!("the shading `/{name}` is of a kind this does not paint yet"))?;
-    Ok((shading, pattern_matrix))
+    let shading = Shading::parse(&source.shading, &resolver).ok_or_else(|| {
+        format!("the shading in the fill pattern `/{name}` is of a kind this does not paint yet")
+    })?;
+    Ok(FillColour::Shading {
+        shading,
+        // The pattern's own matrix sits inside the page's placement, so the two compose in
+        // that order and the gradient is sampled in its own space throughout.
+        to_shading: placement.concat(source.matrix),
+    })
+}
+
+/// The name a `Pattern`-coloured mark carries, or the reason it does not.
+fn pattern_name(colour: &mangle_content::Colour) -> Result<&str, String> {
+    colour
+        .space
+        .colorant
+        .as_deref()
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| "a pattern colour names no pattern, so nothing was drawn in it".to_string())
 }
 
 /// A `/Matrix` array, or the identity when the dictionary has none.
@@ -793,6 +951,13 @@ fn draw_mark(
     images: &mut dyn FnMut(&str) -> Result<Raster, String>,
     shadings: ShadingLookup<'_>,
     fonts: FontLookup<'_>,
+    // The page's resources and the document, for the one thing a name alone cannot answer:
+    // a pattern colour is a reference to a pattern resource, so the resource has to be read
+    // here rather than looked up by the caller. The other two lookups above are closures so
+    // that the borrows stay with `render_page`; this one is the same information, taken
+    // directly, because it is needed in two arms rather than in one.
+    resources: &Resources,
+    doc: &Document,
 ) {
     match mark {
         Mark::Path {
@@ -801,6 +966,11 @@ fn draw_mark(
             stroke,
             rule,
         } => {
+            // The path's points are already in the space the record's own transformation
+            // produces — `GraphicsState::device_path` applies the CTM to them — so passing
+            // `to_device` applies that transformation a second time. That is a pre-existing
+            // defect with its own evidence in `docs/known-diffs.md` (D9), deliberately left
+            // alone here: it changes every page with a `cm` and belongs in its own change.
             let polygon = transform_path(segments, to_device);
             if polygon.is_empty() {
                 return;
@@ -814,14 +984,31 @@ fn draw_mark(
                 mangle_content::FillRule::NonZero => FillRule::NonZero,
             };
             if let Some(colour) = fill {
-                match colour.to_rgba(None) {
-                    Some(rgba) => {
-                        device.fill_polygon(&polygon, rule, rgba.to_rgba8(record.fill_alpha));
+                // A `Pattern` colour space means the operands named a pattern rather than a
+                // colour value, so the pattern has to be read and its own evaluator built.
+                // Every other space is converted here as it always was, on the same code
+                // path as before — a page with an ordinary colour fill does not come near
+                // the per-pixel one.
+                if colour.space.name == "Pattern" {
+                    match pattern_name(colour)
+                        .and_then(|name| pattern_fill(name, resources, doc, placement))
+                    {
+                        Ok(paint) => {
+                            fill::polygon(device, &polygon, rule, &paint, record.fill_alpha);
+                        }
+                        Err(reason) => notes.push(reason),
                     }
-                    None => notes.push(format!(
-                        "a fill colour in {} could not be converted, so the shape was not drawn",
-                        colour.space.name
-                    )),
+                } else {
+                    match colour.to_rgba(None) {
+                        Some(rgba) => {
+                            device.fill_polygon(&polygon, rule, rgba.to_rgba8(record.fill_alpha));
+                        }
+                        None => notes.push(format!(
+                            "a fill colour in {} could not be converted, so the shape was not \
+                             drawn",
+                            colour.space.name
+                        )),
+                    }
                 }
             }
             if let Some(colour) = stroke
@@ -888,19 +1075,24 @@ fn draw_mark(
                     // the graphics state's non-stroking colour, which `Do` does not name and
                     // so has to travel with the mark.
                     let paint = if raster.is_stencil && fill.space.name == "Pattern" {
-                        // A pattern colour is a pattern, not a colour: painting the mask in
-                        // anything else would put a flat block where the page asked for a
-                        // shading or a tiling, and saying so beats drawing the wrong thing.
-                        notes.push(
-                            "an image mask painted in a pattern colour was found and not \
-                             drawn: a shading or tiling used as a pattern colour is not drawn \
-                             yet"
-                            .into(),
-                        );
-                        None
+                        // A pattern colour is a reference to a pattern rather than a colour
+                        // value, and the pattern's colour varies with position: the mask is
+                        // painted in whatever the pattern says at each pixel it covers.
+                        match pattern_name(fill)
+                            .and_then(|name| pattern_fill(name, resources, doc, placement))
+                        {
+                            Ok(paint) => Some(paint),
+                            Err(reason) => {
+                                notes.push(format!(
+                                    "an image mask painted in a pattern was found and not \
+                                     drawn: {reason}"
+                                ));
+                                None
+                            }
+                        }
                     } else {
                         match fill.to_rgba(None) {
-                            Some(colour) => Some(colour),
+                            Some(colour) => Some(FillColour::flat(colour)),
                             // An image that is not a mask paints its own samples, so a
                             // colour this cannot convert is no reason to refuse it. For a
                             // mask it was the only colour there was.
@@ -916,7 +1108,13 @@ fn draw_mark(
                             }
                         }
                     };
-                    image::draw(device, &raster, to_device, record.fill_alpha, paint);
+                    image::draw(
+                        device,
+                        &raster,
+                        to_device,
+                        record.fill_alpha,
+                        paint.as_ref(),
+                    );
                 }
                 Err(reason) => notes.push(reason),
             },

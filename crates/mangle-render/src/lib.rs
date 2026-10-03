@@ -43,6 +43,7 @@
 
 pub mod compare;
 pub mod coverage;
+pub mod fill;
 pub mod image;
 pub mod page;
 pub mod shading;
@@ -835,29 +836,40 @@ pub fn composite_masked(
         if src_a <= 0.0 {
             continue;
         }
-        let dst_a = f64::from(dst[3]) / 255.0;
-        let out_a = src_a + dst_a * (1.0 - src_a);
-        // The three colour channels are combined by the source-over equation; the alpha
-        // is its own number, and dividing by the output alpha undoes the unpremultiply
-        // so the buffer keeps straight alpha throughout.
-        // Walking the two colours together is what keeps the channels paired: an index
-        // into an array of four invites an off-by-one that a zip cannot express.
-        let mut out = [0u8; 4];
-        for ((s, d), slot) in rgba.iter().zip(dst.iter()).zip(out.iter_mut()).take(3) {
-            let s = f64::from(*s) / 255.0;
-            let d = f64::from(*d) / 255.0;
-            let value = if out_a > 0.0 {
-                (s * src_a + d * dst_a * (1.0 - src_a)) / out_a
-            } else {
-                0.0
-            };
-            *slot = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-        }
-        if let Some(slot) = out.get_mut(3) {
-            *slot = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
-        }
-        image.put(px, py, out);
+        image.put(px, py, over(dst, rgba, src_a));
     }
+}
+
+/// Source-over one pixel: the destination keeps its own alpha and the source goes on top.
+///
+/// `src_alpha` is the source's *effective* opacity in 0..1 — its own alpha multiplied by
+/// whatever coverage or clip the caller had — and it is passed rather than read out of `src`
+/// so that a caller with a colour that varies from pixel to pixel is doing the same
+/// arithmetic as one with a colour that does not.
+///
+/// Straight (non-premultiplied) alpha throughout: the output's alpha is `αs + αd(1 − αs)`,
+/// and dividing the colour by it undoes the unpremultiply so the buffer stays straight.
+#[must_use]
+pub fn over(dst: [u8; 4], src: [u8; 4], src_alpha: f64) -> [u8; 4] {
+    let dst_a = f64::from(dst[3]) / 255.0;
+    let out_a = src_alpha + dst_a * (1.0 - src_alpha);
+    let mut out = [0u8; 4];
+    // Walking the two colours together is what keeps the channels paired: an index
+    // into an array of four invites an off-by-one that a zip cannot express.
+    for ((s, d), slot) in src.iter().zip(dst.iter()).zip(out.iter_mut()).take(3) {
+        let s = f64::from(*s) / 255.0;
+        let d = f64::from(*d) / 255.0;
+        let value = if out_a > 0.0 {
+            (s * src_alpha + d * dst_a * (1.0 - src_alpha)) / out_a
+        } else {
+            0.0
+        };
+        *slot = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    if let Some(slot) = out.get_mut(3) {
+        *slot = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    out
 }
 
 /// Where a device space lands on the page: a rectangle in device units and its pixel

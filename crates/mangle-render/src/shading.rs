@@ -1291,6 +1291,11 @@ pub const MAX_PROGRAM: usize = 4096;
 /// *back* through its inverse, which is what makes a rotated gradient work with no special
 /// cases. Where the clip is a region rather than a box, the pixel's share of that region
 /// multiplies the gradient's own coverage.
+///
+/// The per-pixel work is [`crate::fill::Sampler`]'s, which a pattern fill uses as well. That
+/// is deliberate: a gradient reached by `sh` and the same gradient used as a fill colour
+/// have to be the same evaluator, or a change to one of them silently stops applying to the
+/// other.
 pub fn paint(device: &mut Device, shading: &Shading, matrix: &Matrix, alpha: f64) -> bool {
     let area = device.clip();
     let Some((columns, rows)) = area.pixels() else {
@@ -1299,62 +1304,21 @@ pub fn paint(device: &mut Device, shading: &Shading, matrix: &Matrix, alpha: f64
     let Some(inverse) = matrix.inverse() else {
         return false;
     };
-    let extend = shading.extend();
+    let sampler = crate::fill::Sampler::Shading {
+        shading,
+        inverse,
+        extend: shading.extend(),
+    };
     let mut painted = 0usize;
 
     // Every pixel is written at its own coordinates, which are the clip's own: a shading
     // inside a clip that does not start at the origin is still painted where it belongs.
     for y in rows.clone() {
         for x in columns.clone() {
-            let (sx, sy) = inverse.apply(x as f64 + 0.5, y as f64 + 0.5);
-            let Some(t) = shading.parameter_at(sx, sy) else {
+            let Some(sample) = sampler.sample(x, y) else {
                 continue;
             };
-            // How far `t` moves per pixel, by evaluating it either side. Differencing beats
-            // a closed form because it is the same three evaluations for an axial gradient
-            // and a radial one, and a radial gradient's gradient is a conic section nobody
-            // wants to write twice.
-            let step = 0.5f64;
-            let (ax, ay) = inverse.apply(x as f64 + 0.5 + step, y as f64 + 0.5);
-            let (bx, by) = inverse.apply(x as f64 + 0.5, y as f64 + 0.5 + step);
-            let (tx, ty) = (shading.parameter_at(ax, ay), shading.parameter_at(bx, by));
-            let slope = match (tx, ty) {
-                (Some(a), Some(b)) => {
-                    let dx = (a - t) / step;
-                    let dy = (b - t) / step;
-                    (dx * dx + dy * dy).sqrt()
-                }
-                // A gradient whose ends coincide has no slope; treat it as steep, which
-                // means no antialiasing rather than a smeared edge.
-                _ => f64::INFINITY,
-            };
-            // The gradient's own first circle is filled with its first colour, and for a
-            // radial gradient the parameter there is negative rather than absent, so the
-            // disc is recognised by geometry instead.
-            let coverage = if shading.inner_fill(sx, sy) {
-                1.0
-            } else if slope.is_finite() && slope > 0.0 {
-                let low = if extend[0] {
-                    1.0
-                } else {
-                    (t / slope).clamp(0.0, 1.0)
-                };
-                let high = if extend[1] {
-                    1.0
-                } else {
-                    ((1.0 - t) / slope).clamp(0.0, 1.0)
-                };
-                low.min(high)
-            } else if slope.is_finite() {
-                // A flat gradient covers everything inside and nothing outside.
-                if extend[0] || extend[1] { 1.0 } else { 0.0 }
-            } else {
-                1.0
-            };
-            if coverage <= 0.0 {
-                continue;
-            }
-            let a = (coverage * alpha).clamp(0.0, 1.0);
+            let a = (sample.coverage * alpha).clamp(0.0, 1.0);
             // The clip mask multiplies the gradient's own coverage rather than deciding it,
             // so a shading inside a diagonal clip has that edge antialiased instead of
             // stopping at it.
@@ -1362,16 +1326,13 @@ pub fn paint(device: &mut Device, shading: &Shading, matrix: &Matrix, alpha: f64
             if a <= 0.0 {
                 continue;
             }
-            let Some(colour) = shading.colour_at(t) else {
-                continue;
-            };
             device.put(
                 x,
                 y,
                 [
-                    (colour[0].clamp(0.0, 1.0) * 255.0).round() as u8,
-                    (colour[1].clamp(0.0, 1.0) * 255.0).round() as u8,
-                    (colour[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (sample.colour[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (sample.colour[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (sample.colour[2].clamp(0.0, 1.0) * 255.0).round() as u8,
                     (a * 255.0).round() as u8,
                 ],
             );

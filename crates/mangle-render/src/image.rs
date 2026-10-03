@@ -38,10 +38,11 @@
 //! work: nothing has to be resampled into an axis-aligned buffer first, and a square at
 //! forty-five degrees comes out the right shape rather than a staircase.
 
-use mangle_content::{Matrix, Rgba};
+use mangle_content::Matrix;
 use mangle_syntax::object::{Dict, Object, Stream};
 use mangle_syntax::stream::decode_stream;
 
+use crate::fill::FillColour;
 use crate::{Device, Rect};
 
 /// The most pixels an image may have. A page can ask for an image larger than memory, and
@@ -779,6 +780,11 @@ impl Raster {
 /// in, which for a stencil draws nothing rather than guessing one — an image that is not a
 /// stencil paints its own samples and ignores it. Returns whether anything was drawn.
 ///
+/// A stencil's colour is a [`FillColour`] rather than a plain `Rgba` because a mask painted in
+/// a pattern takes a different colour at every pixel: `scn` with a `/Pattern` colour space
+/// names a pattern, and a shading pattern's colour varies with where the mask lands. The
+/// pattern is evaluated at each painted pixel, through the same evaluator `sh` uses.
+///
 /// Every write is at the device coordinate it was computed for, and every sample is read
 /// through the transformation with its vertical axis the way an image's is: row zero at the
 /// top. Both are stated because both were once wrong, and each put an image in the wrong
@@ -788,7 +794,7 @@ pub fn draw(
     raster: &Raster,
     matrix: &Matrix,
     alpha: f64,
-    fill: Option<Rgba>,
+    fill: Option<&FillColour>,
 ) -> bool {
     let corners = [
         matrix.apply(0.0, 0.0),
@@ -835,6 +841,19 @@ pub fn draw(
     };
 
     let mut drawn = 0usize;
+    // A stencil's colour is asked per painted pixel, so a pattern is prepared once here
+    // rather than rebuilt at every bit the mask paints.
+    let stencil = if raster.is_stencil {
+        match fill.and_then(FillColour::sampler) {
+            Some(sampler) => Some(sampler),
+            // No colour to paint in — a colour in a space this cannot convert, or a pattern
+            // whose transformation collapses. Nothing is drawn rather than something
+            // arbitrary, and the caller has already said why.
+            None => return false,
+        }
+    } else {
+        None
+    };
     // `rows` is consumed by the outer loop and `columns` by the inner one, and a range is
     // not `Copy`; the clone is two words and is clearer than restructuring the walk.
     for y in rows.clone() {
@@ -849,17 +868,16 @@ pub fn draw(
             // an alpha of 0, so the alpha is what says which is which — painting the bits
             // *without* colour turns a mask into a solid block, which is the opposite of what
             // a stencil is for.
-            if raster.is_stencil {
+            if let Some(sampler) = stencil.as_ref() {
                 if px[3] == 0 {
                     continue;
                 }
-                let Some(colour) = fill else {
-                    // No colour to paint in — a pattern fill, or a colour in a space this
-                    // cannot convert. Nothing is drawn rather than something arbitrary, and
-                    // the caller has already said why.
-                    return false;
+                // A pattern that does not reach this pixel leaves the paper there, which is
+                // the same answer a path fill gives a gradient that stops short.
+                let Some(colour) = sampler.at(x, y, alpha) else {
+                    continue;
                 };
-                px = colour.to_rgba8(alpha);
+                px = colour;
             }
             // The soft mask multiplies whatever alpha the samples had.
             let masked = raster.mask_alpha(u, v);
@@ -902,6 +920,7 @@ mod tests {
     )]
 
     use super::*;
+    use mangle_content::Rgba;
 
     fn grey_image(w: usize, h: usize, data: Vec<u8>, bits: usize) -> Stream {
         let mut dict = Dict::new();
@@ -1578,7 +1597,8 @@ mod tests {
     fn draw_on_paper(raster: &Raster, fill: Option<Rgba>) -> crate::Image {
         let mut device = Device::new(crate::Image::filled(8, 8, [255, 255, 255, 255]));
         let unit_square = Matrix::new(8.0, 0.0, 0.0, -8.0, 0.0, 8.0);
-        draw(&mut device, raster, &unit_square, 1.0, fill);
+        let fill = fill.map(FillColour::flat);
+        draw(&mut device, raster, &unit_square, 1.0, fill.as_ref());
         device.into_image()
     }
 
@@ -1642,15 +1662,15 @@ mod tests {
         // Half black, half white, in DeviceGray, with a red fill colour in force: an image
         // is not a stencil, so the fill colour has no say in what it draws.
         let (raster, _) = decode_ok(&grey_image(2, 1, vec![0, 255], 8));
-        let red = Rgba {
+        let red = FillColour::flat(Rgba {
             r: 1.0,
             g: 0.0,
             b: 0.0,
             a: 1.0,
-        };
+        });
         let mut device = Device::new(crate::Image::filled(2, 1, [255, 255, 255, 255]));
         let unit_square = Matrix::new(2.0, 0.0, 0.0, 1.0, 0.0, 0.0);
-        draw(&mut device, &raster, &unit_square, 1.0, Some(red));
+        draw(&mut device, &raster, &unit_square, 1.0, Some(&red));
         let image = device.into_image();
         assert_eq!(image.get(0, 0), Some([0, 0, 0, 255]), "its own black");
         assert_eq!(image.get(1, 0), Some([255, 255, 255, 255]), "its own white");
