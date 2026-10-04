@@ -30,6 +30,13 @@
 //! * a per-file Markdown report: SSIM per page, the worst pages, and the worst pixels with
 //!   their coordinates, plus a copy of each disagreeing page's heatmap.
 //!
+//! * as each file *finishes* rather than at the end, that file's Markdown report and a row
+//!   in `report/results.tsv` and `report/pages.tsv`. A run takes about three hours and is
+//!   routinely killed, so a baseline that only appears if the process survives to the last
+//!   file is a baseline that does not exist — three runs have been lost exactly that way,
+//!   one of them after 36 of 77 files. `report/SUMMARY.md` is still written at the end and
+//!   says what it always said; this is extra, not a replacement.
+//!
 //! # Skipping
 //!
 //! The corpus is not in the repository — `cargo xtask corpus fetch` downloads it and
@@ -58,6 +65,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -86,13 +94,28 @@ const BUDGET_SECS: f64 = 60.0;
 /// whenever it is hit, so a page that was skipped is never mistaken for a page that passed.
 const MAX_COMPARE_PIXELS: usize = 16 * 1024 * 1024;
 
-/// Where the corpus is, if it has been fetched.
-fn corpus_dir() -> Option<PathBuf> {
+/// Where the corpus is meant to live, whether or not it has been fetched.
+///
+/// Split out of [`corpus_dir`] so the tests that only care about a *path* — where the
+/// reports go, what the corpus ignore file covers — do not have to lie about the corpus
+/// being absent to get at it.
+fn corpus_root() -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)?;
-    let dir = root.join("corpus/wild");
+    Some(root.join("corpus/wild"))
+}
+
+/// Where the corpus is, if it has been fetched.
+fn corpus_dir() -> Option<PathBuf> {
+    let dir = corpus_root()?;
     dir.join("MANIFEST.toml").is_file().then_some(dir)
+}
+
+/// Where every report this harness writes lands. One place, so "the report directory"
+/// means the same directory in the run and in the tests.
+fn report_dir(corpus: &Path) -> PathBuf {
+    corpus.join("report")
 }
 
 /// One `[[corpus]]` block, read with the small amount of TOML this manifest uses.
@@ -586,7 +609,7 @@ fn the_wild_corpus_is_measured_and_reported() {
     let tool = mutool();
     let pdftotext = pdftotext();
     let scratch = dir.join("scratch");
-    let reports = dir.join("report");
+    let reports = report_dir(&dir);
 
     let present: Vec<&Entry> = entries
         .iter()
@@ -642,6 +665,11 @@ fn the_wild_corpus_is_measured_and_reported() {
         eprintln!("cannot create {}: {why}", scratch.display());
     }
 
+    // Started here rather than after the loop: this run's rows are this run's rows, and a
+    // row left behind by a run that was killed is a row whose summary nobody will ever
+    // write. The files are emptied once, at the start, and appended to from then on.
+    let running = RunningLog::start(&reports);
+
     let mut outcomes = Vec::new();
     for (i, entry) in present.iter().enumerate() {
         let outcome = measure_file(
@@ -686,8 +714,32 @@ fn the_wild_corpus_is_measured_and_reported() {
         if let Some(why) = &outcome.paniced {
             println!("panic   {} {}: {why}", outcome.entry_id, outcome.file);
         }
+        // This file is finished, so it is on disk now: the Markdown a person reads, and
+        // its rows in the two running files. Three corpus runs have been killed partway
+        // through and every one of them left nothing behind, because everything used to
+        // be written in a final pass after the last file. See [`RunningLog`].
+        write_report(&reports, &outcome);
+        running.record(&outcome);
+        // One line per file, so a three-hour run under `--nocapture` says what it is
+        // doing instead of appearing to hang for two hours and then printing everything.
+        println!(
+            "[{}/{}] {} {} — {:.1}s, worst SSIM {}, {} compared",
+            i + 1,
+            present.len(),
+            outcome.entry_id,
+            outcome.file,
+            outcome.seconds,
+            fmt_f64(
+                if ssim_stats(&outcome).2 == 0 {
+                    None
+                } else {
+                    Some(worst_ssim(&outcome))
+                },
+                4
+            ),
+            ssim_stats(&outcome).2,
+        );
         outcomes.push(outcome);
-        let _ = i;
     }
 
     let _ = std::fs::remove_dir_all(&scratch);
@@ -1403,6 +1455,244 @@ fn write_summary(reports: &Path, outcomes: &[FileOutcome]) {
     }
 }
 
+// ── The running log ──────────────────────────────────────────────────────────────
+
+/// The two files a run appends to while it is still running.
+///
+/// Everything else in this harness is written in one pass at the end: `write_summary`
+/// runs after the last file, and it is what writes the per-file Markdown. That made the
+/// whole three-hour run worth exactly nothing if it was killed — and it is always killed.
+/// Three runs have died partway through (a machine restart, memory pressure, the next
+/// thing starting), one of them after finishing 36 of 77 files, and all three left an
+/// empty report directory behind. A baseline that exists only if the process lives to the
+/// last file is not a baseline, it is a hope.
+///
+/// So the per-file report is written when the file is done and its numbers are appended
+/// here at the same time: [`RunningLog::record`] is called from inside the measurement
+/// loop, not after it. [`write_summary`] still runs at the end and still writes
+/// `SUMMARY.md`, and still rewrites each file's Markdown — a finished run reads exactly
+/// as it always did, and an unfinished one reads as far as it got.
+struct RunningLog {
+    results: PathBuf,
+    pages: PathBuf,
+}
+
+/// One row per file, in [`results_row`]'s order.
+const RESULTS_FILE: &str = "results.tsv";
+
+/// One row per page, in [`page_rows`]'s order.
+const PAGES_FILE: &str = "pages.tsv";
+
+impl RunningLog {
+    /// Start a run: the two files are emptied here and appended to from then on.
+    ///
+    /// Emptying rather than appending across runs is deliberate. A row left behind by a
+    /// run that was killed is a row whose `SUMMARY.md` will never be written, and one
+    /// file's row appearing twice is a file measured twice in the same table. This run's
+    /// rows are this run's rows.
+    fn start(reports: &Path) -> Self {
+        let log = Self {
+            results: reports.join(RESULTS_FILE),
+            pages: reports.join(PAGES_FILE),
+        };
+        for path in [&log.results, &log.pages] {
+            if let Err(why) = std::fs::write(path, "") {
+                eprintln!("cannot create {}: {why}", path.display());
+            }
+        }
+        log
+    }
+
+    /// Append one file's row and then one row per page of that file, flushing each line.
+    fn record(&self, outcome: &FileOutcome) {
+        append_line(&self.results, &results_row(outcome));
+        for line in page_rows(outcome) {
+            append_line(&self.pages, &line);
+        }
+    }
+}
+
+/// Write one line at the end of a running file, and get it out of this process.
+///
+/// The flush is the point. `writeln!` into a `File` reaches the kernel and not the disk,
+/// and a kill that lands before the kernel has written the buffer takes the last lines
+/// with it — which is precisely the loss this file exists to stop, reintroduced through a
+/// one-line optimisation. Every line is flushed before the next file is measured, so a
+/// killed run's measurements are on disk rather than in a buffer that died with it.
+fn append_line(path: &Path, line: &str) {
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(why) => {
+            eprintln!("cannot append to {}: {why}", path.display());
+            return;
+        }
+    };
+    if let Err(why) = writeln!(file, "{line}") {
+        eprintln!("cannot write to {}: {why}", path.display());
+        return;
+    }
+    if let Err(why) = file.flush() {
+        eprintln!("cannot flush {}: {why}", path.display());
+    }
+}
+
+/// One file as one row: id, file, pages measured, worst SSIM, median SSIM, text F1,
+/// seconds, opened or closed, and the reason if it was closed.
+///
+/// This is the column set of `SUMMARY.md`'s table, in the order that table reads, so the
+/// two can be compared by eye: one is the whole run at the end, the other is whatever
+/// survived.
+fn results_row(o: &FileOutcome) -> String {
+    let (worst, median, compared) = ssim_stats(o);
+    let (opened, reason) = match &o.opened {
+        Ok(_) => (true, String::new()),
+        Err(why) => (false, why.clone()),
+    };
+    let measured = compared > 0;
+    row(&[
+        o.entry_id.clone(),
+        o.file.clone(),
+        o.pages.len().to_string(),
+        fmt_f64(measured.then_some(worst), 4),
+        fmt_f64(measured.then_some(median), 4),
+        fmt_f64(o.f1, 4),
+        format!("{:.1}", o.seconds),
+        String::from(if opened { "opened" } else { "closed" }),
+        reason,
+    ])
+}
+
+/// One row per page: id, file, page, SSIM, RMS, max delta, pixels above tolerance, total
+/// pixels, and why this page was not compared if it was not.
+///
+/// Every page gets a row, including the ones that agreed to four decimal places and the
+/// ones that were never compared. A row that says "not compared, and here is why" is what
+/// stops a killed run from reading as one where nothing was ever skipped.
+fn page_rows(o: &FileOutcome) -> Vec<String> {
+    o.pages
+        .iter()
+        .map(|p| {
+            row(&[
+                o.entry_id.clone(),
+                o.file.clone(),
+                p.page.to_string(),
+                fmt_f64(p.ssim, 4),
+                fmt_f64(p.rms, 2),
+                p.max_delta.map_or_else(|| "-".into(), |v| v.to_string()),
+                p.above_tolerance
+                    .map_or_else(|| "-".into(), |v| v.to_string()),
+                p.total_pixels.map_or_else(|| "-".into(), |v| v.to_string()),
+                p.skipped.clone().unwrap_or_default(),
+            ])
+        })
+        .collect()
+}
+
+/// Fields joined into one row, each escaped.
+fn row(fields: &[String]) -> String {
+    fields
+        .iter()
+        .map(|f| tsv_field(f))
+        .collect::<Vec<_>>()
+        .join("\t")
+}
+
+/// A row split back into fields, each unescaped.
+fn row_fields(line: &str) -> Vec<String> {
+    line.split('\t').map(untsv_field).collect()
+}
+
+/// One field, with the characters that would break the row escaped.
+///
+/// A reason is a sentence out of whatever the file said, and a wild file says anything:
+/// an embedded tab turns one row into two broken ones and an embedded newline puts the
+/// rest of the row on a line of its own.
+fn tsv_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// [`tsv_field`] undone. The backslash is escaped first, so this is unambiguous.
+fn untsv_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            // A lone or unknown escape comes back as text. This is a reader, not a
+            // validator: a field written by something else must still be readable.
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// A row of `results.tsv` read back, for the test that the trip through a file is lossless.
+struct ResultsRow {
+    id: String,
+    file: String,
+    pages: usize,
+    worst: Option<f64>,
+    median: Option<f64>,
+    f1: Option<f64>,
+    seconds: f64,
+    opened: bool,
+    reason: String,
+}
+
+/// Read a results row back, or `None` if it is not the shape this harness writes.
+fn parse_results_row(line: &str) -> Option<ResultsRow> {
+    let f = row_fields(line);
+    let opened = match f.get(7)?.as_str() {
+        "opened" => true,
+        "closed" => false,
+        _ => return None,
+    };
+    Some(ResultsRow {
+        id: f.first()?.clone(),
+        file: f.get(1)?.clone(),
+        pages: f.get(2)?.parse().ok()?,
+        worst: num(f.get(3)?),
+        median: num(f.get(4)?),
+        f1: num(f.get(5)?),
+        seconds: num(f.get(6)?)?,
+        opened,
+        reason: f.get(8)?.clone(),
+    })
+}
+
+/// A number in a cell, with the two things this harness writes in place of one.
+///
+/// `fmt_f64` writes `-` for a measurement that was not taken and `nan` for one that came
+/// out as a NaN, and both of those mean the same thing to a reader of this file.
+fn num(cell: &str) -> Option<f64> {
+    match cell {
+        "-" | "nan" => None,
+        other => other.parse().ok(),
+    }
+}
+
 fn short(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
@@ -1606,4 +1896,275 @@ fn a_written_pam_reads_back_as_the_image_that_was_written() {
         &[200, 100, 50, 128]
     );
     let _ = std::fs::remove_file(&path);
+}
+
+// ── The running log, on its own ──────────────────────────────────────────────────
+
+/// A directory this test owns, named after the test so two of them cannot collide.
+fn scratch_dir(what: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mangle-wild-{what}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    dir
+}
+
+/// A file's measurements with known numbers, so the log can be exercised with no corpus,
+/// no oracles and no three hours.
+fn synthetic_file() -> FileOutcome {
+    FileOutcome {
+        entry_id: "W001".into(),
+        file: "gov__example.pdf".into(),
+        category: "government".into(),
+        purpose: "a file whose structure needs recovery".into(),
+        producer: "a producer outside this codebase".into(),
+        expect: "opens with repair".into(),
+        bytes: 4096,
+        sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+        opened: Ok(2),
+        recovery: Vec::new(),
+        clean: false,
+        pages: vec![
+            synthetic_page(1, Some(0.9137), None),
+            synthetic_page(
+                2,
+                None,
+                Some("mutool produced no page 2; it could not render it".into()),
+            ),
+        ],
+        f1: Some(0.8125),
+        text_note: "placeholder extractor".into(),
+        text_ours: 100,
+        text_theirs: 120,
+        seconds: 12.5,
+        paniced: None,
+    }
+}
+
+/// One page of [`synthetic_file`]: either a measured page or one that was skipped.
+fn synthetic_page(number: usize, ssim: Option<f64>, skipped: Option<String>) -> PageOutcome {
+    PageOutcome {
+        page: number,
+        size: (1275, 1650),
+        marks: 42,
+        rms: ssim.map(|s| 1.0 - s),
+        max_delta: ssim.map(|_| 255),
+        above_tolerance: ssim.map(|_| 123),
+        total_pixels: ssim.map(|_| 2_103_750),
+        ssim,
+        tolerance: SsimOptions::default().tolerance,
+        worst: if ssim.is_some() {
+            vec![(255, 100, 200)]
+        } else {
+            Vec::new()
+        },
+        notes: Vec::new(),
+        skipped,
+        heatmap: None,
+        picture_note: None,
+    }
+}
+
+/// A result row has to survive the trip through a file, because the file is the only place
+/// the row will ever be if the run is killed. Everything here is synthetic on purpose:
+/// the thing under test is the writing, and a corpus run cannot be the test for it.
+#[test]
+fn a_result_row_reads_back_as_the_result_that_was_written() {
+    let outcome = synthetic_file();
+    let line = results_row(&outcome);
+    assert_eq!(
+        line.matches('\t').count(),
+        8,
+        "a results row is nine fields, so eight tabs: {line:?}"
+    );
+    assert!(!line.contains('\n'), "a row is one line: {line:?}");
+
+    let back =
+        parse_results_row(&line).unwrap_or_else(|| panic!("the row did not parse: {line:?}"));
+    assert_eq!(back.id, outcome.entry_id);
+    assert_eq!(back.file, outcome.file);
+    assert_eq!(back.pages, 2);
+    assert_eq!(back.worst, Some(0.9137));
+    assert_eq!(back.median, Some(0.9137));
+    assert_eq!(back.f1, Some(0.8125));
+    assert_eq!(back.seconds, 12.5);
+    assert!(back.opened, "this synthetic file opened");
+    assert_eq!(back.reason, "", "a file that opened has no reason attached");
+
+    // A file that did not open, whose reason holds the two characters that would otherwise
+    // split one row into two broken ones.
+    let mut closed = synthetic_file();
+    closed.entry_id = "W002".into();
+    closed.file = "broken.pdf".into();
+    closed.opened = Err("the file is truncated\tand it says so\nacross two lines".into());
+    closed.pages.clear();
+    closed.f1 = None;
+    let line = results_row(&closed);
+    assert!(
+        !line.contains('\n'),
+        "a tab and a newline in the reason: {line:?}"
+    );
+    let back = parse_results_row(&line)
+        .unwrap_or_else(|| panic!("the closed row did not parse: {line:?}"));
+    assert!(!back.opened);
+    assert_eq!(back.pages, 0);
+    assert_eq!(
+        back.worst, None,
+        "nothing compared is no SSIM, not a good one"
+    );
+    assert_eq!(back.median, None);
+    assert_eq!(back.f1, None);
+    assert_eq!(&back.reason, closed.opened.as_ref().unwrap_err());
+}
+
+/// The whole point of the running log: the next file must not cost the last one.
+#[test]
+fn appending_a_second_file_keeps_the_first() {
+    let dir = scratch_dir("append");
+    let log = RunningLog::start(&dir);
+
+    let first = synthetic_file();
+    log.record(&first);
+    let mut second = synthetic_file();
+    second.entry_id = "W002".into();
+    second.file = "pdfbox__second.pdf".into();
+    log.record(&second);
+
+    let text = std::fs::read_to_string(dir.join(RESULTS_FILE)).expect("results.tsv");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "two files, two rows, neither lost: {text:?}"
+    );
+    assert_eq!(parse_results_row(lines[0]).expect("row one").id, "W001");
+    assert_eq!(parse_results_row(lines[1]).expect("row two").id, "W002");
+    assert_eq!(
+        parse_results_row(lines[0]).expect("row one").file,
+        first.file,
+        "the first row is still the first row"
+    );
+    assert!(
+        text.ends_with('\n'),
+        "the last row is a whole row, not a half-written one: {text:?}"
+    );
+
+    // The page rows accumulate the same way: two pages per file, four in the end.
+    let pages = std::fs::read_to_string(dir.join(PAGES_FILE)).expect("pages.tsv");
+    assert_eq!(pages.lines().count(), 4, "both files' pages: {pages:?}");
+
+    // A second run empties the file rather than accumulating over the last one: one run's
+    // rows are one run's rows.
+    let log = RunningLog::start(&dir);
+    log.record(&second);
+    let text = std::fs::read_to_string(dir.join(RESULTS_FILE)).expect("results.tsv");
+    assert_eq!(
+        text.lines().count(),
+        1,
+        "a fresh run starts empty: {text:?}"
+    );
+    // Read as a line, not as `text.trim()`: a file that opened has an empty reason, and
+    // its row still ends with the tab that separates it from that empty field, so every
+    // row has the same nine fields whatever came of the file.
+    let only = text.lines().next().expect("the one row");
+    assert_eq!(
+        only.matches('\t').count(),
+        8,
+        "a file that opened still has nine fields: {only:?}"
+    );
+    assert_eq!(parse_results_row(only).expect("row one").id, "W002");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The running files have to land in the report directory a person already looks at, and
+/// they have to stay out of git: a measured corpus is fetched data, and `corpus/` is
+/// ignored by the same rule that keeps the PDFs out of the repository.
+#[test]
+fn the_running_files_land_in_the_report_directory_and_stay_ignored() {
+    let corpus = corpus_root().expect("the workspace root");
+    let reports = report_dir(&corpus);
+    for name in [RESULTS_FILE, PAGES_FILE] {
+        assert_eq!(
+            reports.join(name).parent(),
+            Some(reports.as_path()),
+            "{name} is not in {}",
+            reports.display()
+        );
+    }
+
+    // Starting a run puts both files there, under those names, whether or not a corpus is
+    // fetched — a missing file at the end of a run is the failure this harness was fixed
+    // for, so the naming is asserted rather than assumed.
+    let dir = scratch_dir("names");
+    RunningLog::start(&dir);
+    assert!(
+        dir.join(RESULTS_FILE).is_file(),
+        "{RESULTS_FILE} is missing"
+    );
+    assert!(dir.join(PAGES_FILE).is_file(), "{PAGES_FILE} is missing");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let ignore = std::fs::read_to_string(corpus.join(".gitignore"))
+        .expect("corpus/wild/.gitignore is tracked");
+    for name in [RESULTS_FILE, PAGES_FILE] {
+        assert!(
+            gitignore_ignores(&ignore, name),
+            "corpus/wild/.gitignore does not cover {name}, so a run would leave untracked \
+             files git would offer to commit:\n{ignore}"
+        );
+    }
+}
+
+/// Whether an ignore file ignores a name, by git's rule: the last pattern that matches
+/// decides, and a leading `!` un-ignores.
+///
+/// Read out of the real `corpus/wild/.gitignore` rather than a pattern invented here, so
+/// this test fails if that file is ever changed to admit TSVs — which is the change that
+/// would put half a corpus run into a commit.
+fn gitignore_ignores(ignore: &str, name: &str) -> bool {
+    let mut ignored = false;
+    for raw in ignore.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, pattern) = line
+            .strip_prefix('!')
+            .map_or((false, line), |rest| (true, rest));
+        if glob_matches(pattern, name) {
+            ignored = !negated;
+        }
+    }
+    ignored
+}
+
+/// `*` and `?` against one name, which is all a pattern without a slash is given here: it
+/// matches at any depth, so the basename is what it is matched against.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0usize, 0usize);
+    // The two-pointer walk: `star` is the pattern index of the most recent `*` and `mark`
+    // the name position it was first tried at, which is what backtracking to it means.
+    let (mut star, mut mark) = (usize::MAX, 0usize);
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = pi;
+            mark = ni;
+            pi += 1;
+        } else if star != usize::MAX {
+            pi = star + 1;
+            mark += 1;
+            ni = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
