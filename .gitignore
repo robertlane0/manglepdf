@@ -37,13 +37,18 @@ Thumbs.db
 
 # --- Corpora and generated fixtures ---
 # Ignore everything under corpus/ except directories (so git can descend), README.md,
-# SOURCES.md, MANIFEST.toml and .gitignore. The PDFs are fetched, never committed.
+# SOURCES.md, MANIFEST.toml and .gitignore.
+#
+# Tier B lives at corpus/wild/ and is exempt: it is a submodule, and a submodule's path must
+# not be ignored or `git add` refuses it. Its contents are governed by its own .gitignore,
+# not this one — a gitlink is a single entry, so nothing here descends into it.
 /corpus/**
 !/corpus/**/
 !/corpus/README.md
 !/corpus/**/SOURCES.md
 !/corpus/**/MANIFEST.toml
 !/corpus/**/.gitignore
+!/corpus/wild
 /fixtures/generated/
 
 # --- Downloaded reference material (specs and papers are not redistributable) ---

@@ -1,0 +1,3 @@
+[submodule "corpus/wild"]
+	path = corpus/wild
+	url = git@github.com:robertlane0/manglepdf-corpus.git
