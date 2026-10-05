@@ -261,7 +261,20 @@ renderer that never has to ask the machine for a font.
    not embed them — twelve of the fourteen now draw from bundled metric-compatible faces, with
    their widths from the built-in tables rather than from the 500-unit default, and the page
    says which face is standing in. `Symbol` and `ZapfDingbats` stay refused: Liberation has no
-   equivalent and inventing one would put the wrong glyphs on the page. **Type 3 is next.**
+   equivalent and inventing one would put the wrong glyphs on the page. **Type 3 is next**, and
+   the corpus scope for it is now measured: **three files** carry a `/Subtype /Type3` font —
+   `gov__arxiv-1206.5537.pdf` (23 pages, one Type 3 font) and the two pdfjs regression files
+   `ContentStreamCycleType3insideType3.pdf` and `ContentStreamNoCycleType3insideType3.pdf` (three
+   fonts each). A Type 3 font's glyphs are content streams rather than outlines, so it is a
+   different kind of work from the other five kinds rather than more of the same, and the two
+   pdfjs files are specifically about a **content stream that recurses**, which is the case that
+   needs a depth bound of its own.
+
+   **Mesh and other exotic shadings (`/ShadingType` 4–7) are smaller than they look**: exactly
+   **one** corpus file uses one, `pdfjs__bug1703683_page2_reduced.pdf`, and it uses **type 7**
+   (drift), not the mesh types. So the cluster is a single page of a single reduced file, and it
+   should be weighed against `/PaintType 2` and the Inspector on that basis rather than on the
+   size of the specification.
    Type 1 is done and compared against an oracle at 0.982 SSIM. TrueType is done and
    compared against an oracle, and two-byte codes are done with
    it: a composite font's string is split into two-byte CIDs, the pen advances by each CID's
