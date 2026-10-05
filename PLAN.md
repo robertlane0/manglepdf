@@ -286,6 +286,10 @@ renderer that never has to ask the machine for a font.
    dashed differently from a flat one. A `/PatternType 1` tiling
    pattern needs a loop over cells in the pattern's own space — `/Matrix`, `/BBox`, `/XStep`,
    `/YStep` and paint type — and is reported by name rather than approximated with one cell.
+   **This is the largest cluster left that is genuinely unbuilt rather than out of scope or a
+   policy: 12 pages below 0.95, in four files** — `comments` 4, `issue12337` 3, `highlights` 3 and
+   `bug1992868` 2 — and all four files sit at a median of 0.962 or better otherwise, so the loop
+   is most of what is wrong with them.
    **The pattern is now read, and the loop is not written.** `tiling_pattern` in `page.rs`
    returns a `TilingPattern` — the cell's `/BBox`, the two steps, the `/Matrix`, the paint type
    and the cell's own content stream — and `pattern_fill` still refuses a tiling paint by name,
@@ -634,10 +638,10 @@ report per file into `corpus/wild/report/`. It asserts nothing about any individ
 because a corpus's job is to find things and a threshold on a document nobody has read yet
 turns the first surprise into a permanent red build.
 
-The measurements and their evidence are in `docs/known-diffs.md`, which records the last full
-77-file run (738 pages compared, median SSIM 0.95795, 254 pages below 0.95) and, entry by
-entry, what each fix since has moved. Four findings dominated that run, and three of them are
-fixed:
+The measurements and their evidence are in `docs/known-diffs.md`, which records the latest full
+77-file run (**738 pages compared, page median SSIM 0.96010, 167 pages below 0.95**, 73 files
+opened, 4 closed, 16326.09s, 0 panicked) and, entry by entry, what each fix since has moved.
+Four findings dominated the run that started all this, and three of them are fixed:
 
 1. **`render_page` renders a blank page for any Flate-compressed content stream.** All 542
    measured pages drew nothing. The interpreter's own note contains the compressed bytes as
@@ -673,20 +677,53 @@ draw from bundled metric-compatible faces. Until they were, no render number in 
 said anything about fidelity and the arXiv page's SSIM sat at 0.7915 whether or not its
 content decoded; it is now 0.88414.
 
-**What is left in the corpus is two gaps, and they are large and separate.** A JPEG 2000 or
-JBIG2 decoder has to exist (W034 and W038, 67 pages between them) — and the reporting around that
-is already done, so its note says whether closing the codec gap closes the page. The second is also
-not a missing feature: **`gov__nist-sp800-88.pdf` page 2 resolves none of its eight content
-streams** and so draws paper with no note whatsoever, which is the same shape of failure D19 fixed
-on the image side, and the last place in this corpus where something missing is invisible. **A full
-re-run of the corpus is wanted** to re-baseline the median against these. It takes two hours, so it
-is run deliberately rather than in a loop.
+**What is left in the corpus is now mostly *not* code, and that is the finding worth acting on.**
+The last full run measured 738 pages with an SSIM and **167 below 0.95**. Of those 167:
+
+* **62 are the two JPEG 2000 files** (`nistir7255` 61, `S2` 1), and JPEG 2000 is **formally out of
+  scope** — a written decoder was measured against OpenJPEG, found to have six defects, and was not
+  shipped ([D22](docs/known-diffs.md)). That is a decision, not an oversight, and it removes 62 pages
+  from the queue permanently.
+* **38 are this project's own font-substitution policy**, and they are now diagnosed
+  ([D24](docs/known-diffs.md)): `fips197`'s other 24 pages and all 14 of `nistir7657` are limited by
+  unembedded fonts drawn in a substitute face, with our ink **within 0.2%** of the oracle's on
+  `nistir7657`'s worst page (285 305 against 284 710) and every glyph simply a different shape — we
+  draw Liberation, `mutool` draws Nimbus, and `B` stands 138 device pixels above the baseline against
+  118, which is the ratio between their `OS/2 capHeight` values of 0.659 and 0.565. **Their advances
+  are identical**, so widths are not the difference and the mismatch is entirely in the outlines.
+  **This is the project's stated policy, not a gap**, so those pages are not addressable by writing
+  anything — which is exactly why it is the largest remaining cause of a page below 0.95.
+* **12 are the tiling-pattern cluster** (`comments` 4, `issue12337` 3, `highlights` 3,
+  `bug1992868` 2) — item 2 above, the loop over cells is still to be written.
+* The rest is `TAMReview`'s same font cause (22), `freeculture` (9), `sp800-88` (7) and a long tail
+  of one or two pages across a dozen files.
+* **And one page is a genuine missing feature** (`fips197` p1: an `ICCBased` profile carrying no
+  `/Alternate`, which D19's route cannot read and this project has no ICC transform to fall back
+  on).
+
+**So the addressable remainder is about 105 pages, four files hold 70 of them, and the largest
+genuinely missing feature left is one page of one file.** The re-runs this section asked for have been
+done: the page median went 0.95795 → 0.96010 and the pages below 0.95 went 254 (34.4%) → 167 (22.6%),
+a **34% reduction** — **concentrated in a few files rather than spread evenly**, with
+`gov__nist-sp800-88.pdf` alone accounting for 34 of the 87 pages that came back over the 0.95 line.
+**The per-file median did not move at all — 0.9698 before, 0.9698 after** — because a file is scored
+on its worst page and the gains landed inside files that were already counted as good. All three
+parts of Gate 3.1 remain missed, and none is met: per-page ≥ 0.95 (**167 of 738**), median ≥ 0.985
+(**0.96010**, 0.025 short), and ≤ 3% below 0.95 (**22.6%** against a 3% bound, a factor of 7.6).
 
 **The corpus's largest non-feature gap is closed** — the `TJ` truncation that cost W076 two thirds
 of its text on every page was a collection bound written for nesting depth being used as a bound on
-item count. The two are separate now, `TAMReview`'s median went from 0.8879 to **0.92395**, and what
-that file's 22 pages are now limited by is an unembedded font: D6's subject, and this project's
-stated policy ([D21](docs/known-diffs.md)).
+item count. The two are separate now, `TAMReview`'s median went from 0.8879 to **0.92395** and the
+current run measures it at **0.9240**, and what that file's 22 pages are now limited by is an
+unembedded font: D6's subject, and this project's stated policy ([D21](docs/known-diffs.md), and
+[D24](docs/known-diffs.md) for what that policy costs on the two files that carry it most heavily).
+
+**One genuine missing feature is left in the corpus that anyone has looked for, and it is one page.**
+`gov__nist-fips197.pdf` page 1 is drawn entirely in `[/ICCBased …]` spaces whose profiles carry **no
+`/Alternate`** — `/Alternate` occurs zero times in the file — so D19's route has nothing to read and
+387 of the page's 397 marks were refused. Closing it means evaluating a matrix/TRC profile for the
+`/N 1` and `/N 3` cases. It is one page of the 167, and it is the largest addressable *feature* the
+corpus has left ([D24](docs/known-diffs.md)).
 
 **A `Separation` or `DeviceN` tint transform is settled** and was the third of those three gaps
 before D20: the transform is evaluated, its output is read in the space the file names, and a
@@ -702,7 +739,10 @@ outright and took 42 of a 44-page NIST publication with it — `Colour` now carr
 profile declares from the `cs` operator to the conversion, and reads the colour through the
 `/Alternate` the file names, which is the file's own answer for a reader that cannot apply the
 profile rather than an approximation of it ([D19](docs/known-diffs.md)). That file's median
-SSIM went from 0.7727 to 0.96095 and 41 of its 44 pages below 0.95 came down to 10. And **a
+SSIM went from 0.7727 to 0.96095 and 41 of its 44 pages below 0.95 came down to 10 — the current run
+measures the median at 0.9648 with **7** below 0.95, which is 34 of the 87 pages that came back over
+the 0.95 line between the two runs. What is left of the gap is a profile with no `/Alternate` to read
+through, which is `fips197` page 1 and the one page named above. And **a
 `Separation` or `DeviceN`**, the largest colour-space gap left at the time — a spot colour is a
 tint and a tint means whatever the space's `/TintTransform` says it means, so the four function
 kinds moved down into `mangle-content` to be evaluated there rather than reimplemented

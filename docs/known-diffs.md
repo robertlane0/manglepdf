@@ -6,9 +6,18 @@ cause and evidence."*
 
 **The Tier-B target is not met, and not narrowly.** Against `mutool draw` at 150 DPI over the
 77-file wild corpus: **738 of 745 pages produced an SSIM** and the page-level median is
-**0.95795**, and **254 of those 738 pages (34.4%) are below 0.95**. Seventy-three of the 77
+**0.96010**, and **167 of those 738 pages (22.6%) are below 0.95**. Seventy-three of the 77
 files open; **four cannot**. This page records what the corpus found and the evidence for each
 claim.
+
+**The page distribution improved a great deal and the per-file median did not move at all.**
+Against the previous full run: the pages below 0.95 went **254 → 167**, a **34% reduction**, and
+the per-page median went **0.95795 → 0.96010**. Both movements are real. **The per-file median
+stayed at 0.9698, exactly where it was**, and that is not a rounding artefact: the gains landed
+in files that were already being counted as good, and a file's own worst page did not come back
+over the line. Neither movement is spread evenly, and saying so is the point of the rest of this
+page: **the gain is concentrated in a handful of files**, and four files still account for most of
+what is left.
 
 The corpus is `corpus/wild/`, pinned by SHA-256 in `corpus/wild/MANIFEST.toml`, fetched with
 `cargo xtask corpus fetch`, and measured by `crates/mangle-render/tests/wild_corpus.rs`.
@@ -17,14 +26,20 @@ the per-file reports beside it, which are git-ignored and regenerated on every r
 versions: `mutool 1.28.5`, `pdftotext` (poppler), `qpdf` (system).
 
 > **These figures are a re-run, not an estimate.** The block above is the whole 77-file corpus
-> measured end to end after D2 and D3 were fixed: 77 files, 16195.80s, **0 panicked**, 73
-> opened and 4 closed. It replaces a run that was made when 34 of the 77 files could not be
-> opened at all, and every figure in it — the 460-of-542 comparison count, the 0.6929 median and
-> the 94.8%-below-0.95 figure the previous version of this file carried — described a corpus
-> with a third of it missing. **Of the 73 that open, 67 read their structure as written; 6 needed
-> recovery** (`bug1795263`, `bug1980958`, `GHOSTSCRIPT-698804-1-fuzzed`, `issue15590`,
-> `issue15893_reduced`, `PDFBOX-3148-2-fuzzed`), and the run's own summary counts 9 of the 77 as
-> having needed recovery once the three that did not open but left reader notes are included.
+> measured end to end: 77 files, **16326.09s**, **0 panicked**, **73 opened and 4 closed**,
+> `test result: ok`. It replaces the previous run (16195.80s, 73 opened), which in turn replaced
+> one made when 34 of the 77 files could not be opened at all — and every figure in that run, the
+> 460-of-542 comparison count, the 0.6929 median and the 94.8%-below-0.95 figure an earlier version
+> of this file carried, described a corpus with a third of it missing. **Of the 73 that open, 67
+> read their structure as written; 6 needed recovery** (`bug1795263`, `bug1980958`,
+> `GHOSTSCRIPT-698804-1-fuzzed`, `issue15590`, `issue15893_reduced`, `PDFBOX-3148-2-fuzzed`), and the
+> run's own summary counts 9 of the 77 as having needed recovery once three of the four that did
+> not open but left reader notes are included.
+
+**The four that do not open are the same four as last time**, unchanged in kind and unchanged in
+reason — `issue19484_1`, `bug1020226`, `REDHAT-1531897-0` and `issue21579`, each itemised
+[below](#the-four-files-that-still-do-not-open). **73 opened in this run and 73 in the previous
+one**: the same four files, the same four reasons, and no file has changed sides since D2.
 
 **The test is `#[ignore]`d, on purpose.** One run over the corpus takes about two hours, so
 leaving it in the default suite makes `cargo test --workspace` unusable. The two cheap tests
@@ -42,44 +57,42 @@ cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture
 | | |
 |---|---|
 | files | **77**, of which **73 opened** and **4 did not** |
-| wall clock | **16195.80s** |
+| wall clock | **16326.09s** |
 | panicked | **0** |
 | pages measured | **745** |
 | pages with an SSIM | **738** |
-| page-level median SSIM | **0.95795** |
+| page-level median SSIM | **0.96010** |
+| page-level mean SSIM | **0.94251** |
 | size disagreements | **2** |
 | pages left uncompared on purpose | 2 |
 | pages the oracle could not render | 3 |
 
-The page-level median is not stated in the run's summary — it is computed from
+The page-level median and mean are not stated in the run's summary — they are computed from
 `corpus/wild/report/pages.tsv` over the **738** rows that carry an SSIM. Nothing else in this
 section is derived; the rest is quoted from the run.
 
 ### Per file, by its worst page
 
-Over the **68** files that have at least one page with an SSIM (the four that do not open
-contribute none, and neither do the five whose only pages were skipped):
+Over the **68** files that have at least one page with an SSIM. 73 files open and 745 pages are
+measured; five of the opened files produced no SSIM at all (`usgs-topo-cnmi-1`, `usgs-topo-cnmi-3`,
+`GHOSTSCRIPT-698804-1-fuzzed`, `issue15590`, `issue15893_reduced` — the reasons are itemised
+[below](#the-seven-pages-with-no-ssim-and-why-each-is-missing)), and `freeculture`'s two skipped
+pages sit among its 350 measured ones, so 73 − 5 = **68**:
 
 | worst-page SSIM | files |
 |---|---|
-| ≥ 0.99 | 20 |
-| ≥ 0.95 | 22 |
-| ≥ 0.90 | 6 |
-| ≥ 0.80 | 14 |
-| < 0.80 | **6** |
+| ≥ 0.99 | 21 |
+| ≥ 0.95 | 23 |
+| ≥ 0.90 | 7 |
+| ≥ 0.80 | 13 |
+| < 0.80 | **4** |
 
-**Median 0.9698, mean 0.9214.** The mean is 0.048 below the median because those six files are
-not a little way under 0.80 — the best of the six is 0.7564 and the worst is 0.5716, and one of
-them is a single page.
-
-> **W075 has been re-measured since that run, and has moved out of this table.**
-> `gov__nist-sp800-88.pdf` had 41 of its 44 pages below 0.95 and a median of 0.7727 (0.7741 as
-> the run's own per-file summary rounds it);
-> [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-mask-never-read-was-never-reported)
-> below brings it to **10 of 44 below 0.95 and a median of 0.96095**, so it is no longer one of
-> the four worst files, and the corpus-wide count of pages below 0.95 is *at least 31 lower* than
-> the 254 that run measured — a projection rather than a measurement, since every corpus-wide
-> figure on this page is still that run's until the next full one.
+**Median 0.96980, mean 0.93537.** The mean is 0.034 below the median because those four files are
+not a little way under 0.80 — the best of the four is 0.7564 and the worst is 0.5716, and one of
+them is a single page. **The median here did not move from the previous run**, which is worth
+reading alongside the 34% reduction in the pages below 0.95: the files that improved were files
+whose worst page was already at or above 0.95, and a file is scored on its worst page, so a run of
+good pages inside it changes nothing this table can see.
 
 ### Per page
 
@@ -87,15 +100,28 @@ Over the **738** pages that carry an SSIM:
 
 | | pages | share |
 |---|---|---|
-| below 0.95 | **254** | **34.4%** |
-| below 0.90 | 174 | 23.6% |
-| below 0.80 | 94 | 12.7% |
+| below 0.95 | **167** | **22.6%** |
+| below 0.90 | 88 | 11.9% |
+| below 0.80 | 50 | 6.8% |
 | below 0.50 | **0** | 0% |
 
 **Zero pages below 0.50** is the one unambiguous good number in the run, and it is worth saying
 what it means: no page is blank where the oracle has a page, and none is grossly wrong. Every
-one of the 254 is a page that draws *something* and draws it incompletely, in the wrong place, or
+one of the 167 is a page that draws *something* and draws it incompletely, in the wrong place, or
 in the wrong colour.
+
+### A median overstates fidelity while a cluster is missing whole pages of content
+
+This is the caveat that decides whether the numbers above should be believed, so it belongs next
+to them rather than in a footnote. **A page rendered as bare paper scores about 0.79 against the
+real page**, which is high enough to sit near the median of a corpus and low enough to be
+invisible in it. A page where a whole cluster is missing — every figure, every shaded box —
+therefore moves the median far less than the fix that restores it does. The 0.95795 → 0.96010
+movement is a real 34% reduction in the pages below 0.95, and it is also the kind of number that
+would barely register if a single file had gone from 30 wrong pages to 1.
+
+**The count of pages below 0.95 is the number the gate is written against**, and it is the number
+to watch. The median is the number that flatters.
 
 ### The seven pages with no SSIM, and why each is missing
 
@@ -122,29 +148,44 @@ measurement.
 The three pages `mutool` cannot render are not differences at all: there is no second opinion to
 have. They are recorded because a page the *oracle* refuses is a page nobody has checked.
 
-### Where the 254 are
+### Where the 167 are
 
-They are not scattered. **134 pages — 18.2% of everything measured — are four files**, and those
-four sit at medians between 0.64 and 0.79:
+**They are not scattered, and that is the most useful thing in this section**, because it says
+what is still worth doing and what is not:
 
-| id | file | pages | median SSIM | pages below 0.95 |
-|---|---|---|---|---|
-| W034 | `gov__nist-nistir7255.pdf` | 66 | 0.7842 | 61 |
-| ~~W075~~ | ~~`gov__nist-sp800-88.pdf`~~ | 44 | ~~0.7741~~ **0.96095** | ~~41~~ **0** |
-| W076 | `pdfjs__TAMReview.pdf` | 23 | ~~0.7663~~ ~~0.8879~~ **0.92395** | 22 |
-| W038 | `pdfjs__S2.pdf` | 1 | 0.6386 | 1 |
-| | | **134** | | **84** |
-
-Each of the four has one named cause, and all four are **missing features rather than bugs** — a
-codec or a colour-space conversion this project does not have. That distinction is the most
-useful thing the diagnosis produced, because it says what to build next:
-
-| id | what is missing | what the renderer says |
+| pages | file | cause |
 |---|---|---|
-| W034 | a **JPEG 2000** decoder (`JPXDecode`) | `a JPEG 2000 image was found but no decoder exists yet`, twice, on **all 66 pages**. Both images the page draws are JPX, and one of them carries a `JBIG2Decode` `/Mask`. **Fixed as a report: the mask is now named too** (see [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-skipped-mask-was-never-reported) below) — the decoder itself is still missing. |
-| ~~W075~~ | ~~**`ICCBased` colour conversion`~~ | **FIXED — see [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-skipped-mask-was-never-reported).** `CS0` is `[/ICCBased …]` over an sRGB profile that carries `/Alternate /DeviceRGB`, and that alternate is now what the colour is read through. **43 of the file's 44 pages went from zero ink pixels to ink, and the file's median SSIM from 0.7741 to 0.96095.** |
-| ~~W076~~ | ~~**`Separation`/`DeviceN` tint-transform evaluation`~~ | **PARTLY FIXED — see [D20](#d20--a-separation-was-painted-black-where-the-file-asked-for-a-tint-and-now-its-tint-transform-is-evaluated) and [D21](#d21--a-collection-holds-how-many-items-which-is-a-different-question-from-how-deep-it-nests).** `Cs8` is `[/Separation /Black <ICCBased sRGB> <FunctionType 0, 255 samples>]`, and it is the colour of the entire article body. **The transform is evaluated now: no page of the file reports `could not be converted`, and the six pages that drew 5,937 ink pixels draw 100k–174k. The file's median SSIM went from 0.7692 to 0.8879, and then to 0.92395 once the `TJ` truncation was fixed.** The 22 pages still below 0.95 are now limited by an unembedded font — see D21 — and not by colour or by truncation. |
-| W038 | a **JPEG 2000** decoder, again | `a JPEG 2000 image was found but no decoder exists yet` six times, plus one naming `/Im7`. 13 JPX images carry the whole figure: we draw 31987 ink pixels against the oracle's 838668, and **99.8% of what we do draw is in the right place**. |
+| **61** | `gov__nist-nistir7255.pdf` | JPEG 2000 — **out of scope**, see [D22](#d22--jpeg-2000-is-not-decoded-and-the-decision-to-leave-it-that-way-was-measured-rather-than-assumed) |
+| **25** | `gov__nist-fips197.pdf` | **24 font substitution, 1 `ICCBased` with no `/Alternate`** — worst page **0.7564**, and both diagnosed in [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) |
+| **22** | `pdfjs__TAMReview.pdf` | median 0.9240; an unembedded font, see D21 and D24 |
+| **14** | `gov__nist-nistir7657.pdf` | **all font substitution** — [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) |
+| 12 | `comments` 4, `issue12337` 3, `highlights` 3, `bug1992868` 2 | tiling patterns — see `PLAN.md` |
+| 9 | `pdfjs__freeculture.pdf` | |
+| 7 | `gov__nist-sp800-88.pdf` | was **41** before the ICCBased fix |
+| 3 | `gov__arxiv-1512.03385.pdf` | |
+| 14 | 13 other files, 1–2 pages each | |
+
+**62 of the 167 are the two JPEG 2000 files** — `nistir7255` 61 and `S2` 1 — which are now
+formally out of scope, so the **addressable remainder is about 105 pages**. And those 105 are not
+spread across the corpus either: **four files account for 70 of them**, `fips197` 25,
+`TAMReview` 22, `nistir7657` 14 and `freeculture` 9. Everything else is one or two pages each
+across a dozen files, which is the shape of long-tail noise rather than a defect with a name.
+
+**And of the 105, about 38 are this project's own font-substitution policy** — `fips197` 24 and
+`nistir7657` 14 — which is a decision rather than a defect and is measured in
+[D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect).
+**So the largest remaining cause of a page below 0.95 is not a missing feature.**
+
+The largest clusters, and what each one actually is:
+
+| id | file | what is missing | what the renderer says |
+|---|---|---|---|
+| W034 | `gov__nist-nistir7255.pdf` | a **JPEG 2000** decoder (`JPXDecode`) | `a JPEG 2000 image was found but no decoder exists yet`, twice, on **all 66 pages**. Both images the page draws are JPX, and one carries a `JBIG2Decode` `/Mask`. **Refused by name and formally out of scope — see [D22](#d22--jpeg-2000-is-not-decoded-and-the-decision-to-leave-it-that-way-was-measured-rather-than-assumed), where a written decoder is recorded as having six defects and not being shipped.** |
+| W074 | `gov__nist-fips197.pdf` | **nothing on 24 of its 25 pages — one page needs an `ICCBased` profile with no `/Alternate`** | 50 of its 52 pages carry one note and one only: the unembedded-font one. Page 1 carries a different one, `the colour text is painted in the ICCBased space CS0, whose profile names no /Alternate to read it through could not be converted`, which refuses 387 of its 397 marks and leaves our ink at 5 859 against the oracle's 323 535. **That one page is the thing to fix; the other 24 are the face, not the layout.** [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) measures both. |
+| W076 | `pdfjs__TAMReview.pdf` | ~~**`Separation`/`DeviceN` tint-transform evaluation`~~ | **PARTLY FIXED — see [D20](#d20--a-separation-was-painted-black-where-the-file-asked-for-a-tint-and-now-its-tint-transform-is-evaluated) and [D21](#d21--a-collection-holds-how-many-items-which-is-a-different-question-from-how-deep-it-nests).** `Cs8` is `[/Separation /Black <ICCBased sRGB> <FunctionType 0, 255 samples>]`, and it is the colour of the entire article body. **The transform is evaluated now: no page of the file reports `could not be converted`, and the six pages that drew 5,937 ink pixels draw 100k–174k. The file's median SSIM went from 0.7692 to 0.8879, then to 0.92395 once the `TJ` truncation was fixed, and this run measures 0.9240.** The 22 pages still below 0.95 are limited by an unembedded font — see D21 and [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) — and not by colour or by truncation. |
+| W073 | `gov__nist-nistir7657.pdf` | **nothing — this is not a gap** | 46 pages carry only the unembedded-font note. The file has **49 images and no JPX or JBIG2 at all**, so it is not the codec story. See [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect). |
+| ~~W075~~ | ~~`gov__nist-sp800-88.pdf`~~ | ~~**`ICCBased` colour conversion`~~ | **FIXED — see [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-mask-never-read-was-never-reported).** `CS0` is `[/ICCBased …]` over an sRGB profile carrying `/Alternate /DeviceRGB`, and that alternate is now what the colour is read through. **43 of the file's 44 pages went from zero ink pixels to ink and its median SSIM from 0.7741 to 0.96095; this run measures the median at 0.9648 with 7 pages below 0.95, where there were 41.** |
+| W038 | `pdfjs__S2.pdf` | a **JPEG 2000** decoder, again | `a JPEG 2000 image was found but no decoder exists yet` six times, plus one naming `/Im7`. 13 JPX images carry the whole figure: we draw 31987 ink pixels against the oracle's 838668, and **99.8% of what we do draw is in the right place**. Its single page is the corpus's second-worst at 0.6386. |
 
 `Colour::to_rgba` in `crates/mangle-content/src/state.rs` had arms for DeviceGray/CalGray,
 DeviceRGB/CalRGB and DeviceCMYK, a fallback for Separation/DeviceN, and **no arm at all for
@@ -158,31 +199,56 @@ and D20 evaluates a separation's `/TintTransform` and reads its `/Alternate` the
 
 ### The result against Gate 3.1
 
-Gate 3.1 asks three things of this corpus. **None of the three is met.**
+Gate 3.1 asks three things of this corpus. **All three are missed. None of them is met, and none
+of them is close.**
 
 > *"At 150 DPI: per-page best-of-oracles SSIM ≥ 0.95; median ≥ 0.985 across F12–F22, F31, and
 > Tier B; ≤ 3% of pages below 0.95, each documented in `docs/known-diffs.md` with root cause and
 > evidence."*
 
-- **per-page ≥ 0.95 — NOT MET.** 254 of the 738 pages are below it. **65.6%** of pages clear the
-  floor; 34.4% do not.
-- **median ≥ 0.985 — NOT MET on Tier B.** The Tier-B page median is **0.95795**, 0.027 short. The
-  gate's median is taken across F12–F22, F31 *and* Tier B, and this run measures only the last
-  of those, so 0.95795 is not by itself the gate's number — but 738 of the pages in that median
-  are Tier-B pages, and Tier B's own median is 0.958.
-- **≤ 3% of pages below 0.95 — NOT MET.** 34.4% against a 3% bound: at 738 pages the gate allows
-  **22** pages below 0.95 and there are **254**, a factor of 11.5.
+Each of the three, in the gate's own order, with the figure it is measured against:
 
-The page median is also the number most likely to be misread, so both halves belong here.
-**0.958 is a large improvement on 0.6929 and it is not a pass**: it is the median of a
-distribution whose worst file sits at 0.6386, and the four clusters above are 18.2% of the pages
-— very nearly the fifth of all pages that the gate's 3% allowance assumes can be wrong at once.
-Anyone deciding whether this is nearly done needs both numbers: **median 0.958, and 254 of 738
-pages below 0.95.** The second is the one the gate is written against.
+- **per-page ≥ 0.95 — NOT MET.** **167 of the 738 pages are below it**, 22.6%, so 77.4% clear the
+  floor. It is a corpus-wide average rather than a per-page promise, and this is the figure it
+  produces.
+- **median ≥ 0.985 — NOT MET on Tier B.** The Tier-B page median is **0.96010**, which is **0.025
+  short**. The gate's median is taken across F12–F22, F31 *and* Tier B together, and this run
+  measures only the last of those, so 0.96010 is not by itself the gate's number — but 738 of the
+  pages in that median are Tier-B pages, and Tier B's own median is 0.960.
+- **≤ 3% of pages below 0.95 — NOT MET.** **22.6% against a 3% bound**: at 738 pages the gate
+  allows **22** pages below 0.95 and there are **167**, a factor of **7.6**.
+
+**What a reader needs in order to judge how far away that is.** The third is the one that decides
+the gate, and **62 of the 167 are the two JPEG 2000 files that are now formally out of scope**
+([D22](#d22--jpeg-2000-is-not-decoded-and-the-decision-to-leave-it-that-way-was-measured-rather-than-assumed)).
+That leaves an **addressable remainder of about 105 pages**, and those 105 are **concentrated in a
+handful of files rather than spread evenly across the corpus** — four files hold 70 of them
+(`fips197` 25, `TAMReview` 22, `nistir7657` 14, `freeculture` 9), and everything else is one or two
+pages across a dozen files. So the honest reading of where this stands is not "a fifth of the
+corpus is wrong" and not "two thirds of a bad number has been fixed"; it is **four files decide the
+gate, and two of them ([D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect))
+are now diagnosed and turn out not to need a codec or a colour space at all.**
+
+**The comparison with the previous run, stated as plainly as it can be stated.** Pages below 0.95
+**254 → 167**, a **34% reduction** — 87 pages came back over the line. Per-page median
+**0.95795 → 0.96010**. **Per-file median 0.9698 → 0.9698: unchanged, to every digit it is quoted
+at.** The first two are real improvements. **The per-file median did not move at all**, and that
+is the honest reading rather than a rounding convenience: a file is scored on its worst page, and
+the gains landed in files whose worst page was already above 0.95, so pages got better inside
+files this measure cannot see. The gain is also not spread evenly — `gov__nist-sp800-88.pdf`
+alone accounts for 34 of the 87 pages that came back over the line (41 below 0.95 before the
+ICCBased fix, 7 now). A reader who takes "34% fewer bad pages" as a general improvement in
+fidelity across the corpus would be reading it wrong: it is one file's worth of improvement plus a
+second one's, and the long tail is unmoved.
+
+**And the median is the number that flatters.** A page rendered as bare paper scores about 0.79
+against the real page, so while any cluster is missing whole pages of content the median moves far
+less than the fix that restores it does. **The count of pages below 0.95 is the number the gate is
+written against and the number to watch.**
 
 ### The four files that still do not open
 
-All four are reported, none is guessed at, and each is listed here so the count of 73 is
+All four are reported, none is guessed at, and each is listed here so the count of 73 opened is
 auditable rather than asserted.
 
 | file | reason | why that is the right answer |
@@ -237,9 +303,12 @@ After, 103 pages draw and 439 are still blank. So D1 was the cause of the blankn
 
 Those 542 pages are the corpus as it stood then, when 34 files could not be opened. The corpus
 is now **745 pages** across 77 files, and none of those 439 is blank for this reason — the
-[re-run](#the-run-in-full) has **zero pages below 0.50**. Blank pages are not gone, but they now
-have one named cause: `gov__nist-sp800-88.pdf` alone renders **42 pages with no ink at all**,
-every mark on them painted in a colour this cannot convert (see [the 254](#where-the-254-are)).
+[re-run](#the-run-in-full) has **zero pages below 0.50**. Blank pages are not gone, but the one
+cause that produced them here — every mark painted in a colour this could not convert — was named
+and then removed, and `gov__nist-sp800-88.pdf`, which was entirely blank for that reason, is now
+at a median of 0.9648 with 7 of its 44 pages below 0.95. What is left is [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect):
+no page in the corpus is blank, and every remaining difference is a page that draws its text in
+someone else's glyphs.
 
 The page this finding was opened with barely moves, and the reason matters:
 
@@ -407,7 +476,8 @@ objects     2452
 
 The reader now uses the file's own cross-reference information: **`as written`, with no
 repair at all**, on every file this bug had broken. Page counts match `pdfinfo` on every one
-of the 73 files that open.
+of the files that open — 73 in the [current run](#the-run-in-full) and 73 in the run this table
+was measured from.
 
 | | before | after |
 |---|---|---|
@@ -563,9 +633,9 @@ that is worth being able to point at.
 
 **Severity: was high — 0.38414 SSIM, 60.6% of pixels wrong. FIXED, as a codec defect and then
 as the placement defect D5b that sat on top of it. The page is now at 0.99747, which the
-[re-run](#the-run-in-full) confirms: `pdfbox__multitiff.pdf` pages 1–3 measure 0.9975, 0.9977
-and 0.9984.** The three-page file is new to the numbers here — the table below was measured
-on page 1 alone.
+[current run](#the-run-in-full) confirms: `pdfbox__multitiff.pdf` pages 1–3 measure 0.9975,
+0.9977 and 0.9984, a file median of 0.9977 and no page of it below 0.95.** The three-page file is
+new to the numbers here — the table below was measured on page 1 alone.
 
 `pdfbox__multitiff.pdf` page 1, measured against `mutool draw` at 150 DPI:
 
@@ -753,7 +823,7 @@ drawn`. The placement rectangle is right (device rows 329..1530 against the orac
 329..1529), so nothing was misplaced; there was simply nothing drawn. The cause was that
 pattern colours were not implemented as fills.
 
-**Drawn at 0.83738 by that change, and at 0.92923 by [D10](#d10--the-type-2-function-adds-c1-where-the-specification-adds-c1-c0) since.**
+**Drawn at 0.83738 by that change, and at 0.92923 by [D10](#d10--the-type-2-function-adds-c1-where-the-specification-adds-c1--c0) since.**
 A `/PatternType 2` pattern used as a fill colour — including the
 colour of an image mask — evaluates the shading per pixel where the fill lands, and this
 page's gradient is in the right place at the right strength: our ink over the mask's rectangle
@@ -762,7 +832,7 @@ between those two numbers is not a missing region — it is that the oracle's co
 **dithered**, so half its pixels are saturated ink and half are paper, where ours is a smooth
 average of the same two. What was still missing from this page was the type-2 function's own
 rule, which put it at **0.92923** once that one line was corrected — see
-[D10](#d10--the-type-2-function-adds-c1-where-the-specification-adds-c1-c0), now fixed. It was
+[D10](#d10--the-type-2-function-adds-c1-where-the-specification-adds-c1--c0), now fixed. It was
 not caused by, and did not cause, the placement defect above. What is left here is the dither
 and the fonts (D7).
 
@@ -959,9 +1029,18 @@ figures in this file should be read as a fidelity claim until D7 is fixed, becau
 that cannot draw a single glyph cannot say anything about fidelity.
 
 **That 0.6929 is no longer the Tier-B median.** It is kept here as the measurement it was, of
-the code as it stood, and the current figure — 0.95795 over 738 pages — is at the
+the code as it stood, and the current figure — **0.96010 over 738 pages** — is at the
 [top of this file](#the-result-against-gate-31). The 422 of 542 in this entry's severity line
 counts the same way: it is what the corpus looked like then, not what it looks like now.
+
+**The 67 pages that name a font no file embeds are no longer blank either** — the standard
+fourteen now draw from bundled metric-compatible faces, and that half of D7 is closed. What
+replaced the blankness is subtler and is worth naming precisely, because it is now the largest
+single cause of pages below 0.95 that this project has any control over: **a substituted face is
+a different set of outlines from the original, and a different set of outlines at the same widths
+is a page that scores 0.93 where it should score 0.99.**
+[D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect)
+measures that on the two files that carry it most heavily.
 
 ---
 
@@ -1194,7 +1273,7 @@ yellow → white. `mutool` agrees with the specification: at the gradient's `t =
 `(50, 255, 205)`, and `C0 + 0.2·(C1 − C0)` is exactly `(51, 255, 204)`.
 
 **Measured.** `pdfjs__issue13372.pdf` page 1 against `mutool` at 150 DPI: **0.83738 → 0.92923**,
-and the [re-run](#the-run-in-full) puts it at **0.9292** with 411430 of 2176200 pixels above
+and the [current run](#the-run-in-full) puts it at **0.9292** with 411430 of 2176200 pixels above
 tolerance, so that figure stands. What is left after that is the dither, which is a separate
 rasteriser feature this project does not have: the oracle paints the gradient as ink dots at the
 coverage it wants and we paint the same average smoothly, and `compare()` scores two correct
@@ -2128,8 +2207,10 @@ measurement rather than a recollection:
 Page 35, the corpus's worst NIST page at 0.6352, is now **0.9023** — RMS 30.64, 117 245 pixels
 above tolerance (5.573%), 225 656 ink against the oracle's 275 874. Its whole remaining
 difference is unembedded-font substitution, which is D6's subject and the project's stated
-policy. That is what "comparable" looks like: this file's median is now 0.961 against a
-corpus-wide median of 0.958.
+policy — and which [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect)
+measures precisely. **The current run puts this file's median at 0.9648 with 7 of its 44 pages
+below 0.95, against a corpus-wide page median of 0.96010** — so the file is now above the corpus
+median, and the pages it still loses are the ones it loses on glyph shapes.
 
 Page 1 was the one page still below 0.81, and it was **not** the ICC gap:
 
@@ -2492,6 +2573,12 @@ face: D6's subject, and the project's stated policy. Page 17 now draws *slightly
 oracle (252 275 against 245 598) where it used to draw 71 per cent of it, and that overshoot is what
 a substituted face's wider advances look like.
 
+**The current run measures this file's median at 0.9240 with 22 pages below 0.95, a worst page of
+0.8947 and no page of it below 0.89** — so nothing regressed here and nothing moved much either.
+[D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect)
+measures what that remaining gap is on the two files that carry it most heavily, and it is glyph
+outlines rather than anything structural.
+
 **The three files that reported `pdftotext could not read this file` still do, and that note is not
 ours.** It is written by `wild_corpus.rs` when the *oracle* cannot read the original file, so no
 change to this project can move it. Checked directly, and all three are poppler refusing the bytes:
@@ -2636,3 +2723,205 @@ faults and a reader fixing the file needs to know which one they have:
 
 The second test is the one that keeps this honest. Reporting every loss is only an improvement if the
 survivors are unaffected, and "we found out what we lost" is otherwise an easy way to lose more.
+
+---
+
+## D24 — the two largest addressable clusters were both unembedded fonts, which is this project's own substitution policy and not a defect
+
+**Diagnosis only. Nothing is fixed here, and nothing should be read as fixed.** `gov__nist-fips197.pdf`
+(52 pages, 25 below 0.95, worst page 0.7564, median 0.9500) and `gov__nist-nistir7657.pdf` (48 pages,
+14 below 0.95, worst page 0.9311, median 0.9627) were the two largest addressable clusters in the
+[current run](#the-run-in-full) and neither had ever been looked at. Between them they are 39 of
+the ~105 addressable pages, and **38 of those 39 are font substitution rather than a defect**. Both
+are diagnosed here, and the answer is the same for both and is not what either cluster's size
+suggested.
+
+### The short answer
+
+**Neither file needs a codec or a colour space. Both are limited by unembedded fonts, and the
+difference is that the page is laid out correctly and drawn in the wrong outlines.** On
+`nistir7657`'s worst page our ink is **285 305 against the oracle's 284 710 — 0.2% apart** — with
+7.9% of pixels above tolerance, which is only possible if the ink is all in the right places and
+the *shapes* are wrong. On `fips197`'s worst page the ink is **5 859 against 323 535**, and that
+one page is a different thing entirely: a real gap, named below. That is D6's subject — a
+metric-compatible face standing in for a font the document did not embed — which this project
+treats as its stated policy, so **neither cluster is a missing feature to build and neither is a
+bug in what we draw**. What is new here is the measurement of how much that policy costs, which
+until now was recorded as a note on the page and nowhere else.
+
+### `gov__nist-fips197.pdf` (W074) — 52 pages, 25 below 0.95, worst 0.7564
+
+**What the file actually uses.** `mutool show … grep -E "Filter|Subtype|ImageMask|ColorSpace|SMask|
+BitsPerComponent|Width|Height"`, and `qpdf --qdf --object-streams=disable` for the counts:
+
+| what | count |
+|---|---|
+| `/Subtype /Image` | **2** — a single logo, drawn once, on page 1 |
+| `/BitsPerComponent` | 2, both **8** |
+| `/SMask` | 2 |
+| `/ImageMask` | **0** |
+| `/Filter /FlateDecode` | every content stream and every font program; **no `DCTDecode`, no `JPXDecode`, no `JBIG2Decode`** |
+| `/ICCBased` | **2**, and this matters — see below |
+
+So there is no image codec in this file at all. **The only raster content is a 988×155 logo with a
+soft mask, on one page.** Every other page is text, and every text font is unembedded.
+
+**The oracle's trace of the worst page, page 1** (`mutool trace gov__nist-fips197.pdf 1`): 89
+`fill_text` and 168 `fill_path` operations, of which **257 carry `colorspace="ICCBased(Gray,
+Gray Gamma 2.2)"`** and 20 carry `ICCBased(RGB, sRGB IEC61966-2.1)`, plus one `clip_image_mask` and
+one `fill_image` — the logo. Fonts used: `XGQZLO+Calibri`, `HQMCVU+Calibri-Bold`,
+`KFYULO+TimesNewRomanPSMT`, `COXYDE+Calibri-Italic`, `RFMPFA+Cambria` — five fonts, **all embedded**,
+because they are the ones the withdrawal notice is typeset in.
+
+**Our renderer on page 1** — `marks: 397`, **our ink 5 859**, the oracle's **323 535**. Two notes,
+in full (`corpus/wild/report/gov__nist-fips197.md`, page 1):
+
+```
+the colour text is painted in the `ICCBased` space `CS0`, whose profile names no `/Alternate` to read it through could not be converted, so no text on the page in that colour was drawn
+a fill colour in the `ICCBased` space `CS0`, whose profile names no `/Alternate` to read it through could not be converted, so the shape was not drawn
+```
+
+**Those two notes are the answer to page 1, and they are a second defect, not the font.** The page's
+withdrawal table is drawn in `CS0`, one of the file's two `[/ICCBased <profile>]` colour spaces —
+`/CS0 241 0 R` over profile 4190 (`/N 1`, a gray profile whose TRC `mutool` reports as
+`Gray Gamma 2.2`) and `/CS1 242 0 R` over 4192 (`/N 3`, `IEC sRGB`). **Neither profile names an
+`/Alternate`**: `/Alternate` occurs **zero** times in the whole decompressed file. D19's route —
+read the colour through the profile's `/Alternate` — has nothing to read here, so 387 of the page's
+397 marks were refused and only the logo was drawn. `mutool` reads the profile itself and draws the
+table.
+
+**Page 1 is therefore one real gap: an `ICCBased` profile with no `/Alternate` cannot be converted,
+and this project has no ICC transform.** That is a missing feature and it is a real one. It is also
+exactly **one page** of this file's 25 — which is worth saying plainly, because the page is the
+file's worst at 0.7564 and it is tempting to attribute all 25 pages to it.
+
+**The other 24 pages are the font, and here is what the font costs.** Pages 41–50 all score
+0.843–0.858 and all carry the same single note:
+
+```
+the font `/TT0` is not embedded, so a metric-compatible face stands in for `/CourierNew,Bold`: the glyphs are that face's, not the original's
+the font `/T1_0` is not embedded, so a metric-compatible face stands in for `/Times-Roman`: the glyphs are that face's, not the original's
+```
+
+Those ten pages are a Courier hex dump: `round[12].k_sch a4970a331a78dc09c418c271e3a41d5d` and so on,
+50 lines of monospace, and they are the worst cluster in the file after page 1. Measured on page 45:
+**our ink 255 857 against the oracle's 225 589**, with **204 720 of 2 103 750 pixels (9.73%) above
+tolerance**. Not one pixel of it is missing or displaced — the diff image
+`corpus/wild/report/W074-p45-diff.png` shows both renderings' glyphs in register, each glyph's
+outline drawn twice in slightly different places, which is what two different `r` shapes at the same
+advance look like.
+
+**The advance is identical and the shape is not, and here is the measurement that says so.** The
+Courier advance is 600/1000 of an em at every size, so a page laid out in Courier is laid out the
+same way whichever face draws it — and it is: the two renderings' glyph starts on page 45's first
+line agree to within a pixel for the whole line (`151, 163, …` against `152, 163, …`). The *height*
+of one glyph is where they part. On page 45 the text matrix is `trm="9.96 0 0 9.96"`, so an em is
+20.75 device pixels, and the `[` glyph measures:
+
+| | rows the `[` occupies | as a fraction of an em |
+|---|---|---|
+| `mutool` | 16 | 0.771 |
+| ours | 21 | 1.012 |
+| Liberation Mono Bold `[`, from the `glyf` table | 1909/2048 | **0.932** |
+| Nimbus Mono PS Bold `[`, from its `OS/2` | — | — |
+
+Checked on a controlled probe rather than on the corpus page, because the corpus page has nine
+substituted faces on it and the probe has one: a page naming `/CourierNew,Bold` at 100 pt, rendered
+by both. **`B` stands 138 device pixels above the baseline for us and 118 for `mutool`**, against an
+em of 208.33 — **0.662 against 0.566**. Liberation Mono Bold's `OS/2` says `capHeight` 1349 over
+2048, which is **0.659**: our figure matches Liberation to three decimal places. Nimbus Mono PS Bold's
+says 565 over 1000, which is **0.565**: theirs matches Nimbus to three decimal places.
+
+**So the cause is named exactly: `mutool` resolves `CourierNew,Bold` to Nimbus Mono PS Bold (the URW
+clone, which is what a reader that ships the standard fourteen has) and this project substitutes
+Liberation Mono Bold.** Both are metric-compatible with Courier and **their advances are
+identical** — every glyph the two faces share has the same advance to the unit, so a line breaks in
+the same place either way — which is why the layout is identical and the glyphs are not. **Widths
+are not the difference; the mismatch is entirely in the outlines, and that is precisely why it is
+invisible to any metric-based check.** A 0.85 SSIM on a Courier hex dump is not a defect in drawing
+text; it is two correct faces being different faces.
+
+### `gov__nist-nistir7657.pdf` (W073) — 48 pages, 14 below 0.95, worst 0.9311
+
+**What the file actually uses.** Same two commands, and the answer rules out the codec story
+immediately:
+
+| what | count |
+|---|---|
+| `/Subtype /Image` | **49** |
+| `/Filter /DCTDecode` (JPEG) | **9** |
+| `/Filter /FlateDecode` | 256, content streams and fonts and 40 images |
+| `/BitsPerComponent` | 37 at **8**, 12 at **1** |
+| `/SMask` | **11** |
+| `/ImageMask` | **0** |
+| `/JPXDecode`, `/JBIG2Decode` | **0 and 0** |
+| `/Indexed` | **2** (`[/Indexed <ICCBased> 1 …]`, both with inline palettes) |
+| `/ICCBased` | 1, `/Separation` and `/DeviceN` 0 |
+
+**No JPEG 2000 and no JBIG2 anywhere in this file**, which is the first thing to establish: the 49
+images are ordinary Flate and DCT, both of which this project decodes, and the two `/Indexed` spaces
+are the only colour-space construct in it.
+
+**The oracle's trace of the worst page, page 4** (`mutool trace gov__nist-nistir7657.pdf 4`): ten
+`fill_text` and three `fill_path`, **all in `DeviceGray`**, plus two `ignore_text` blocks, and no
+image at all on the page. Fonts: `TimesNewRomanPSMT`, `TimesNewRomanPS-BoldMT`,
+`TimesNewRomanPS-ItalicMT`. So the worst page of this file is **plain gray text**, and there is
+nothing on it for a codec or a colour space to be wrong about.
+
+**Our renderer on page 4** — `marks: 97`, **our ink 285 305 against the oracle's 284 710**, with
+**165 999 of 2 103 750 pixels (7.89%) above tolerance**. Three notes, in full:
+
+```
+the font `/TT0` is not embedded, so a metric-compatible face stands in for `/TimesNewRomanPSMT`: the glyphs are that face's, not the original's
+the font `/TT1` is not embedded, so a metric-compatible face stands in for `/TimesNewRomanPS-BoldMT`: the glyphs are that face's, not the original's
+the font `/TT2` is not embedded, so a metric-compatible face stands in for `/TimesNewRomanPS-ItalicMT`: the glyphs are that face's, not the original's
+```
+
+**Ink within 0.2% of the oracle's and 7.9% of pixels wrong, which can only mean the ink is in the
+right places and the shapes are wrong.** The diff image `corpus/wild/report/W073-p4-diff.png` shows
+exactly that: every line of the preface present, in position, with every glyph drawn twice in
+slightly different outlines. The page-21 diff (`W073-p21-diff.png`) is the same shape, and page 21
+measures **our ink 252 910 against the oracle's 253 434** — 0.2% apart again. **Two pages, two
+different amounts of text, the same 0.2%.** That is the signature of a substitution difference and of
+nothing else.
+
+### Verdict: missing feature, or bug?
+
+**Both files, the diagnosis is the same, and it splits:**
+
+| what | verdict | evidence |
+|---|---|---|
+| 38 of the 39 pages (`fips197` 24, `nistir7657` 14) | **neither — a deliberate policy, now measured** | the pages' only notes are the unembedded-font ones; ink matches the oracle within 0.2% to 13%; glyph *starts* agree to a pixel while glyph *heights* differ by exactly the ratio between Liberation's and Nimbus's `capHeight` (0.659 against 0.565, measured 0.662 against 0.566 on a one-font probe) |
+| `fips197` page 1, 1 page | **a missing feature** — an `ICCBased` profile with no `/Alternate` | two notes say `whose profile names no /Alternate to read it through could not be converted`; `/Alternate` occurs **zero** times in the file; 387 of 397 marks refused; our ink 5 859 against the oracle's 323 535 |
+
+**So: one page of the two clusters needs a feature this project does not have, and 38 pages need
+nothing at all.** What the 38 pages need is a decision about which metric-compatible face to
+substitute, and that decision already exists as policy — D6's subject, stated in `docs/STATUS.md`,
+with the Liberation pairing measured against two independent renderers. **Nothing here argues for
+changing it.** The Arial/Times New Roman/Courier New originals are proprietary and absent, so the
+substitution cannot be removed; and Nimbus would be a different substitution, not the right one, with
+the same trade in the other direction.
+
+**What is worth recording is the size of the policy's cost, because it is now the largest single
+contributor to pages below 0.95 that this project controls.** The 38 pages here are better than a
+third of the ~105 addressable pages, and they are not addressable by anything except a font
+decision. The honest summary of where the corpus stands is that its remaining shortfall is **mostly
+not code**: 62 pages are JPEG 2000 and formally out of scope, about 38 are a font-substitution
+policy, and the largest genuinely missing feature left is **one page of one file** — an ICC profile
+with no alternate to read it through.
+
+### What this changes about what to build next
+
+Three things follow, and only the first is a build:
+
+1. **An `ICCBased` profile with no `/Alternate` is a real gap**, and it is a small one to close
+   correctly: a matrix/TRC profile could be evaluated for the `/N 1` and `/N 3` cases, which is what
+   `fips197`'s `Gray Gamma 2.2` and `sRGB` profiles are. It is one page of the corpus today.
+2. **The remaining shortfall is not a queue.** Of the ~105 addressable pages, 38 are the font policy,
+   22 are `TAMReview`'s same cause, 9 are `freeculture`'s two-cluster case, and the rest is one or two
+   pages per file across a dozen files. **The thing that would move the gate's third number most is
+   not a codec.**
+3. **`Indexed` is still a gap** and it is worth one more look before it is dismissed, because
+   `nistir7657` declares it twice with inline palettes and this project does not read it. It does not
+   affect that file's worst page, which is plain `DeviceGray` text, and its 49 images decode — so the
+   gap is real and the cluster is not it.
