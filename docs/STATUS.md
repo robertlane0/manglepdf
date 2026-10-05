@@ -237,8 +237,10 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   This draws an image mask painted in a pattern colour, which is what
   `pdfjs__issue13372.pdf` is: a portrait whose every pixel is a gradient rather than a
   sample. A `/PatternType 1` tiling pattern **now draws**: its cell is rendered once and repeated,
-  and `/PaintType 2` is reported by name rather than guessed at. A shading whose colour space is
-  `/Indexed` is reported rather than read as the grey its one-component function looks like.
+  and `/PaintType 2` is reported by name rather than guessed at. **No corpus file uses one** —
+  nine declare patterns and not one selects it, so this is spec completeness and not a fidelity
+  win ([D25](known-diffs.md)). A shading whose colour space is `/Indexed` is reported rather than
+  read as the grey its one-component function looks like.
   A pattern used as a *stroking* colour, or as the colour of text, is reported and not
   painted: this is a fill feature, and `Colour::to_rgba` now says a `Pattern` space is not a
   colour at all rather than handing a caller black, which is what a stroke in one used to get
@@ -993,7 +995,7 @@ concentrated in a handful of files too:
 | 25 | `gov__nist-fips197.pdf` | **diagnosed** (D24): 24 pages are the font-substitution policy, **1 page is a real gap** — an `ICCBased` profile with no `/Alternate` |
 | 22 | `pdfjs__TAMReview.pdf` | the same font-substitution policy |
 | 14 | `gov__nist-nistir7657.pdf` | **diagnosed** (D24): entirely the font-substitution policy |
-| 12 | `comments` 4, `issue12337` 3, `highlights` 3, `bug1992868` 2 | tiling patterns |
+| 12 | `comments` 4, `issue12337` 3, `highlights` 3, `bug1992868` 2 | **undiagnosed** — *not* tiling, which these files declare but never use ([D25](known-diffs.md)) |
 | 9 | `pdfjs__freeculture.pdf` | |
 | 7 | `gov__nist-sp800-88.pdf` | |
 | 3 | `gov__arxiv-1512.03385.pdf` | |
