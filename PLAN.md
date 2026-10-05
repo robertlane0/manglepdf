@@ -286,6 +286,16 @@ renderer that never has to ask the machine for a font.
    dashed differently from a flat one. A `/PatternType 1` tiling
    pattern needs a loop over cells in the pattern's own space — `/Matrix`, `/BBox`, `/XStep`,
    `/YStep` and paint type — and is reported by name rather than approximated with one cell.
+   **The pattern is now read, and the loop is not written.** `tiling_pattern` in `page.rs`
+   returns a `TilingPattern` — the cell's `/BBox`, the two steps, the `/Matrix`, the paint type
+   and the cell's own content stream — and `pattern_fill` still refuses a tiling paint by name,
+   because nothing runs a cell yet. Two of the read's decisions are load-bearing and are stated
+   in the code because they are the ones a renderer gets wrong silently: **a zero `/XStep` or
+   `/YStep` is a value, not an absence** (it means the cell is *not* repeated along that axis,
+   drawn once at the pattern-space origin), and **a negative step is legal** and is kept as
+   written. Only `/BBox` is refused rather than defaulted — there is no default clip, and one
+   invented from zeros is a texture that belongs to nobody — and an unreadable `/XStep` or
+   `/YStep` is refused too, each error naming the pattern and the entry at fault.
    Two defects found while building the fill have since been fixed: [D9](docs/known-diffs.md)
    (a filled path was transformed by the content stream's `cm` twice, so a fill under a
    scaled `cm` landed off the page and was drawn nowhere) and [D10](docs/known-diffs.md) (the

@@ -453,6 +453,160 @@ impl PatternKind {
     }
 }
 
+/// Whether a tiling pattern's cell carries its own colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "nothing reads this until the cell itself is drawn; only the tests do"
+)]
+enum PaintType {
+    /// `/PaintType 1`: the cell paints the colours it names. The default.
+    Coloured,
+    /// `/PaintType 2`: the cell is a stencil and takes the colour of the operator that set the
+    /// pattern, which is what lets one cell serve as any colour.
+    Uncoloured,
+}
+
+impl PaintType {
+    /// Read `/PaintType`, whose default is 1.
+    ///
+    /// Anything that is not 2 is read as 1. A `/PaintType` this does not recognise is not a
+    /// reason to refuse the pattern, and both readings hand the cell's colour to somebody
+    /// else anyway.
+    fn read(object: Option<&Object>) -> Self {
+        match object.and_then(Object::as_i64) {
+            Some(2) => Self::Uncoloured,
+            _ => Self::Coloured,
+        }
+    }
+}
+
+/// A `/PatternType 1` tiling pattern, read: one cell of it, and how the cells are laid out.
+///
+/// The cell is the pattern's own content stream clipped to its `/BBox`, repeated once per
+/// `/XStep` by `/YStep` cell in pattern space, so these numbers are everything the cell needs
+/// to know where it goes. Nothing here decides how to run the cell — that is the tiling loop,
+/// which walks the cells this describes.
+#[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "the tiling loop reads this; until it lands, only the tests do"
+)]
+struct TilingPattern {
+    /// The cell's clip, in pattern space. Required, and the one entry with no default that
+    /// means anything: an unclipped cell is not the file's cell.
+    bbox: PageRect,
+    /// How far the cells step along x. **Zero is a value and not an absence**: it means the
+    /// cell is not repeated along x, which is drawn once at the pattern-space origin. A
+    /// negative step is legal — the cells then run the other way — so it is kept as written.
+    x_step: f64,
+    /// The same along y, and independent of `x_step`: a pattern may repeat along one axis and
+    /// not the other, and reading the two as one "pitch" loses half of those patterns.
+    y_step: f64,
+    /// Pattern space to the space the pattern was set in. Absent is the identity, which is
+    /// what a pattern drawn where it is laid usually means.
+    matrix: Matrix,
+    /// Whether the cell carries its colour or takes the paint operator's.
+    paint_type: PaintType,
+    /// The cell's content stream, still filtered, carrying the cell's own `/Resources` in its
+    /// dictionary — a pattern's cell names its own fonts and images rather than the page's.
+    content: Object,
+}
+
+/// Read a tiling pattern: its cell, its pitch, its own space and its paint type.
+///
+/// Only `/BBox` is refused rather than defaulted, because the other entries all have
+/// defaults that mean something and this one does not: a cell clipped to a rectangle the file
+/// never wrote is a plausible texture that belongs to nobody. A missing or unreadable
+/// `/BBox`, and a `/XStep` or `/YStep` that is present but is not a number, each come back as
+/// an error naming the pattern and the entry at fault.
+///
+/// The default that is easiest to get wrong is the pitch. `/XStep` and `/YStep` both default
+/// to zero, and **zero means not tiled in that direction** — the cell is drawn once, at the
+/// pattern-space origin — so it must not be folded together with "the entry is not there".
+#[allow(
+    dead_code,
+    reason = "the tiling loop calls this; until it lands, only the tests do"
+)]
+fn tiling_pattern(
+    name: &str,
+    object: &Object,
+    resolve: &dyn Fn(&Object) -> Option<Object>,
+) -> Result<TilingPattern, String> {
+    let raw = object.clone();
+    let resolved = resolve(&raw).unwrap_or(raw);
+    // A tiling pattern's cell *is* its content, so a dictionary with no stream behind it has
+    // nothing to tile however well formed the rest of it is.
+    let Object::Stream(stream) = &resolved else {
+        return Err(format!(
+            "the tiling pattern `/{name}` is not a stream, so it has no cell to draw"
+        ));
+    };
+    // Entries are normally direct, but a file may make any of them indirect, and one that
+    // resolves to nothing is then left as the entry the file wrote.
+    let dict = &stream.dict;
+    let entry = |key: &str| -> Option<Object> {
+        dict.get(key)
+            .map(|found| resolve(found).unwrap_or_else(|| found.clone()))
+    };
+    let Some(bbox) = entry("BBox") else {
+        return Err(format!(
+            "the tiling pattern `/{name}` has no /BBox, so its cell has no clip and was not drawn"
+        ));
+    };
+    Ok(TilingPattern {
+        bbox: read_bbox(name, &bbox)?,
+        x_step: read_step(name, "XStep", entry("XStep"))?,
+        y_step: read_step(name, "YStep", entry("YStep"))?,
+        matrix: read_matrix(entry("Matrix").as_ref()),
+        paint_type: PaintType::read(entry("PaintType").as_ref()),
+        content: resolved.clone(),
+    })
+}
+
+/// The four numbers of a `/BBox`, or the error that says they are not there.
+///
+/// `Rect::from_object` would fill a missing number with zero, which for a `/BBox` silently
+/// clips the cell to something the file never said, so the four are read one at a time.
+fn read_bbox(name: &str, object: &Object) -> Result<PageRect, String> {
+    let unreadable = || {
+        format!(
+            "the /BBox of the tiling pattern `/{name}` is not four numbers, so its cell has no \
+             clip and was not drawn"
+        )
+    };
+    let Some(values) = object.as_array() else {
+        return Err(unreadable());
+    };
+    let mut numbers = [0.0f64; 4];
+    for (index, slot) in numbers.iter_mut().enumerate() {
+        *slot = values
+            .get(index)
+            .and_then(Object::as_f64)
+            .ok_or_else(unreadable)?;
+    }
+    let [x0, y0, x1, y1] = numbers;
+    Ok(PageRect::new(x0, y0, x1, y1))
+}
+
+/// One of `/XStep` or `/YStep`: how far the cells step in one direction.
+///
+/// Absent takes the specified default of zero, and a zero is carried through as itself —
+/// **the cell is not repeated in this direction**, which is drawn once rather than not at all.
+/// Filtering it out as though it meant nothing is what makes a one-cell pattern disappear.
+/// Negative is legal and kept: the cells run the other way, which is a picture, not a fault.
+fn read_step(name: &str, field: &str, object: Option<Object>) -> Result<f64, String> {
+    let Some(object) = object else {
+        return Ok(0.0);
+    };
+    object.as_f64().ok_or_else(|| {
+        format!(
+            "the /{field} of the tiling pattern `/{name}` is not a number, so the cells could \
+             not be placed"
+        )
+    })
+}
+
 /// A pattern resource, resolved: what kind it is, what is inside it, and how to reach it.
 struct PatternSource {
     kind: PatternKind,
@@ -2159,5 +2313,213 @@ mod tests {
                 image.height
             );
         }
+    }
+
+    // ── Tiling patterns: one cell, and how many of it there are ──────────────────
+
+    /// The content stream every pattern below carries as its cell. Written as bytes here
+    /// because the cell is what a pattern streams, not what it says about itself.
+    const CELL: &[u8] = b"1 0 0 rg 0 0 20 20 re f";
+
+    /// A tiling pattern stream carrying exactly the entries named, and nothing else.
+    ///
+    /// Built as an object rather than as a file so that what each test adds is visible in the
+    /// test: a fixture that also supplied `/XStep` to the case about a missing `/XStep` would
+    /// be testing the fixture.
+    fn tiling(entries: &[(&str, Object)]) -> Object {
+        let mut dict = Dict::new();
+        for (key, value) in entries {
+            dict.set(key, value.clone());
+        }
+        Object::Stream(mangle_syntax::Stream::new(dict, CELL.to_vec()))
+    }
+
+    /// A resolver for a pattern whose entries are all direct, which is how a file writes them
+    /// and what these tests write: every object stands for itself.
+    fn direct(object: &Object) -> Option<Object> {
+        Some(object.clone())
+    }
+
+    /// `[a b c d]`, as a file writes a rectangle or a matrix.
+    fn numbers(values: &[f64]) -> Object {
+        Object::Array(values.iter().copied().map(Object::Real).collect())
+    }
+
+    /// Everything a tiling pattern says, read back. A cell that is not clipped to its own
+    /// `/BBox`, stepped by its own pitch, in its own space, with its own paint type, is not
+    /// the file's cell, and each field is asserted because each is read from somewhere else.
+    #[test]
+    fn a_tiling_pattern_with_every_entry_reads_every_entry() {
+        let pattern = tiling(&[
+            ("BBox", numbers(&[1.0, 2.0, 21.0, 22.0])),
+            ("XStep", Object::Real(20.0)),
+            ("YStep", Object::Int(30)),
+            ("Matrix", numbers(&[2.0, 0.0, 0.0, 2.0, 5.0, 7.0])),
+            ("PaintType", Object::Int(2)),
+        ]);
+        let read = tiling_pattern("P0", &pattern, &direct)
+            .expect("a tiling pattern with every entry is a tiling pattern");
+        assert_eq!(
+            read.bbox,
+            PageRect::new(1.0, 2.0, 21.0, 22.0),
+            "the cell is clipped to its /BBox, in pattern space"
+        );
+        assert_eq!(read.x_step, 20.0, "the cells step twenty along x");
+        assert_eq!(read.y_step, 30.0, "and thirty along y");
+        assert_eq!(
+            read.matrix,
+            Matrix::new(2.0, 0.0, 0.0, 2.0, 5.0, 7.0),
+            "the pattern's own space is kept as written"
+        );
+        assert_eq!(
+            read.paint_type,
+            PaintType::Uncoloured,
+            "/PaintType 2 is a cell that takes the paint operator's colour"
+        );
+        let Object::Stream(cell) = &read.content else {
+            panic!("the cell is the pattern's content stream");
+        };
+        assert_eq!(
+            cell.raw, CELL,
+            "the cell's bytes come through as they were stored"
+        );
+    }
+
+    /// **A zero step is a value and not a missing one.** It means the cell is not repeated in
+    /// that direction — drawn once, at the pattern-space origin — so a read that folds zero in
+    /// with "the entry is not there" loses the pattern rather than drawing it.
+    #[test]
+    fn a_zero_step_is_read_as_zero_and_not_as_missing() {
+        let pattern = tiling(&[
+            ("BBox", numbers(&[0.0, 0.0, 10.0, 10.0])),
+            ("XStep", Object::Int(0)),
+            ("YStep", Object::Real(0.0)),
+        ]);
+        let read =
+            tiling_pattern("P0", &pattern, &direct).expect("a zero step is a value, not a fault");
+        assert_eq!(read.x_step, 0.0, "an explicit /XStep 0 is zero");
+        assert_eq!(read.y_step, 0.0, "and an explicit /YStep 0 is zero too");
+
+        // One axis not tiled and the other tiled is a whole pattern in itself: a stripe or a
+        // row of motifs. Reading the two as one pitch loses it entirely.
+        let striped = tiling(&[
+            ("BBox", numbers(&[0.0, 0.0, 10.0, 10.0])),
+            ("XStep", Object::Int(0)),
+            ("YStep", Object::Int(12)),
+        ]);
+        let read =
+            tiling_pattern("P0", &striped, &direct).expect("a pattern may repeat along y only");
+        assert_eq!(
+            read.x_step, 0.0,
+            "the x step is still the zero the file wrote"
+        );
+        assert_eq!(
+            read.y_step, 12.0,
+            "and the y step is not dragged down with it"
+        );
+    }
+
+    /// A negative step is legal: the cells run the other way. Clamping it to zero would draw
+    /// one cell and report a fault, where the file asked for a picture.
+    #[test]
+    fn a_negative_step_survives_the_read() {
+        let pattern = tiling(&[
+            ("BBox", numbers(&[0.0, 0.0, 10.0, 10.0])),
+            ("XStep", Object::Real(-12.5)),
+            ("YStep", Object::Int(-4)),
+        ]);
+        let read =
+            tiling_pattern("P0", &pattern, &direct).expect("a negative step is legal and reads");
+        assert_eq!(read.x_step, -12.5, "the x step keeps its sign");
+        assert_eq!(read.y_step, -4.0, "and so does the y step");
+    }
+
+    /// Absent is not broken. Every one of these entries has a specified default, and a
+    /// pattern that relies on them — a cell in the space it was set in, repeated nowhere,
+    /// carrying its own colour — is ordinary rather than damaged.
+    #[test]
+    fn an_absent_optional_entry_takes_its_default() {
+        let pattern = tiling(&[("BBox", numbers(&[0.0, 0.0, 12.0, 12.0]))]);
+        let read = tiling_pattern("P0", &pattern, &direct)
+            .expect("a pattern with nothing but a /BBox is a pattern");
+        assert_eq!(read.x_step, 0.0, "no /XStep means no repeat along x");
+        assert_eq!(read.y_step, 0.0, "no /YStep means no repeat along y");
+        assert_eq!(
+            read.matrix,
+            Matrix::IDENTITY,
+            "no /Matrix means the cell is already in the space the pattern was set in"
+        );
+        assert_eq!(
+            read.paint_type,
+            PaintType::Coloured,
+            "no /PaintType means 1, a cell that carries its own colours"
+        );
+    }
+
+    /// A cell with no `/BBox` has no clip, and there is no default clip: inventing one would
+    /// draw a plausible texture that belongs to nobody. The error names the pattern because a
+    /// page can name thirty of them and the reader is looking for one of them.
+    #[test]
+    fn a_tiling_pattern_with_no_bbox_is_an_error_that_names_it() {
+        let pattern = tiling(&[("XStep", Object::Int(10)), ("YStep", Object::Int(10))]);
+        let err = tiling_pattern("P0", &pattern, &direct)
+            .expect_err("a missing /BBox is refused rather than defaulted");
+        assert!(err.contains("/P0"), "the error names the pattern: {err}");
+        assert!(err.contains("/BBox"), "and the entry at fault: {err}");
+    }
+
+    /// A `/BBox` that is there but is not four numbers is the same fault as a missing one:
+    /// there is no clip to draw the cell inside. `Rect::from_object` would have filled the
+    /// gaps with zeros and produced a cell the file never described.
+    #[test]
+    fn a_bbox_that_is_not_four_numbers_is_an_error_that_names_it() {
+        for bbox in [Object::name("Square"), numbers(&[0.0, 0.0, 20.0])] {
+            let pattern = tiling(&[("BBox", bbox.clone())]);
+            let err = tiling_pattern("P0", &pattern, &direct)
+                .expect_err("a /BBox of {bbox:?} is not a clip");
+            assert!(err.contains("/P0"), "the error names the pattern: {err}");
+            assert!(err.contains("/BBox"), "and the entry at fault: {err}");
+        }
+    }
+
+    /// A step that is present and is not a number is a file that says where the cells go and
+    /// does not say it. The error has to quote the field, because `/XStep` and `/YStep` are
+    /// two entries and knowing which one is wrong is most of the answer.
+    #[test]
+    fn a_step_that_is_not_a_number_is_an_error_that_names_the_field() {
+        let pattern = tiling(&[
+            ("BBox", numbers(&[0.0, 0.0, 10.0, 10.0])),
+            ("XStep", Object::name("Wide")),
+        ]);
+        let err = tiling_pattern("P0", &pattern, &direct)
+            .expect_err("a /XStep that is not a number is refused rather than defaulted");
+        assert!(err.contains("XStep"), "the error names the field: {err}");
+        assert!(err.contains("/P0"), "and the pattern: {err}");
+
+        let other = tiling(&[
+            ("BBox", numbers(&[0.0, 0.0, 10.0, 10.0])),
+            ("YStep", Object::name("Tall")),
+        ]);
+        let err = tiling_pattern("P0", &other, &direct)
+            .expect_err("a /YStep that is not a number is refused too");
+        assert!(
+            err.contains("YStep"),
+            "the y field is named as itself: {err}"
+        );
+        assert!(!err.contains("XStep"), "and not as the other one: {err}");
+    }
+
+    /// A tiling pattern's cell *is* its content stream, so a pattern resource that is a plain
+    /// dictionary has nothing to tile however complete the rest of its entries are. It is
+    /// refused by name rather than drawn as an empty cell, which would look like a page that
+    /// meant to paint nothing there.
+    #[test]
+    fn a_tiling_pattern_with_no_stream_behind_it_is_an_error() {
+        let mut dict = Dict::new();
+        dict.set("BBox", numbers(&[0.0, 0.0, 10.0, 10.0]));
+        let err = tiling_pattern("P0", &Object::Dict(dict), &direct)
+            .expect_err("a dictionary is not a cell");
+        assert!(err.contains("/P0"), "the error names the pattern: {err}");
+        assert!(err.contains("stream"), "and says what is missing: {err}");
     }
 }
