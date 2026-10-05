@@ -319,6 +319,10 @@ pub fn run_with(stream: &ContentStream, resources: &crate::Resources) -> PageCon
 /// the state its `/Matrix` and `/BBox` have already been composed into, and the state it
 /// leaves behind is the one it started in. That is why this takes a state rather than
 /// making one, and why the page's own run is the same call with the default.
+///
+/// Whatever the *lexer* had to leave out is already in the notes before the first operator
+/// runs, and comes first: a collection the stream was truncated at is a finding about the
+/// file that no amount of executing the rest of it will make smaller.
 #[must_use]
 pub fn run_with_state(
     stream: &ContentStream,
@@ -328,7 +332,10 @@ pub fn run_with_state(
     let mut ctx = Context {
         state: state.clone(),
         stack: StateStack::new(),
-        out: PageContent::default(),
+        out: PageContent {
+            notes: stream.notes().to_vec(),
+            ..PageContent::default()
+        },
         clip_pending: false,
         path_start: None,
         resources,
@@ -3424,6 +3431,28 @@ mod tests {
             !out.notes.iter().any(|n| n.contains("do not define")),
             "every name in the chain resolved, so the bound is what stopped it: {:?}",
             out.notes
+        );
+    }
+
+    #[test]
+    fn a_truncated_array_reaches_the_page_notes() {
+        // The lexer is where a collection bound bites, and the page is where it has to be
+        // visible: a `TJ` cut short is a line of text that will not be drawn, and nobody
+        // finds out by looking at the code that gathers it.
+        let mut content = b"BT /F1 12 Tf [".to_vec();
+        for i in 0..=crate::tokens::MAX_COLLECTION_ITEMS {
+            content.extend_from_slice(format!("(x{i}) ").as_bytes());
+        }
+        content.extend_from_slice(b"] TJ ET");
+        let out = run(&ContentStream::parse(&content));
+        let note = out
+            .notes
+            .iter()
+            .find(|n| n.contains("array"))
+            .expect("a note naming the array");
+        assert!(
+            note.contains(&crate::tokens::MAX_COLLECTION_ITEMS.to_string()),
+            "which says where it was cut: {note}"
         );
     }
 

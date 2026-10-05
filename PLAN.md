@@ -366,17 +366,26 @@ renderer that never has to ask the machine for a font.
    `domain.len() / 2` for a `domain` that is already one pair per input, so it reported zero
    inputs for every function in existence. `Indexed` is the colour space still in the hole — it
    needs its palette, and there is no `/Alternate` to fall through to.
-4. **A `TJ` array is truncated at 32 elements**, and it is now the largest single cause of
-   difference in the corpus. `MAX_COLLECTION_DEPTH` in `crates/mangle-content/src/tokens.rs` is
-   documented as a bound on how *deep* a bracketed collection may nest and is used as a bound on
-   how many *items* it may hold, so every `TJ` array longer than 32 elements — which is what
-   kerned justified text looks like — silently loses the rest of the line. On
-   `pdfjs__TAMReview.pdf` page 17 that is 2 388 of 3 687 glyphs in one face, and it is the whole
-   of what keeps the file 22 pages below 0.95 ([D20](docs/known-diffs.md)). The bound wants
-   splitting in two: one for nesting depth, a much larger one for item count, and both still
-   present, because a hostile file can open a bracket and never close it. Three of the page's
-   four faces match the oracle to the glyph, so this is not a font-layer problem and should not
-   be mistaken for one.
+4. **A `TJ` array truncated at 32 elements: done.** `MAX_COLLECTION_DEPTH` in
+   `crates/mangle-content/src/tokens.rs` is documented as a bound on how *deep* a bracketed
+   collection may nest and was used as a bound on how many *items* it may hold, so every `TJ`
+   array longer than 32 elements — which is what kerned justified text looks like — silently
+   lost the rest of the line. The bound is split in two, and both are still there because a
+   hostile file can open a bracket and never close it: `MAX_COLLECTION_DEPTH` is still 32 for
+   nesting, and a new `MAX_COLLECTION_ITEMS` of **8 192** is the item count, with the
+   arithmetic in the constant's own comment. `collect` also **recurses** now, so a nested
+   bracket is a nested collection rather than an empty one with its items folded into the
+   parent — an `/OCMD` membership list is the shape that had been arriving in pieces.
+   **Truncation is reported, never silent**: one note per affected collection, naming what was
+   cut, where and how far it got, carried on `ContentStream::notes()` and seeded into
+   `PageContent::notes` so a renderer's report has it. `pdfjs__TAMReview.pdf`'s median went
+   from 0.8879 to **0.92395** and page 17 from 0.8210 to **0.89465**;
+   `gov__nist-sp800-88.pdf`'s page 1 is **unchanged at 0.98501**. The file's 22 remaining pages
+   below 0.95 are limited by the unembedded `/TiRoARRN~1268702012`, which is item 1's subject
+   ([D21](docs/known-diffs.md)). **Depth protection still holds and was measured, not assumed:**
+   100 000 unclosed `[` finish holding 31 items and report one note, and raising the depth
+   bound to 200 000 instead — the tempting wrong fix — overflows the stack and aborts the
+   process.
 5. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
    not going to be built. Both are wanted by name on the corpus — they are W034 and W038,
    67 pages between them — and **the reporting half is already done**: an image that cannot
@@ -649,16 +658,20 @@ draw from bundled metric-compatible faces. Until they were, no render number in 
 said anything about fidelity and the arXiv page's SSIM sat at 0.7915 whether or not its
 content decoded; it is now 0.88414.
 
-**What is left in the corpus is three gaps, and they are large and separate.** A JPEG 2000 or
+**What is left in the corpus is two gaps, and they are large and separate.** A JPEG 2000 or
 JBIG2 decoder has to exist (W034 and W038, 67 pages between them) — and the reporting around that
-is already done, so its note says whether closing the codec gap closes the page. The second is
-**not a missing feature at all**: a `TJ` array is truncated at 32 elements by a collection bound
-that was written for nesting depth, which costs W076 two thirds of its text on every page
-(item 4 above). The third is also not a missing feature: **`gov__nist-sp800-88.pdf` page 2
-resolves none of its eight content streams** and so draws paper with no note whatsoever, which is
-the same shape of failure D19 fixed on the image side, and the last place in this corpus where
-something missing is invisible. **A full re-run of the corpus is wanted** to re-baseline the
-median against these. It takes two hours, so it is run deliberately rather than in a loop.
+is already done, so its note says whether closing the codec gap closes the page. The second is also
+not a missing feature: **`gov__nist-sp800-88.pdf` page 2 resolves none of its eight content
+streams** and so draws paper with no note whatsoever, which is the same shape of failure D19 fixed
+on the image side, and the last place in this corpus where something missing is invisible. **A full
+re-run of the corpus is wanted** to re-baseline the median against these. It takes two hours, so it
+is run deliberately rather than in a loop.
+
+**The corpus's largest non-feature gap is closed** — the `TJ` truncation that cost W076 two thirds
+of its text on every page was a collection bound written for nesting depth being used as a bound on
+item count. The two are separate now, `TAMReview`'s median went from 0.8879 to **0.92395**, and what
+that file's 22 pages are now limited by is an unembedded font: D6's subject, and this project's
+stated policy ([D21](docs/known-diffs.md)).
 
 **A `Separation` or `DeviceN` tint transform is settled** and was the third of those three gaps
 before D20: the transform is evaluated, its output is read in the space the file names, and a

@@ -131,7 +131,7 @@ four sit at medians between 0.64 and 0.79:
 |---|---|---|---|---|
 | W034 | `gov__nist-nistir7255.pdf` | 66 | 0.7842 | 61 |
 | ~~W075~~ | ~~`gov__nist-sp800-88.pdf`~~ | 44 | ~~0.7741~~ **0.96095** | ~~41~~ **0** |
-| W076 | `pdfjs__TAMReview.pdf` | 23 | ~~0.7663~~ **0.8879** | 22 |
+| W076 | `pdfjs__TAMReview.pdf` | 23 | ~~0.7663~~ ~~0.8879~~ **0.92395** | 22 |
 | W038 | `pdfjs__S2.pdf` | 1 | 0.6386 | 1 |
 | | | **134** | | **84** |
 
@@ -143,7 +143,7 @@ useful thing the diagnosis produced, because it says what to build next:
 |---|---|---|
 | W034 | a **JPEG 2000** decoder (`JPXDecode`) | `a JPEG 2000 image was found but no decoder exists yet`, twice, on **all 66 pages**. Both images the page draws are JPX, and one of them carries a `JBIG2Decode` `/Mask`. **Fixed as a report: the mask is now named too** (see [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-skipped-mask-was-never-reported) below) — the decoder itself is still missing. |
 | ~~W075~~ | ~~**`ICCBased` colour conversion`~~ | **FIXED — see [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-skipped-mask-was-never-reported).** `CS0` is `[/ICCBased …]` over an sRGB profile that carries `/Alternate /DeviceRGB`, and that alternate is now what the colour is read through. **43 of the file's 44 pages went from zero ink pixels to ink, and the file's median SSIM from 0.7741 to 0.96095.** |
-| ~~W076~~ | ~~**`Separation`/`DeviceN` tint-transform evaluation`~~ | **PARTLY FIXED — see [D20](#d20--a-separation-was-painted-black-where-the-file-asked-for-a-tint-and-now-its-tint-transform-is-evaluated).** `Cs8` is `[/Separation /Black <ICCBased sRGB> <FunctionType 0, 255 samples>]`, and it is the colour of the entire article body. **The transform is evaluated now: no page of the file reports `could not be converted`, and the six pages that drew 5,937 ink pixels draw 100k–174k. The file's median SSIM went from 0.7692 to 0.8879.** The 22 pages still below 0.95 are now limited by something else — see D20 — and not by colour. |
+| ~~W076~~ | ~~**`Separation`/`DeviceN` tint-transform evaluation`~~ | **PARTLY FIXED — see [D20](#d20--a-separation-was-painted-black-where-the-file-asked-for-a-tint-and-now-its-tint-transform-is-evaluated) and [D21](#d21--a-collection-holds-how-many-items-which-is-a-different-question-from-how-deep-it-nests).** `Cs8` is `[/Separation /Black <ICCBased sRGB> <FunctionType 0, 255 samples>]`, and it is the colour of the entire article body. **The transform is evaluated now: no page of the file reports `could not be converted`, and the six pages that drew 5,937 ink pixels draw 100k–174k. The file's median SSIM went from 0.7692 to 0.8879, and then to 0.92395 once the `TJ` truncation was fixed.** The 22 pages still below 0.95 are now limited by an unembedded font — see D21 — and not by colour or by truncation. |
 | W038 | a **JPEG 2000** decoder, again | `a JPEG 2000 image was found but no decoder exists yet` six times, plus one naming `/Im7`. 13 JPX images carry the whole figure: we draw 31987 ink pixels against the oracle's 838668, and **99.8% of what we do draw is in the right place**. |
 
 `Colour::to_rgba` in `crates/mangle-content/src/state.rs` had arms for DeviceGray/CalGray,
@@ -2171,8 +2171,10 @@ pages and been wrong.
 
 **[D20](#d20--a-separation-was-painted-black-where-the-file-asked-for-a-tint-and-now-its-tint-transform-is-evaluated)
 evaluated the tint transform, and the file's median moved from 0.7692 to 0.8879** — by evaluating
-`Cs8`, not by turning it into RGB. The 22 pages still below 0.95 are now limited by a `TJ` array
-truncation in the content lexer, which D20 names.
+`Cs8`, not by turning it into RGB. The 22 pages still below 0.95 were limited by a `TJ` array
+truncation in the content lexer, which D20 named and
+[D21](#d21--a-collection-holds-how-many-items-which-is-a-different-question-from-how-deep-it-nests)
+fixed: the file's median is now **0.92395**.
 
 `nistir7255` contains no `ICCBased`, no `Separation` and no `Indexed` at all — 132 `JPXDecode`
 and 66 `JBIG2Decode`, which is the codec gap — so the numbers are identical to the last digit,
@@ -2347,7 +2349,7 @@ kerned per character, with **no whitespace between the elements**:
 
 That show carries **84 strings**. `crates/mangle-content/src/tokens.rs` has
 `MAX_COLLECTION_DEPTH: usize = 32`, documented as a bound on how *deep* a bracketed collection
-may nest — and `collect` uses it as a bound on how many *items* a collection may hold:
+may nest — and `collect` used it as a bound on how many *items* a collection may hold:
 
 ```rust
 other => {
@@ -2357,16 +2359,15 @@ other => {
 }
 ```
 
-So every array of more than 32 elements is silently truncated, and a `TJ` array is the commonest
+So every array of more than 32 elements was silently truncated, and a `TJ` array is the commonest
 array in a text-heavy file. The first 32 items of that show are 16 strings and 16 kerns; the
-remaining 68 are dropped, and the line is cut mid-word. **That is the whole of the remaining
+remaining 68 were dropped, and the line was cut mid-word. **That was the whole of the remaining
 0.8879.**
 
-This is a content-stream lexer defect, unrelated to colour, and it is **not fixed here** — it is a
-separate change with its own verification, and the bound is there for a reason (a hostile file
-can open a bracket and never close it). It is named because it is now the largest single cause of
-difference left in this corpus, and because nothing in the report above would be honest without
-saying what the number is still limited by.
+**Fixed, as [D21](#d21--a-collection-holds-how-many-items-which-is-a-different-question-from-how-deep-it-nests).**
+The two bounds are separate now, and the file's median went from 0.8879 to **0.92395**. The 22
+pages are still below 0.95, and what limits them now is stated in D21: the unembedded
+`/TiRoARRN~1268702012`, which is D6's subject and the project's stated policy.
 
 ### What is pinned now
 
@@ -2396,3 +2397,135 @@ did not move:
   nothing to convert, and never in place of a transform that answered;
 - and every other colour space — grey, RGB, CMYK, `CalRGB` — converts to exactly what it did, with
   `Indexed` and `Pattern` still gaps rather than quietly becoming tints of something.
+---
+
+## D21 — a collection holds how many items, which is a different question from how deep it nests
+
+**Severity: it was truncating every array in every text-heavy file in the corpus, silently. Fixed,
+and both bounds are still there.**
+
+### What was wrong
+
+D20 named it and did not fix it: `MAX_COLLECTION_DEPTH` in `crates/mangle-content/src/tokens.rs`
+is documented as a bound on how *deep* a bracketed collection may nest, and `collect` used it as a
+bound on how many *items* one may hold. One constant, two questions, and the second question is
+the one text files ask constantly. **Every array of more than 32 elements lost everything past the
+thirty-second, with no note** — and a `TJ` array kerned per character is the commonest array in a
+text-heavy file, so it was the commonest way to lose a page.
+
+A second thing came with it and was worse than a silent drop: a nested bracket did not nest. The old
+`collect` pushed `object_of(token)` for an `[` or `<<`, which is an **empty** array or dictionary,
+and then kept reading the inner items as if they belonged to the *outer* collection. So
+`<< /OCGs [/OC1 /OC2] >>` arrived as a two-entry dictionary whose `OCGs` was an array containing
+nothing and whose pairings were off by two. A membership list inside a marked-content property
+list is the deepest thing a real content stream contains, and it did not survive.
+
+### What it does now
+
+**Two constants, and neither substitutes for the other.** `MAX_COLLECTION_DEPTH` stays at 32 and
+still means nesting; `MAX_COLLECTION_ITEMS` is new at **8 192** and means width. `collect` recurses,
+so a nested collection is a nested collection now, and the depth bound is the thing that stops a file
+that opens brackets and never closes them.
+
+**The item bound is 8 192, and the arithmetic is in the constant's own doc comment.** In short: a
+full line of 12-point text in a 600-point measure is about a hundred characters at a mean advance of
+half an em, and a typesetter kerns between each pair, so it is `2 × 100 − 1 = 199` items. The
+measure the format allows is 14 400 points: 4 799 items at 12-point type, 7 199 at 8-point. Both
+fit. What the bound refuses is one show operation carrying a line thinner than about 7 points
+stretched the full width of a page, which is not a document.
+
+**What a hostile file pays, also in that comment:** one array at the bound is 8 192 `Object`s at 104
+bytes each on a 64-bit target — 852 KB. Filling it costs at least two bytes per item in the file, so
+16 KB of hostile stream buys that 852 KB, a 52× amplification **that the constant does not set**: it
+is the object size over the two bytes an item needs, so a file that wants more objects opens more
+arrays, and every collection on the page is bounded separately. Raising or lowering this number
+moves the per-array ceiling, not that ratio.
+
+**Nothing is truncated in silence.** `ContentStream` carries `notes()`, `collect` writes one note
+per affected collection naming what it cut, where, and how far it got — *the array at byte 4 holds
+more than the 8192 items allowed, so it was cut short there and the rest of it was not read* — and
+`run_with_state` seeds `PageContent::notes` from it, so a renderer's report carries it. The depth
+bound reports the same way. **A dictionary goes through the same arm**, because `collect` is one
+function for both, which is why a 100-entry dictionary was losing half its entries to the same bug.
+
+**Reading to the depth bound and then skipping, once.** Past 32 levels `collect` walks the rest of
+the collection with `skip_collection` in a single pass rather than letting each level skip its own
+remainder, which would re-walk the file once per level: a megabyte of unclosed brackets would cost
+thirty-two passes over it instead of one.
+
+### Depth protection still holds, and it was tested rather than asserted
+
+A hundred thousand `[` and not one `]`: the parse finishes, holds **31 items** — one empty collection
+at each level above the innermost — and reports **one** note naming the nesting, not thirty-two.
+
+That test is the one that catches the wrong fix, and the wrong fix was measured rather than argued
+about. Setting `MAX_COLLECTION_DEPTH = 1024` and changing nothing else makes the test fail. Setting
+it to 200 000 — "just make the number big enough" — does not make the test fail slowly, it **aborts
+the process**: *thread has overflowed its stack / fatal runtime error: stack overflow*, on a 2 MiB
+stack as well as an 8 MiB one. A crash is not a note, which is the whole reason the depth bound is
+a number and not an afterthought. Both expectations in that test are written out in the plain rather
+than taken from the constant, because a test whose expectation comes from the thing it is testing
+follows the constant up; the same care went into the item-bound tests, which is why they fail on the
+old code instead of agreeing with it.
+
+### What it measured
+
+Against `mutool draw` at 150 DPI, all 23 pages of TAMReview and page 1 of sp800-88, the same harness
+and the same oracle as every table above:
+
+| file | pages | before | after |
+|---|---|---|---|
+| `pdfjs__TAMReview.pdf` median SSIM | 23 | 0.88794 | **0.92395** |
+| pages below 0.95 | | 22 | 22 |
+| worst page | | 0.82103 (p17) | **0.89465** (p17) |
+| best page | | 0.98404 (p21) | **0.98568** (p21) |
+| page 17 ink pixels | | 173 940 | **252 275** (oracle 245 598) |
+| `gov__nist-sp800-88.pdf` page 1 SSIM | 1 | 0.98501 | **0.98501** (unchanged) |
+
+Every one of the 23 pages moved up, page 17 most of all, and **not one page of either file reports a
+bound being hit** — so nothing in the corpus needed the new 8 192, which is the answer to whether it
+is set generously enough for the files that exist.
+
+**The 22 pages are still below 0.95, and what is left is not this.** The pages' only remaining note
+is the unembedded `/TiRoARRN~1268702012`, which stands in for `Times-Roman` with a metric-compatible
+face: D6's subject, and the project's stated policy. Page 17 now draws *slightly more* ink than the
+oracle (252 275 against 245 598) where it used to draw 71 per cent of it, and that overshoot is what
+a substituted face's wider advances look like.
+
+**The three files that reported `pdftotext could not read this file` still do, and that note is not
+ours.** It is written by `wild_corpus.rs` when the *oracle* cannot read the original file, so no
+change to this project can move it. Checked directly, and all three are poppler refusing the bytes:
+`issue15590` — *No valid XRef size in trailer / Page count in top-level pages object is wrong type*;
+`bug1980958` — *Couldn't find trailer dictionary*, on a 219-byte truncated file; `issue15893_reduced` —
+*Incorrect password*. **No separate win here, and the reason is worth recording**: a missing feature
+in our own reader shows up as a *difference* from the oracle, never as the oracle being unable to
+read the file.
+
+### What is pinned now
+
+**Nine tests**, each confirmed to fail on the code before this change and to pass on it after — eight
+in `tokens.rs` and one in `interp.rs`:
+
+- an array of 100 elements yields **100 elements**, each the value at its own index;
+- a `TJ` of **84 strings kerned per character**, written with no whitespace between the elements the
+  way a typesetter writes one, yields **167 items** — asserted against the whole expected vector, so
+  both the count and the bytes of every string and every kern are checked, and it says which corpus
+  page the number comes from;
+- a dictionary of **100 entries** yields 100 entries with their own values;
+- **100 000 unclosed `[`** finish, hold 31 items, and report one note naming the nesting at 32 — the
+  test that catches the wrong fix, with both expectations written out rather than derived from the
+  constant, as described above;
+- an array **500 over** the bound holds exactly the bound, keeps the **first** items rather than the
+  last, and is reported **by name** with the count it reached;
+- an array of **exactly** the bound is accepted with no note, and **one item more** is cut back to the
+  bound and reported — the off-by-one on both sides at once;
+- a document nested to **exactly** the depth bound and holding one item at each level parses whole,
+  with every level read and the item at the bottom of them intact — depth and item count are two
+  questions and the bound for the second must not touch the first;
+- an `/OCMD` dictionary's membership list arrives **as an array of its two names**, rather than as its
+  parts mixed into the enclosing dictionary's pairings — the defect the old non-recursive `collect`
+  had, named here so it cannot come back quietly;
+- a truncated array's note reaches **`PageContent::notes`** — the test that says the reporting is not
+  living in the lexer where nobody reads it; and
+- `MAX_COLLECTION_ITEMS > MAX_COLLECTION_DEPTH` is asserted in three of them, because the whole defect
+  was two bounds being one number and no test that ever said so.
