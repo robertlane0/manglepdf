@@ -24,7 +24,7 @@ number when `C0` is zero, and every fixture in this repository that exercises on
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen, window shell, icon pipeline | **done** — every Gate 0 check passes; the window draws the six regions from tokens and nothing else |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
 | **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw, a shading pattern used as a fill colour draws per pixel, and **a form XObject executes as a nested content stream with its own `/Matrix`, `/BBox` clip and `/Resources`**. Tiling patterns and `Symbol`/`ZapfDingbats` still draw nothing |
-| **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings and the device colour spaces paint, and TrueType, composite, CFF and Type 1 outlines all draw. Twelve of the standard fourteen draw from bundled metric-compatible faces when a document names one without embedding it. Type 3, mesh shadings, tiling patterns and transparency do not |
+| **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings, the device colour spaces and `PatternType 1` tiling patterns paint, and TrueType, composite, CFF and Type 1 outlines all draw. Twelve of the standard fourteen draw from bundled metric-compatible faces when a document names one without embedding it. Type 3, mesh shadings, `/PaintType 2`, JBIG2 and JPEG 2000 do not |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
 
@@ -236,8 +236,8 @@ number when `C0` is zero, and every fixture in this repository that exercises on
 
   This draws an image mask painted in a pattern colour, which is what
   `pdfjs__issue13372.pdf` is: a portrait whose every pixel is a gradient rather than a
-  sample. A `/PatternType 1` tiling pattern is **reported by name** rather than approximated
-  with a single cell, and a shading whose colour space is `/Separation`, `/DeviceN` or
+  sample. A `/PatternType 1` tiling pattern **now draws**: its cell is rendered once and repeated,
+  and `/PaintType 2` is reported by name rather than guessed at. A shading whose colour space is
   `/Indexed` is reported rather than read as the grey its one-component function looks like.
   A pattern used as a *stroking* colour, or as the colour of text, is reported and not
   painted: this is a fill feature, and `Colour::to_rgba` now says a `Pattern` space is not a
@@ -543,13 +543,15 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    and a page with a missing photograph is a wrong answer. CCITT does decode, through the
    filter crate, and its two-dimensional path is now checked against `libtiff` — the
    expectations are rasters `libtiff` decoded, not assertions derived from the specification.
-6. **Tiling patterns and mesh shadings draw nothing.** A shading names one of types 1, 4, 5,
-   6 or 7, or a pattern needs a tiling loop, and each is reported as a note against the mark
-   rather than skipped silently, so a page that used one is visibly incomplete instead of
-   quietly wrong. A *shading* pattern as a fill colour does draw, per pixel; the tiling loop
-   is what is missing, and a note about a fill in a tiling says which pattern type it did not
-   draw, because one cell of a tiling is a texture that looks plausible and is wrong
-   everywhere. The type-2 function's own rule was a separate matter, recorded as D10 and
+6. **Mesh shadings draw nothing, and one tiling case is refused.** A shading naming one of types
+   1, 4, 5, 6 or 7 is reported as a note against the mark rather than skipped silently, so a
+   page that used one is visibly incomplete instead of quietly wrong. Both *shading* patterns
+   (per pixel, as fill and as stroke) and `/PatternType 1` **tiling** patterns now draw — a tiling
+   cell is rendered once and repeated, which is the only affordable order, since a cell is a
+   texture and a page may paint one across a thousand shapes. What is still refused is
+   `/PaintType 2`, an uncoloured cell: it paints in the colour in force when the pattern is used,
+   and a `Pattern` colour space has already replaced that colour, so there is nothing to give it.
+   The type-2 function's own rule was a separate matter, recorded as D10 and
    since fixed against ISO 32000-1 Table 42.
 7. **The Inspector does not exist.** `mangle-ui` draws the region; nothing populates it
    from the marks the content layer produces.

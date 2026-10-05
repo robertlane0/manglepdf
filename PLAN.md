@@ -286,20 +286,25 @@ renderer that never has to ask the machine for a font.
    dashed differently from a flat one. A `/PatternType 1` tiling
    pattern needs a loop over cells in the pattern's own space — `/Matrix`, `/BBox`, `/XStep`,
    `/YStep` and paint type — and is reported by name rather than approximated with one cell.
-   **This is the largest cluster left that is genuinely unbuilt rather than out of scope or a
-   policy: 12 pages below 0.95, in four files** — `comments` 4, `issue12337` 3, `highlights` 3 and
-   `bug1992868` 2 — and all four files sit at a median of 0.962 or better otherwise, so the loop
-   is most of what is wrong with them.
-   **The pattern is now read, and the loop is not written.** `tiling_pattern` in `page.rs`
-   returns a `TilingPattern` — the cell's `/BBox`, the two steps, the `/Matrix`, the paint type
-   and the cell's own content stream — and `pattern_fill` still refuses a tiling paint by name,
-   because nothing runs a cell yet. Two of the read's decisions are load-bearing and are stated
-   in the code because they are the ones a renderer gets wrong silently: **a zero `/XStep` or
-   `/YStep` is a value, not an absence** (it means the cell is *not* repeated along that axis,
-   drawn once at the pattern-space origin), and **a negative step is legal** and is kept as
-   written. Only `/BBox` is refused rather than defaulted — there is no default clip, and one
-   invented from zeros is a texture that belongs to nobody — and an unreadable `/XStep` or
-   `/YStep` is refused too, each error naming the pattern and the entry at fault.
+   **Done: the pattern is read and the loop is written.** `tiling_pattern` in `page.rs` returns
+   a `TilingPattern` — the cell's `/BBox`, the two steps, the `/Matrix`, the paint type and the
+   cell's own content stream — and `tiling_fill` renders the cell **once** into an image and hands
+   it to the fill sampler, which repeats it. The cell is drawn by `paint_records`, the same
+   marks-to-pixels loop the page uses, so a mark inside a cell is not a second implementation
+   that agrees with the page today and drifts tomorrow.
+   Three of the decisions are load-bearing and are stated in the code because they are the ones a
+   renderer gets wrong *silently*: **a zero `/XStep` or `/YStep` is a value, not an absence** (it
+   means the cell is *not* repeated along that axis, drawn once at the pattern-space origin), **a
+   negative step is legal** and is kept as written, and **the cell is drawn with pattern space's
+   y inverted** to match the image it is read back from — a cell drawn one way and sampled the
+   other comes out mirrored, and a mirrored texture looks like a texture.
+   Only `/BBox` is refused rather than defaulted — there is no default clip, and one invented
+   from zeros is a texture that belongs to nobody — and an unreadable `/XStep` or `/YStep` is
+   refused too, each error naming the pattern and the entry at fault.
+   **`/PaintType 2` is refused by name and not guessed at.** An uncoloured cell paints in the
+   colour in force when the pattern is used, and a `Pattern` colour space has already replaced
+   that colour by then, so there is nothing to give it. Painting the cell's own colour would be
+   plausible and wrong, which is worse than the refusal.
    Two defects found while building the fill have since been fixed: [D9](docs/known-diffs.md)
    (a filled path was transformed by the content stream's `cm` twice, so a fill under a
    scaled `cm` landed off the page and was drawn nowhere) and [D10](docs/known-diffs.md) (the

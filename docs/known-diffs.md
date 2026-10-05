@@ -2925,3 +2925,81 @@ Three things follow, and only the first is a build:
    `nistir7657` declares it twice with inline palettes and this project does not read it. It does not
    affect that file's worst page, which is plain `DeviceGray` text, and its 49 images decode — so the
    gap is real and the cluster is not it.
+
+## D25 — a tiling pattern was refused rather than tiled, which is 12 pages of the corpus
+
+**Fixed.** A `/PatternType 1` tiling pattern used as a fill or stroke colour was refused **by
+name** — `a fill in the PatternType 1 tiling pattern `/P0` was found and not drawn` — and nothing
+was drawn in its place. The refusal was the right *shape*: one cell of a tiling is a texture that
+looks plausible and is wrong everywhere, so drawing one cell stretched was never an option. But it
+left **12 pages below 0.95 across four corpus files** — `comments` 4, `issue12337` 3, `highlights` 3
+and `bug1992868` 2 — and all four sit at a median of 0.962 or better otherwise, so the missing loop
+was most of what was wrong with them. **Text highlights are conventionally drawn as a tiling
+pattern**, which is why the cluster is exactly the files that highlight text.
+
+### How it works now
+
+The cell is rendered **once** into an image one cell wide, and the fill sampler repeats it. That
+ordering is the whole of the affordability argument: a cell is a texture, and a page may paint one
+across a thousand shapes, so running the cell's content stream per pixel would cost more than the
+rest of the page put together.
+
+The cell is drawn by `paint_records` — **the same marks-to-pixels loop the page itself uses**,
+pulled out of `render_page` for the purpose. A mark inside a cell is therefore not a second
+implementation that agrees with the page today and drifts from it tomorrow, which is the failure
+mode a "just render it again here" shortcut invites.
+
+### Three rules that fail *silently* when they are wrong
+
+Each is stated in the code because none of them produces an error, a note, or a crash — they produce
+a texture:
+
+- **A zero `/XStep` or `/YStep` is a value, not an absence.** It means the cell is **not repeated
+  in that direction** and is drawn once, anchored at the pattern-space origin. Reading it as "no
+  pitch" divides by it and paints nothing at all. The two axes are independent, so
+  `/XStep 0 /YStep 20` is a column of cells and not an error.
+- **A negative step is legal** and is kept with its sign; the cells run the other way rather than
+  being normalised away.
+- **The cell is drawn with pattern space's y inverted**, because pattern space counts up and an
+  image counts down, and the sampler measures from the box's *top* to match. A cell drawn one way
+  and read back the other comes out mirrored — and a mirrored texture still looks like a texture.
+
+### What is still refused, and why
+
+**`/PaintType 2`, an uncoloured cell, is refused by name.** It paints in the colour in force when
+the pattern is used, and a `Pattern` colour space has already replaced that colour by the time the
+pattern is reached, so there is nothing to hand it. Painting the cell's own colour would be
+plausible and wrong, which is the whole reason the entry above exists.
+
+### Tests
+
+Five in `crates/mangle-render/tests/pages.rs`, replacing the two that pinned the old refusal. The
+first two replace a refusal assertion, and the one worth reading twice is the repetition test:
+
+- **the cell repeats** — a 20-unit cell painting only its lower-left 10, at a pitch of 20, so red
+  runs alternate with paper five times across a 100-unit fill. **Counting runs is the point**: a
+  renderer that stretched one cell over the shape is identical at any single pixel and wrong
+  everywhere else. The cell is deliberately *smaller* than the pitch, because a cell that filled
+  its own pitch could not tell the two apart at all — which is a mistake this test's first
+  version made, and which it now says so about in the comment;
+- **a zero step draws the cell once**, so one red run along a row rather than five, with the paper
+  that follows it asserted as well;
+- **`/BBox` clips** — a cell painting twice its own box leaves the gap between cells as paper,
+  which is what a clipped tiling looks like and is not what an unclipped one looks like;
+- **`/PaintType 2` is refused by name** and nothing is drawn in its place;
+- **a pattern that is not a stream is refused by name**, and
+- **a shading pattern still draws its ramp** to the same values as before — the test that catches a
+  change to the shared plumbing the tiling path now runs through.
+
+Two defects were found and fixed while building it, both in code this feature introduced rather
+than inherited:
+
+- the cell's content was drawn with the page's placement composed in **as well as** the cell's own
+  transform, placing it twice; and
+- the cell was drawn without y inverted while the sampler measured y from the bottom, so every
+  cell came out vertically mirrored.
+
+**The corpus effect is not yet measured.** The feature landed with its unit tests and the two
+refusal tests replaced, but a full corpus re-run has not been done since, so **no page figures are
+claimed for it here**. The 12 pages above are what the last completed run measured as missing, and
+the honest statement is that they are the target rather than a result.
