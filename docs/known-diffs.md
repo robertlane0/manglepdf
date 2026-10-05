@@ -2529,3 +2529,74 @@ in `tokens.rs` and one in `interp.rs`:
   living in the lexer where nobody reads it; and
 - `MAX_COLLECTION_ITEMS > MAX_COLLECTION_DEPTH` is asserted in three of them, because the whole defect
   was two bounds being one number and no test that ever said so.
+## D22 — JPEG 2000 is not decoded, and the decision to leave it that way was measured rather than assumed
+
+**Status: refused by name, deliberately.** The renderer reports
+`a JPEG 2000 image was found but no decoder exists yet` and draws nothing, which is the pre-existing
+behaviour and the honest one. This entry records why the decoder that was written is not in the tree,
+because "we tried it and here is what was wrong" is worth more to the next person than silence.
+
+### What was attempted
+
+A JPEG 2000 decoder (ISO/IEC 15444-1) of **4,320 lines** across eight modules — markers and JP2 boxes,
+the MQ arithmetic coder, tier-1 code-block decoding, tier-2 packet headers and tag trees, the inverse
+DWT and the component transform — was written from the specification. It had **never been compiled**:
+it was not declared in `lib.rs`, and 20 compile errors were the first thing that happened to it.
+
+The way to find out whether such a decoder is right is not a self-consistency test, because a decoder
+that agrees with itself can still be wrong everywhere. It is comparison against an implementation that
+is not us. `opj_decompress` (OpenJPEG 2.5.4 — the library `mutool` itself uses) is installed, and
+`opj_compress` generates codestreams with individual features switched on, so "does this decode" becomes
+a bisect over features rather than an opinion.
+
+### Six defects, each confirmed against the oracle
+
+| # | Defect | Effect |
+|---|---|---|
+| 1 | The 5/3 low step read its right-hand neighbour **two samples away**, and at `i == 0` both neighbours must be `Y(1)` | every line wrong from sample 2 on |
+| 2 | The 9/7's four lifting steps ran in **reverse order and on the wrong subbands** | every irreversible picture wrong |
+| 3 | `main_header_end` returned the first marker after SOC — always `SIZ` — never walking the main header's segments | **no codestream could get past it** |
+| 4 | The `SOD` marker was parsed as packet bits: `read_sot` returns the offset *of* `SOD`, and the body began there | every packet after the first desynchronised |
+| 5 | `CodeBlock::codeword` was declared, documented as "copied out of the packet bodies as the packets go past", and **never written by any code** | every code-block failed the empty guard; **every tile decoded to a uniform 128** |
+
+Defect 5 is the one worth remembering: it produced no error, no note, and a plausible-looking page of
+correct size. It is the same failure shape as everything else in this file — a gap that is invisible is
+a wrong answer rather than a bug report.
+
+### Where it stopped, on the simplest possible input
+
+With 1–5 fixed, on a one-component image, no component transform, **zero** decomposition levels (so no
+wavelet at all) and one quality layer:
+
+* the **irreversible 9/7** produced `numbps = 0` and all-zero coefficients — the code-block's
+  magnitude-bit-plane count came out zero, which is Annex B.10.7 and is also what the packet header's
+  length bits hang off;
+* the **reversible 5/3** produced magnitudes of **±258 with all 1024 coefficients nonzero** on an image
+  the oracle decodes to values mostly between 0 and 112 — the tier-1 MQ decoder assembling magnitude
+  and sign bit planes wrongly.
+
+That is the MQ-coded tier-1 pass, the most intricate part of the standard: three context-modelled
+passes, run-length mode, vertical causal context formation and sign coding.
+
+### The decision
+
+**Not shipped.** A JPEG 2000 decoder that decodes and emits wrong pixels is worse than one that
+refuses, because wrong pixels are believed — and the corpus cannot see the difference, since it scores
+a grey page against a photo and calls the page "roughly right". The five fixes were each verified
+against OpenJPEG; what remained could not be certified in the time available, and a module nobody has
+proved correct is a liability rather than progress. The alternative `PLAN.md` offers for this item — an
+explicit scope statement — is what this entry is.
+
+### What the next attempt should start from
+
+`opj_decompress` and `opj_compress` are the oracle and the lever. Three traps cost real time:
+
+* `opj_compress -n` counts **resolutions**, not decomposition levels, so `-n 1` means `levels = 0` and
+  no wavelet at all — which makes it the cleanest possible isolate of tier 1;
+* `-I` is irreversible 9/7 and `-J` reversible 5/3, while Annex A.6.2's `transformation` byte is
+  **0 for 9/7 and 1 for 5/3** — the opposite of the flag letters, which is an easy way to test the
+  wrong filter and conclude the filter is broken; and
+* a JP2 `jp2c` box has its length four bytes *before* the tag and its contents eight bytes after the
+  box begins, so mis-slicing it silently decodes the wrong bytes.
+
+Start at Annex B.10.7's `numbps`, then the tier-1 passes.

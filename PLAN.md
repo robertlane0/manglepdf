@@ -386,12 +386,17 @@ renderer that never has to ask the machine for a font.
    100 000 unclosed `[` finish holding 31 items and report one note, and raising the depth
    bound to 200 000 instead — the tempting wrong fix — overflows the stack and aborts the
    process.
-5. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
-   not going to be built. Both are wanted by name on the corpus — they are W034 and W038,
-   67 pages between them — and **the reporting half is already done**: an image that cannot
-   be decoded now names every part of itself it skipped, including a `/Mask` or `/SMask`
-   that was never reached and that mask's own codec. So the note says whether closing the
-   codec gap closes the page, which is the question that was unanswerable before.
+5. **JBIG2 and JPEG 2000 decoders** (F17, F18). **The scope statement is written: neither is
+   built**, and the reasoning is measured rather than assumed — a 4,320-line JPEG 2000 decoder
+   was written from ISO/IEC 15444-1, six substantive defects in it were found and fixed against
+   `opj_decompress`, and what remains is in the MQ-coded tier-1 pass, which could not be
+   certified. Shipping it would mean emitting wrong pixels that the corpus scores as "roughly
+   right". Both are wanted by name on the corpus — they are W034 and W038, 67 pages between
+   them — and **the reporting half is done**: an image that cannot be decoded now names every
+   part of itself it skipped, including a `/Mask` or `/SMask` that was never reached and that
+   mask's own codec. So the note says whether closing the codec gap closes the page, which is
+   the question that was unanswerable before. Full account, including the three `opj_compress`
+   traps that cost time, in [D22](docs/known-diffs.md).
 6. **Fill the Inspector's right-hand region** from the object model, which is the window work
    that has not been started.
 7. **Break the symmetry of the remaining fixtures.** The diagonal-clip page is asymmetric now
