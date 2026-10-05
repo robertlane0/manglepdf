@@ -125,6 +125,10 @@ to watch. The median is the number that flatters.
 
 ### The seven pages with no SSIM, and why each is missing
 
+**The two `freeculture` rows below are now fixed** ([D26](#d26--a-cropbox-written-to-eight-decimals-made-the-buffer-a-pixel-taller-and-the-tolerance-meant-to-prevent-that-was-a-thousand-times-too-tight));
+they were a size disagreement and produced no measurement at all. The figures elsewhere in this
+section are from the run **before** that fix and so still count those two pages as unmeasured.
+
 The 745/738 split matters as much as the SSIM does, because a page that produced no number is a
 page that was never measured and must never read as one that passed.
 
@@ -138,12 +142,15 @@ page that was never measured and must never read as one that passed.
 | `pdfjs__GHOSTSCRIPT-698804-1-fuzzed.pdf` 1 | mutool produced no page 1; **it could not render it** |
 | `pdfjs__issue15893_reduced.pdf` 1 | mutool produced no page 1; **it could not render it** |
 
-**Both size disagreements are ours and they are the same defect: we are one pixel taller than
-`mutool` on both pages.** It is D3's shape and D3's fix did not cover this case — `pixels_for`
-settles a value within `WHOLE_PIXEL_EPSILON` of an integer onto that integer, and whatever
-`freeculture`'s box asks for lands outside the epsilon on the height and inside it on the width.
-A real, narrow, reproducible defect, and the only thing standing between two pages and a
-measurement.
+**Both size disagreements were ours, and both were the same defect: we were one pixel taller than
+`mutool` on both pages.** It looked like D3's shape, and D3's fix did not cover it. D3's epsilon
+was sized for *arithmetic* error — `1650.0000000000002` from `792.0 * (150.0 / 72.0)` — and
+`freeculture` fails by something three orders of magnitude larger: its `/CropBox` is written to
+eight decimals, so the height is `734.400024` where `734.4` was meant, which at 150 DPI is
+`1530.00005` pixels, and a `1e-9` tolerance cannot see it. **Representation error, not
+arithmetic error** — and a tolerance sized for the first is useless against the second. The
+epsilon is now `1e-6` relative, measured against `mutool` rather than guessed. See
+[D26](#d26--a-cropbox-written-to-eight-decimals-made-the-buffer-a-pixel-taller-and-the-tolerance-meant-to-prevent-that-was-a-thousand-times-too-tight).
 
 The three pages `mutool` cannot render are not differences at all: there is no second opinion to
 have. They are recorded because a page the *oracle* refuses is a page nobody has checked.
@@ -3003,3 +3010,75 @@ than inherited:
 refusal tests replaced, but a full corpus re-run has not been done since, so **no page figures are
 claimed for it here**. The 12 pages above are what the last completed run measured as missing, and
 the honest statement is that they are the target rather than a result.
+
+## D26 — a `/CropBox` written to eight decimals made the buffer a pixel taller, and the tolerance meant to prevent that was a thousand times too tight
+
+**Fixed.** `pdfjs__freeculture.pdf` pages 1 and 2 were reported as **size disagreements** and so
+produced **no measurement at all** — `we rendered 1020x1531, mutool rendered 1020x1530`, and
+`915x901` against `915x900`. A size disagreement is not a slightly worse picture: the harness
+*refuses* the comparison rather than scoring it, so a buffer one pixel off **deletes the
+measurement** instead of degrading it.
+
+### The cause was not floating point, which is what the code was guarding against
+
+The buffer size comes from `pixels_for`, which snaps a value within `WHOLE_PIXEL_EPSILON` of a
+whole pixel to that whole pixel and then ceils. The epsilon existed for a real defect:
+`792.0 * (150.0 / 72.0)` is `1650.0000000000002` in binary floating point, `ceil` makes that 1651,
+and a US-Letter page came out a pixel too tall — which had cost **80 corpus pages** their
+measurements. It was set to `1e-9`, which is about 4.5 million ulps and comfortably absorbs
+arithmetic error.
+
+But these two pages are not failing by an ulp. The file writes
+`/CropBox [86.399997 248.40001 525.6 680.4]` — **eight significant decimals** — so the height is
+`734.400024` where `734.4` was meant, and at 150 DPI that is **`1530.00005`** pixels. That is five
+hundred times further from a whole pixel than one ulp, and `1e-9` cannot see it. `ceil` then
+rounded **up**, and the buffer was one pixel too tall.
+
+**The lesson is the difference between arithmetic error and representation error.** A tolerance
+sized for the first is three orders of magnitude too small for the second, and it fails in the
+way that looks like a rendering difference rather than a sizing one.
+
+### The new value is measured, not chosen
+
+`mutool` snaps a page size within about `1e-6` relative of a whole pixel and ceils beyond it.
+Feeding it single-page PDFs whose height at 150 DPI lands `0.001`, `0.005` and `0.05` pixels above
+a whole `1530` gives heights **`1530`, `1531`, `1531`** — so its threshold sits between the first
+two, which is 1.3e-6 to 3.3e-6 relative.
+
+That threshold is not an arbitrary tolerance on `mutool`'s part. It is what any reader has to
+use: a producer writes a box as a decimal, and a decimal is not the number it was derived from.
+`1e-6` relative is the measured value rounded to one significant figure.
+
+`mutool` is **neither** pure `ceil` **nor** pure `round`, which is worth recording because both
+were the obvious guesses and both are wrong:
+
+| pixels | `ceil` | `round` | `mutool` |
+|---|---|---|---|
+| 1530.000000 | 1530 | 1530 | **1530** |
+| 1530.000050 | 1531 | 1530 | **1530** |
+| 1530.050000 | 1531 | 1530 | **1531** |
+| 1650.000000 | 1651 | 1650 | **1650** |
+
+`round` alone would give a US-Letter page 1650 correctly but would also drop the last third of a
+pixel off a 100-point page, and `ceil` alone is the 80-page defect above. Snap-then-ceil is the
+only one of the three that matches.
+
+### Effect
+
+Two corpus pages went from **no measurement** to a real one, and **none started disagreeing** —
+widening the tolerance can only move a size *towards* the oracle's, since the cases it affects
+are ones where `ceil` was adding a pixel. Both pages now render at exactly the oracle's size:
+**1020x1530** and **915x900**.
+
+### Tests
+
+- **`a_page_size_a_hair_above_a_whole_pixel_is_snapped_but_a_real_fraction_is_not`** pins both
+  bands, because the failure in each direction is different: too narrow and the page is a pixel
+  too big and the comparison is *refused*, too wide and a genuinely-fractional page loses its last
+  pixel of canvas. It asserts `734.400024 → 1530` (snapped), `734.4 → 1530` (exact),
+  `734.424 → 1531` and `734.43 → 1531` (real fractions, ceiled). **Confirmed to fail on the old
+  `1e-9`** with `but the buffer is 1531 rows. Its exact size is 1530.00005 pixels`, which is the
+  defect stated as a number.
+- A fractional-height page builder was added beside the integer one, since a producer writing a
+  `/MediaBox` as a decimal does not round it and the integer helper could not express the case at
+  all — which is why this defect could not have been written as a test before.

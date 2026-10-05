@@ -241,10 +241,24 @@ pub fn effective_scale(asked: f64) -> f64 {
 /// mistake on a 100-point page is `208.33333333333334`, which is 1.3e-15 from 208.33 and
 /// nowhere near the next integer — so an absolute epsilon wide enough to catch the Letter
 /// page would also swallow a quarter of a pixel on a small page, and one narrow enough to
-/// spare the small page would miss the Letter page entirely. 1e-9 is roughly 4.5 million
-/// ulps, which f64 rounding cannot exceed, and it is four thousand times narrower than the
-/// smallest real difference: a page 612.0001 points wide is 1275.0002 pixels.
-const WHOLE_PIXEL_EPSILON: f64 = 1e-9;
+/// spare the small page would miss the Letter page entirely. An **absolute** epsilon therefore
+/// cannot separate "one ulp above a whole pixel" from "a quarter of a pixel"; only a relative
+/// one can, and this is that.
+///
+/// The value is **1e-6 relative, measured against `mutool`** rather than chosen. `mutool` snaps
+/// a page size that is within about 1e-6 of a whole pixel and ceils it otherwise: feeding it
+/// pages whose 150-DPI height is 1530.001, 1530.005 and 1530.05 pixels gives heights 1530, 1531
+/// and 1531, so its threshold sits between the first two — 1.3e-6 and 3.3e-6 relative.
+///
+/// That threshold is not an arbitrary tolerance on `mutool`'s part; it is what a reader has to
+/// use anyway. A producer writes a `/CropBox` as decimal, and `pdfjs__freeculture.pdf` writes
+/// one as `[86.399997 248.40001 525.6 680.4]` — eight significant decimals, so the true height
+/// is 734.4 and the file says 734.400024. Carried through to 150 DPI that is 1530.00005, which
+/// a 1e-9 tolerance cannot see and a `ceil` then rounds **up**, making this renderer one pixel
+/// taller than the oracle. A buffer one pixel off is not a slightly worse picture, it is a
+/// *size disagreement*, and the comparison is refused rather than scored — so a tolerance that
+/// is too tight does not degrade a measurement, it deletes it.
+const WHOLE_PIXEL_EPSILON: f64 = 1e-6;
 
 /// One side of a page buffer, in pixels.
 ///
@@ -261,7 +275,9 @@ const WHOLE_PIXEL_EPSILON: f64 = 1e-9;
 ///
 /// So a value within `WHOLE_PIXEL_EPSILON` of an integer is taken to *be* that integer
 /// before the ceiling is applied. The ceiling itself is right and stays: it is what makes
-/// 208.33 into 209, and what `mutool` does.
+/// 208.33 into 209, and it is what `mutool` does for everything past its own snapping
+/// threshold — measured, at 1530.005 pixels and above, where `mutool` returns 1531 and this
+/// returns 1531 too.
 fn pixels_for(pixels: f64, shrink: f64) -> usize {
     let exact = pixels * shrink;
     let whole = exact.round();
@@ -2234,6 +2250,66 @@ mod tests {
         );
     }
 
+    /// A `/CropBox` written to eight decimals does not make the buffer a pixel taller.
+    ///
+    /// The test above covers a page whose size is a whole number of pixels *in exact
+    /// arithmetic*, which fails by one ulp. This covers the other case, which is far more
+    /// common and much larger: the producer wrote a decimal that is not quite the number it
+    /// meant. `pdfjs__freeculture.pdf` writes `/CropBox [86.399997 248.40001 525.6 680.4]`, so
+    /// its height is 734.400024 where 734.4 was meant, and at 150 DPI that is 1530.00005 — five
+    /// hundred times further from a whole pixel than one ulp, and invisible to a tolerance
+    /// narrow enough to spare a genuinely-fractional page.
+    ///
+    /// **Both numbers were measured against `mutool draw -r 150`**, which is what makes the
+    /// tolerance a decision rather than a guess. Feeding it pages whose height lands 0.001,
+    /// 0.005 and 0.05 pixels above a whole 1530 gives 1530, 1531 and 1531, so it snaps within
+    /// about 1e-6 relative and ceils beyond it. Two corpus pages stopped disagreeing with it
+    /// when this tolerance was widened from 1e-9 to 1e-6, and none started.
+    ///
+    /// The two bands are asserted separately because the failure in each direction is
+    /// different: too narrow and the page is a pixel too big and the comparison is *refused*,
+    /// too wide and a genuinely-fractional page loses its last pixel of canvas.
+    #[test]
+    fn a_page_size_a_hair_above_a_whole_pixel_is_snapped_but_a_real_fraction_is_not() {
+        let scale = 150.0 / 72.0;
+        let width = 612i64;
+        // (height in points, expected pixels) — the points are chosen so the height at 150
+        // DPI lands on the stated pixel value.
+        for (points, expect) in [
+            // A hair over a whole pixel: the file's own decimal error.
+            (734.400024f64, 1530usize),
+            // Exactly whole.
+            (734.4, 1530),
+            // A real fraction of a pixel: ceiled, not snapped away.
+            (734.424, 1531),
+            (734.43, 1531),
+        ] {
+            let doc = Document::open(
+                rect_page_fractional_bytes(width, points),
+                mangle_syntax::OpenOptions::default(),
+            )
+            .expect("the file opens");
+            let page = page_of(&doc);
+            let render = render_page(
+                &doc,
+                &page,
+                &Resources::default(),
+                RenderOptions {
+                    scale,
+                    ..RenderOptions::default()
+                },
+            );
+            assert_eq!(
+                render.image.height,
+                expect,
+                "a page {points} points tall is {expect} pixels at 150 DPI, but the buffer is {} \
+                 rows. Its exact size is {} pixels.",
+                render.image.height,
+                points * scale
+            );
+        }
+    }
+
     /// A page whose size in points is a whole number of pixels stays that number of pixels.
     ///
     /// This is the other half of `a_page_buffer_rounds_up_so_the_edge_is_not_clipped`, and it
@@ -2377,6 +2453,35 @@ mod tests {
     }
 
     /// A one-page file of the given width and height in points, with no content, as bytes.
+    /// The same, with a height that is not a whole number of points — which is the whole
+    /// point, since a producer writing a `/MediaBox` as a decimal does not round it.
+    fn rect_page_fractional_bytes(points_w: i64, points_h: f64) -> Vec<u8> {
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+        let mut at = [0usize; 4];
+        at[1] = body.len();
+        body.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        at[2] = body.len();
+        body.extend_from_slice(
+            format!(
+                "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 {points_w} \
+                 {points_h}] >>\nendobj\n"
+            )
+            .as_bytes(),
+        );
+        at[3] = body.len();
+        body.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n");
+        let xref = body.len();
+        body.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 3\n");
+        for offset in at.iter().take(4).skip(1) {
+            body.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        body.extend_from_slice(
+            format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        body
+    }
+
     fn rect_page_bytes(points_w: i64, points_h: i64) -> Vec<u8> {
         let mut body: Vec<u8> = Vec::new();
         body.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
