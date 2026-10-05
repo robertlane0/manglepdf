@@ -260,6 +260,235 @@ pub fn effective_scale(asked: f64) -> f64 {
 /// is too tight does not degrade a measurement, it deletes it.
 const WHOLE_PIXEL_EPSILON: f64 = 1e-6;
 
+/// Draw every annotation on the page, in the order the page lists them.
+///
+/// An annotation's ink is an **appearance stream**: a form XObject whose own `/BBox` is mapped
+/// onto the annotation's `/Rect`. That is the whole of the geometry, and ISO 32000-1 §12.5.5
+/// gives the composition in a fixed order — the box onto the rectangle, then the form's
+/// `/Matrix`, then `/Transform` — which is applied here in that order because every other order
+/// puts the annotation somewhere plausible and wrong.
+///
+/// The appearance is drawn by `paint_records`, the same marks-to-pixels loop the page's own
+/// content goes through, with the annotation's own `/Resources`. A file whose annotations name
+/// their own fonts therefore gets those fonts, which is the same rule forms follow and for the
+/// same reason.
+///
+/// What is **not** synthesised is an appearance the annotation does not carry. A `/Highlight`
+/// with no `/AP` is a coloured rectangle by convention, and inventing one would put colour on the
+/// page that the file never asked for; it is reported by name instead.
+fn paint_annotations(
+    doc: &Document,
+    page: &Page,
+    placement: &Placement,
+    device: &mut Device,
+    notes: &mut Vec<String>,
+) {
+    for (index, annot) in page.annots(doc).iter().enumerate() {
+        let Some(object) = doc.resolve_object(annot) else {
+            notes.push(format!(
+                "annotation {} of the page is an indirect reference that does not resolve, so \
+                 it was not drawn",
+                index + 1
+            ));
+            continue;
+        };
+        let Some(dict) = object.as_dict() else {
+            notes.push(format!(
+                "annotation {} of the page is a {} rather than a dictionary, so it was not drawn",
+                index + 1,
+                object.type_name()
+            ));
+            continue;
+        };
+        // `/F` bit 2 is Hidden and bit 6 is NoView. Both mean the annotation is not shown in a
+        // printed or displayed page, and drawing it would put ink the file says is not there.
+        let flags = dict.get("F").and_then(Object::as_i64).unwrap_or(0);
+        if flags & (ANNOT_HIDDEN | ANNOT_NO_VIEW) != 0 {
+            continue;
+        }
+        let subtype = dict
+            .get("Subtype")
+            .and_then(Object::as_name)
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .unwrap_or_else(|| "unknown".to_owned());
+        // `/AP` is a dictionary holding `/N` (normal) and `/R`; only `/N` is the page's ink,
+        // because `/R` is what a rubber stamp shows while it is being dragged. `/N` is then
+        // either one appearance stream or a dictionary of them keyed by appearance state.
+        let ap = dict.get("AP").and_then(|ap| doc.resolve_object(ap));
+        let normal = ap
+            .as_ref()
+            .and_then(|o| o.as_dict())
+            .and_then(|d| d.get("N"))
+            .and_then(|n| doc.resolve_object(n));
+        let chosen = match normal {
+            Some(Object::Dict(states)) => {
+                // `Dict::get` takes a `str`, so the state's name is read as a string rather
+                // than as a `Name`. A state that is not in the dictionary is named rather than
+                // defaulted: guessing which of several looks right is how the wrong one gets
+                // drawn silently.
+                let wanted = dict
+                    .get("AS")
+                    .and_then(Object::as_name)
+                    .and_then(|n| std::str::from_utf8(n).ok().map(str::to_owned));
+                let found = wanted.as_deref().and_then(|w| states.get(w)).cloned();
+                match found.and_then(|o| doc.resolve_object(&o)) {
+                    Some(p) => Some(p),
+                    None => {
+                        notes.push(format!(
+                            "the /{subtype} annotation {} names the appearance state `{}`, \
+                             which its /AP does not define, so it was not drawn",
+                            index + 1,
+                            wanted.as_deref().unwrap_or("(none)")
+                        ));
+                        continue;
+                    }
+                }
+            }
+            Some(other) => Some(other),
+            None => {
+                // A `/Link` and a `/Popup` have no appearance of their own, so nothing is
+                // missing and there is nothing to report — a note per link on every page would
+                // be noise that teaches a reader to skip notes.
+                if ap.is_none() && !NO_APPEARANCE_BY_DESIGN.contains(&subtype.as_str()) {
+                    notes.push(format!(
+                        "the /{subtype} annotation {} carries no /AP appearance, and one was \
+                         not invented for it",
+                        index + 1
+                    ));
+                } else if ap.is_some() {
+                    notes.push(format!(
+                        "the /{subtype} annotation {} has an /AP with no normal appearance, so \
+                         it was not drawn",
+                        index + 1
+                    ));
+                }
+                continue;
+            }
+        };
+        let Some(appearance) = chosen else {
+            continue;
+        };
+        let Object::Stream(form) = appearance else {
+            notes.push(format!(
+                "the /{subtype} annotation {} has a normal appearance that is not a stream, so \
+                 it was not drawn",
+                index + 1
+            ));
+            continue;
+        };
+        let Some(rect) = dict.get("Rect").and_then(|r| {
+            PageRect::from_object(&doc.resolve_object(r).unwrap_or_else(|| r.clone())).ok()
+        }) else {
+            notes.push(format!(
+                "the /{subtype} annotation {} has no usable /Rect, so it has nowhere to be \
+                 drawn",
+                index + 1
+            ));
+            continue;
+        };
+        if rect.right <= rect.left || rect.top <= rect.bottom {
+            notes.push(format!(
+                "the /{subtype} annotation {} has a /Rect with no area, so it was not drawn",
+                index + 1
+            ));
+            continue;
+        }
+        // The appearance's own box, mapped onto the rectangle. A stream with no `/BBox` is
+        // taken to fill its rectangle, which is what a viewer does with one.
+        let bbox = match form.dict.get("BBox") {
+            Some(b) => {
+                let resolved = doc.resolve_object(b).unwrap_or_else(|| b.clone());
+                match PageRect::from_object(&resolved) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        notes.push(format!(
+                            "the /{subtype} annotation {} has a /BBox that is not four numbers, \
+                             so it was not drawn",
+                            index + 1
+                        ));
+                        continue;
+                    }
+                }
+            }
+            None => rect,
+        };
+        if bbox.right <= bbox.left || bbox.top <= bbox.bottom {
+            notes.push(format!(
+                "the /{subtype} annotation {} has a /BBox with no area, so it was not drawn",
+                index + 1
+            ));
+            continue;
+        }
+        // §12.5.5: the box onto the rectangle, then the form's `/Matrix`, then `/Transform`.
+        // A `/Transform` is in the *rectangle's* space, so it goes outside the box mapping.
+        let sx = (rect.right - rect.left) / (bbox.right - bbox.left);
+        let sy = (rect.top - rect.bottom) / (bbox.top - bbox.bottom);
+        let mut to_rect = Matrix::new(
+            sx,
+            0.0,
+            0.0,
+            sy,
+            rect.left - bbox.left * sx,
+            rect.bottom - bbox.bottom * sy,
+        );
+        if let Some(m) = form.dict.get("Matrix") {
+            to_rect = to_rect.concat(read_matrix(Some(
+                &doc.resolve_object(m).unwrap_or_else(|| m.clone()),
+            )));
+        }
+        if let Some(t) = form.dict.get("Transform") {
+            to_rect = to_rect.concat(read_matrix(Some(
+                &doc.resolve_object(t).unwrap_or_else(|| t.clone()),
+            )));
+        }
+
+        let decoded = decode_stream(&form);
+        if decoded.encoded {
+            notes.push(format!(
+                "the /{subtype} annotation {} is still encoded after its filters, so it was not \
+                 drawn rather than read as operators",
+                index + 1
+            ));
+            continue;
+        }
+        if decoded.data.is_empty() {
+            continue;
+        }
+        for note in &decoded.notes {
+            notes.push(format!("the /{subtype} annotation {}: {note}", index + 1));
+        }
+        // An annotation names its own fonts and images.
+        let own = match form.dict.get("Resources") {
+            Some(r) => {
+                let resolved = doc.resolve_object(r).unwrap_or_else(|| r.clone());
+                resolved
+                    .as_dict()
+                    .map(|d| Resources::from_dict(d, &|o| doc.resolve_object(o)))
+                    .unwrap_or_default()
+            }
+            None => Resources::default(),
+        };
+        let executed = run_with(&ContentStream::parse(&decoded.data), &own);
+        for note in &executed.notes {
+            notes.push(format!("the /{subtype} annotation {}: {note}", index + 1));
+        }
+        let annot_placement = Placement {
+            matrix: placement.matrix.concat(to_rect),
+            size: placement.size,
+        };
+        paint_records(&executed, device, &annot_placement, &own, doc, notes);
+    }
+}
+
+/// Annotation kinds the specification gives **no** appearance of its own, so a missing `/AP` on
+/// one of them is the file saying what it meant rather than a gap in the page.
+const NO_APPEARANCE_BY_DESIGN: &[&str] = &["Link", "Popup"];
+
+/// `/F` bit 2: the annotation is hidden entirely.
+const ANNOT_HIDDEN: i64 = 1 << 1;
+/// `/F` bit 6: the annotation is not shown when the page is displayed or printed.
+const ANNOT_NO_VIEW: i64 = 1 << 5;
+
 /// One side of a page buffer, in pixels.
 ///
 /// **Rounded up**, because rounding down clips the page: 100 points at 150 DPI is 208.33
@@ -344,22 +573,28 @@ pub fn render_page(
     let decoded = page.decoded_contents_full(doc);
     render.notes.extend(decoded.notes.iter().cloned());
     let content = decoded.data;
-    if content.is_empty() {
-        return render;
-    }
-    let stream = ContentStream::parse(&content);
-    let executed = run_with(&stream, resources);
-    render.notes.extend(executed.notes.iter().cloned());
 
     let mut device = Device::new(render.image);
-    render.marks += paint_records(
-        &executed,
-        &mut device,
-        &placement,
-        resources,
-        doc,
-        &mut render.notes,
-    );
+    // An empty `/Contents` is **not** an early return. A page whose only ink is its annotations
+    // has no content stream at all, which is legal and is how a form made only of stamps is
+    // written; returning there would drop every annotation on it and say nothing.
+    if !content.is_empty() {
+        let stream = ContentStream::parse(&content);
+        let executed = run_with(&stream, resources);
+        render.notes.extend(executed.notes.iter().cloned());
+        render.marks += paint_records(
+            &executed,
+            &mut device,
+            &placement,
+            resources,
+            doc,
+            &mut render.notes,
+        );
+    }
+    // Annotations are drawn after the page's own content, in the order the page lists them,
+    // and into the same device — so an annotation's ink lands on top of the text it annotates,
+    // which is what a highlight is for.
+    paint_annotations(doc, page, &placement, &mut device, &mut render.notes);
     render.image = device.into_image();
     render
 }
@@ -2310,6 +2545,190 @@ mod tests {
         }
     }
 
+    /// An annotation's appearance stream is drawn, on top of the text it annotates.
+    ///
+    /// The geometry is the whole of the test: the appearance's `/BBox` is mapped onto the
+    /// annotation's `/Rect`, and **not** onto the page. A `/BBox` of `[0 0 1 1]` mapped onto a
+    /// 200-unit rectangle is the difference between a highlight the width of its line and a
+    /// highlight a hair wide, and the mistake is invisible until you look for it.
+    #[test]
+    fn an_annotations_appearance_is_drawn_over_the_page() {
+        // A highlight whose appearance box is the unit square, so only a renderer that maps
+        // the box onto the rectangle can put ink where the rectangle is.
+        let page = highlight_page(
+            "/AP << /N 5 0 R >>",
+            &appearance(0.0, 0.0, 1.0, 1.0, "1 1 0 rg 0 0 1 1 re f"),
+        );
+        let doc = Document::open(page, mangle_syntax::OpenOptions::default()).expect("opens");
+        let page = page_of(&doc);
+        let render = render_page(
+            &doc,
+            &page,
+            &Resources::default(),
+            RenderOptions {
+                scale: 1.0,
+                ..RenderOptions::default()
+            },
+        );
+        // Inside the rectangle. The canvas counts down and the page counts up, so page y
+        // 600 to 620 is device y 792-620 to 792-600, and 182 is the middle of that.
+        assert_eq!(
+            render.image.get(200, 182),
+            Some([255, 255, 0, 255]),
+            "the highlight paints its rectangle: {:?}",
+            render.notes
+        );
+        // Outside it, the same colour must not appear: a box mapped onto the page instead of
+        // the rectangle would put a 1x1 pixel somewhere else entirely, or nowhere.
+        assert_eq!(
+            render.image.get(200, 400),
+            Some([255, 255, 255, 255]),
+            "and nothing outside the rectangle, which is page y 392: {:?}",
+            render.notes
+        );
+        assert!(
+            render.notes.is_empty(),
+            "an annotation that draws is not reported as undrawn: {:?}",
+            render.notes
+        );
+    }
+
+    /// A hidden annotation is not drawn, and its absence is not a finding.
+    ///
+    /// `/F` bit 2 is Hidden and bit 6 is NoView. Both mean the file says this ink is not on the
+    /// displayed page, so drawing it would put on the page something the file denies.
+    #[test]
+    fn a_hidden_annotation_is_not_drawn_and_is_not_a_note() {
+        for (flags, why) in [(2, "/F 2 is Hidden"), (32, "/F 32 is NoView")] {
+            let page = highlight_page(
+                &format!("/F {flags} /AP << /N 5 0 R >>"),
+                &appearance(0.0, 0.0, 1.0, 1.0, "1 1 0 rg 0 0 1 1 re f"),
+            );
+            let doc = Document::open(page, mangle_syntax::OpenOptions::default()).expect("opens");
+            let page = page_of(&doc);
+            let render = render_page(
+                &doc,
+                &page,
+                &Resources::default(),
+                RenderOptions {
+                    scale: 1.0,
+                    ..RenderOptions::default()
+                },
+            );
+            assert_eq!(
+                render.image.get(200, 182),
+                Some([255, 255, 255, 255]),
+                "{why}, so the highlight is not on the page: {:?}",
+                render.notes
+            );
+        }
+    }
+
+    /// An annotation with no `/AP` is reported by name rather than invented.
+    ///
+    /// A `/Highlight` with no appearance is a coloured rectangle *by convention*, and drawing one
+    /// would put colour on the page that the file never asked for. The note is what says the
+    /// rectangle is missing rather than absent.
+    #[test]
+    fn an_annotation_with_no_appearance_is_reported_and_not_invented() {
+        let page = page_with_annotations(
+            "/Subtype /Highlight /Rect [100 600 300 620] /C [1 1 0] \
+             /QuadPoints [100 600 300 600 100 620 300 620]",
+            "",
+        );
+        let doc = Document::open(page, mangle_syntax::OpenOptions::default()).expect("opens");
+        let page = page_of(&doc);
+        let render = render_page(
+            &doc,
+            &page,
+            &Resources::default(),
+            RenderOptions {
+                scale: 1.0,
+                ..RenderOptions::default()
+            },
+        );
+        assert_eq!(
+            render.image.get(200, 182),
+            Some([255, 255, 255, 255]),
+            "nothing is drawn in its place: {:?}",
+            render.notes
+        );
+        assert!(
+            render
+                .notes
+                .iter()
+                .any(|n| n.contains("carries no /AP") && n.contains("was not invented")),
+            "and the note says why, rather than leaving a blank where a highlight should be: {:?}",
+            render.notes
+        );
+    }
+
+    /// An annotation whose `/AP` is still encoded is reported rather than read as operators.
+    ///
+    /// A filter this project does not implement is the case that matters: the bytes are still
+    /// compressed, and handing them to the operator table would draw whatever the compressed
+    /// stream happens to contain as a page of marks.
+    #[test]
+    fn an_encoded_annotation_appearance_is_reported_rather_than_executed() {
+        let page = highlight_page(
+            "/AP << /N 5 0 R >>",
+            &appearance_with_filter(
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                "/Filter /LZWDecodeX",
+                "1 1 0 rg 0 0 1 1 re f",
+            ),
+        );
+        let doc = Document::open(page, mangle_syntax::OpenOptions::default()).expect("opens");
+        let page = page_of(&doc);
+        let render = render_page(
+            &doc,
+            &page,
+            &Resources::default(),
+            RenderOptions {
+                scale: 1.0,
+                ..RenderOptions::default()
+            },
+        );
+        assert!(
+            render.notes.iter().any(|n| n.contains("still encoded")),
+            "the note says the appearance was not read as operators: {:?}",
+            render.notes
+        );
+    }
+
+    /// A page whose only annotation is a `/Link` draws no ink and reports nothing.
+    ///
+    /// A link has no appearance of its own, so "nothing" is what the file said — and a note
+    /// about every link on every page would be noise that trains a reader to ignore notes.
+    #[test]
+    fn a_link_with_no_appearance_is_silent() {
+        let page =
+            page_with_annotations("/Subtype /Link /Rect [100 600 300 620] /Border [0 0 0]", "");
+        let doc = Document::open(page, mangle_syntax::OpenOptions::default()).expect("opens");
+        let page = page_of(&doc);
+        let render = render_page(
+            &doc,
+            &page,
+            &Resources::default(),
+            RenderOptions {
+                scale: 1.0,
+                ..RenderOptions::default()
+            },
+        );
+        assert_eq!(
+            render.image.get(200, 182),
+            Some([255, 255, 255, 255])
+        );
+        assert!(
+            render.notes.is_empty(),
+            "a link that draws nothing is what the file said: {:?}",
+            render.notes
+        );
+    }
+
     /// A page whose size in points is a whole number of pixels stays that number of pixels.
     ///
     /// This is the other half of `a_page_buffer_rounds_up_so_the_edge_is_not_clipped`, and it
@@ -2453,7 +2872,72 @@ mod tests {
     }
 
     /// A one-page file of the given width and height in points, with no content, as bytes.
-    /// The same, with a height that is not a whole number of points — which is the whole
+    /// A form XObject appearance stream with the given box, no filter.
+    fn appearance(x0: f64, y0: f64, x1: f64, y1: f64, content: &str) -> String {
+        appearance_with_filter(x0, y0, x1, y1, "", content)
+    }
+
+    /// The same, with a `/Filter`, for the case where the bytes must not reach the interpreter.
+    fn appearance_with_filter(
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        filter: &str,
+        content: &str,
+    ) -> String {
+        format!(
+            "<< /Type /XObject /Subtype /Form /FormType 1 /BBox [{x0} {y0} {x1} {y1}] \
+             /Resources << >> {filter} /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+            content.len()
+        )
+    }
+
+    /// A one-page 612x792 document whose `/Annots` holds one annotation with one appearance.
+    ///
+    /// Offsets are recorded as the objects are written rather than computed afterwards: a
+    /// hand-built cross-reference table whose entries are arithmetic on string lengths is wrong
+    /// the moment a dictionary is one character longer, and the symptom is an object that quietly
+    /// does not resolve.
+    fn page_with_annotations(annot_extra: &str, appearance_body: &str) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+        offsets.push(out.len());
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << >> /Annots [4 0 R] >>\nendobj\n",
+        );
+        offsets.push(out.len());
+        out.extend_from_slice(format!("4 0 obj\n<< {annot_extra} >>\nendobj\n").as_bytes());
+        offsets.push(out.len());
+        out.extend_from_slice(format!("5 0 obj\n{appearance_body}endobj\n").as_bytes());
+
+        let xref = out.len();
+        out.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in &offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        out
+    }
+
+    /// A page carrying one `/Highlight` whose appearance fills its own box.
+    fn highlight_page(annot_extra: &str, appearance_body: &str) -> Vec<u8> {
+        page_with_annotations(
+            &format!("/Subtype /Highlight /Rect [100 600 300 620] {annot_extra}"),
+            appearance_body,
+        )
+    }
+
+    /// The same, with a height that is not a whole number of points    /// The same, with a height that is not a whole number of points — which is the whole
     /// point, since a producer writing a `/MediaBox` as a decimal does not round it.
     fn rect_page_fractional_bytes(points_w: i64, points_h: f64) -> Vec<u8> {
         let mut body: Vec<u8> = Vec::new();
