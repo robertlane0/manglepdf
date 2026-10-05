@@ -355,14 +355,28 @@ renderer that never has to ask the machine for a font.
    ([D15](docs/known-diffs.md)), and the fill's coverage depends on where a polygon's edge list
    starts, which moves one boundary pixel by up to eighteen units out of 255
    ([D16](docs/known-diffs.md)).
-3. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
-   not going to be built.
-4. **Fill the Inspector's right-hand region** from the object model, which is the window work
+3. **`Separation`/`DeviceN` tint-transform evaluation** (this is now the largest single
+   colour-space gap in the corpus, having taken over from `ICCBased`). `TAMReview` uses it
+   for the body of the whole article and draws only its running furniture;
+   `gov__nist-sp800-88.pdf` uses it on one page out of 44. A tint transform is a function
+   from the tint to the alternate space's components, and the ICC-based conversion
+   [below](docs/known-diffs.md#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-mask-never-read-was-never-reported)
+   does **not** get there on its own: there is no `/Alternate` to fall through to, the
+   transform has to be evaluated. The same entry's rule applies — evaluate it, or refuse it
+   by name — and `Indexed` is the other space still in the same hole, since it needs a
+   palette rather than a profile.
+4. **JBIG2 and JPEG 2000 decoders** (F17, F18), or an explicit scope statement if they are
+   not going to be built. Both are wanted by name on the corpus — they are W034 and W038,
+   67 pages between them — and **the reporting half is already done**: an image that cannot
+   be decoded now names every part of itself it skipped, including a `/Mask` or `/SMask`
+   that was never reached and that mask's own codec. So the note says whether closing the
+   codec gap closes the page, which is the question that was unanswerable before.
+5. **Fill the Inspector's right-hand region** from the object model, which is the window work
    that has not been started.
-5. **Break the symmetry of the remaining fixtures.** The diagonal-clip page is asymmetric now
+6. **Break the symmetry of the remaining fixtures.** The diagonal-clip page is asymmetric now
    and scored 0.51652 when its clip was a box, where every symmetric fixture had scored above
    0.99 through the same bug. The rest still need the same treatment.
-6. **Form XObjects: done.** A `Do` whose `/Subtype` is `/Form` is executed as a nested content
+7. **Form XObjects: done.** A `Do` whose `/Subtype` is `/Form` is executed as a nested content
    stream rather than read as an image, and what it took is written up in
    [STATUS](docs/STATUS.md#a-form-xobject-is-a-nested-content-stream-not-an-image-with-no-samples):
    the form/image decision is made at the XObject dictionary, the `/Matrix` and `/BBox` go into
@@ -371,8 +385,8 @@ renderer that never has to ask the machine for a font.
    it, so a renderer can find the right table for `/F1`. Nesting needed a starting-state entry
    point (`run_with_state`) and a depth bound; `/BBox` clipping needed the corners put through
    the form's own CTM. What it left behind was
-   [D17](docs/known-diffs.md), now fixed — see item 7.
-7. **A composite font's glyph addressing: done.** A CID is answered by the descendant's
+   [D17](docs/known-diffs.md), now fixed — see item 8.
+8. **A composite font's glyph addressing: done.** A CID is answered by the descendant's
    `/CIDToGIDMap` and by nothing else. Absent, or the name `Identity`, the identifier is the
    glyph number; a stream is one two-byte entry per CID; the font's `cmap` is never consulted,
    because a `cmap` numbers *characters* and a symbolic font's private-use codes are a different
@@ -390,7 +404,7 @@ renderer that never has to ask the machine for a font.
    the fix changes no pixel on that page while removing a wrong answer for every CID in the
    range that subtable does cover. Its 2.6× excess ink is `/Image15`, a 2×2 image whose `/SMask`
    is a 34862×4332 one, drawn as a solid bar where the oracle draws three thin arrows.
-8. **The image mask on `pdfjs__issue16263.pdf`: done.** It was **not** a sampling defect, and
+9. **The image mask on `pdfjs__issue16263.pdf`: done.** It was **not** a sampling defect, and
    ruling out the other two candidates is most of the finding. `Raster::sample` was not clamping
    out of range — a mask is sampled at the *image's* own `(u, v)`, which is the specification's
    arrangement, and a mask wider than its image is not an out-of-range read. The alpha was not
@@ -584,9 +598,10 @@ report per file into `corpus/wild/report/`. It asserts nothing about any individ
 because a corpus's job is to find things and a threshold on a document nobody has read yet
 turns the first surprise into a permanent red build.
 
-The measurements and their evidence are in `docs/known-diffs.md`. In short: 460 pages
-compared, median SSIM 0.6929, 94.8% of pages below 0.95, 35 of 77 files unopenable. Four
-findings dominate, in this order:
+The measurements and their evidence are in `docs/known-diffs.md`, which records the last full
+77-file run (738 pages compared, median SSIM 0.95795, 254 pages below 0.95) and, entry by
+entry, what each fix since has moved. Four findings dominated that run, and three of them are
+fixed:
 
 1. **`render_page` renders a blank page for any Flate-compressed content stream.** All 542
    measured pages drew nothing. The interpreter's own note contains the compressed bytes as
@@ -620,12 +635,28 @@ is refused rather than guessed at. **Both font clusters are now done** — the C
 read (ISO 10581 §5.2, three formats and the Standard Strings list) and the standard fourteen
 draw from bundled metric-compatible faces. Until they were, no render number in this project
 said anything about fidelity and the arXiv page's SSIM sat at 0.7915 whether or not its
-content decoded; it is now 0.88414, and **a full re-run of the corpus is wanted** to
-re-baseline the median. It takes two hours, so it is run deliberately rather than in a loop.
-6. Tier B with `SOURCES.md`: a real-world corpus, which is the only way to find the encoding
-   problems a hand-written fixture cannot express. **Done** — see above.
+content decoded; it is now 0.88414.
 
-Settled and no longer queued: images decode and draw, axial and radial shadings paint, the
+**What is left in the corpus is three gaps, and they are large and separate.** A `Separation`
+or `DeviceN` tint transform has to be evaluated (W076, 23 pages, and the one bad page of the 44
+in W075). A JPEG 2000 or JBIG2 decoder has to exist (W034 and W038, 67 pages between them) —
+and the reporting around that is already done, so its note says whether closing the codec gap
+closes the page. The third is not a missing feature at all: **`gov__nist-sp800-88.pdf` page 2
+resolves none of its eight content streams** and so draws paper with no note whatsoever, which is
+the same shape of failure D19 fixed on the image side, and the last place in this corpus where
+something missing is invisible. **A full re-run of the corpus is wanted** to re-baseline the
+median against these. It takes two hours, so it is run deliberately rather than in a loop.
+
+Tier B with `SOURCES.md`: a real-world corpus, which is the only way to find the encoding
+problems a hand-written fixture cannot express. **Done** — see above.
+
+Settled and no longer queued: **an `ICCBased` colour space**, which used to be refused
+outright and took 42 of a 44-page NIST publication with it — `Colour` now carries what the
+profile declares from the `cs` operator to the conversion, and reads the colour through the
+`/Alternate` the file names, which is the file's own answer for a reader that cannot apply the
+profile rather than an approximation of it ([D19](docs/known-diffs.md)). That file's median
+SSIM went from 0.7727 to 0.96095 and 41 of its 44 pages below 0.95 came down to 10. Also
+settled: images decode and draw, axial and radial shadings paint, the
 clip bounds are transformed by exactly one matrix, a clip is now the path the page set rather
 than the box around it — the interpreter records the path, its rule and its box together, and
 the renderer rasterises the path into a per-pixel mask it multiplies into every fill, so a

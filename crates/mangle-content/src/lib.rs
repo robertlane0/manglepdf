@@ -51,8 +51,8 @@ pub use interp::{
 };
 pub use matrix::Matrix;
 pub use state::{
-    Clip, ClipBounds, Colour, ColourSpace, Dash, ExtGState, ExtGStates, GraphicsState, LineCap,
-    LineJoin, PathSegment, RenderMode, Rgba, StateStack, StrokeStyle, TextState,
+    Clip, ClipBounds, Colour, ColourSpace, Dash, ExtGState, ExtGStates, GraphicsState, IccBased,
+    LineCap, LineJoin, PathSegment, RenderMode, Rgba, StateStack, StrokeStyle, TextState,
 };
 pub use tokens::{ContentKind, ContentStream, ContentToken, Operation};
 
@@ -78,6 +78,16 @@ pub struct Resources {
     /// a composite font that declares no `/W` at all still has two-byte codes, and a page
     /// that showed text in it would otherwise have its string split into single bytes.
     composite_fonts: std::collections::BTreeSet<String>,
+    /// What each ICC-based colour space resource declares, by name.
+    ///
+    /// `/N` and `/Alternate` live in the profile stream's dictionary, which is normally an
+    /// indirect object away from the `[/ICCBased …]` array that names it, so they are
+    /// followed here through the same resolver that built the other tables: `cs`/`CS` run
+    /// once per colour space a stream selects and hold no document, so this is the only
+    /// place a reference can be followed. Only ICC-based spaces have an entry, which makes
+    /// an absent one mean "this name is not an ICC-based space" rather than "nothing was
+    /// read".
+    icc: std::collections::BTreeMap<String, IccBased>,
     pub xobjects: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
     /// Every form XObject's own resource table, by name.
     ///
@@ -107,6 +117,7 @@ impl PartialEq for Resources {
         self.fonts == other.fonts
             && self.font_widths == other.font_widths
             && self.composite_fonts == other.composite_fonts
+            && self.icc == other.icc
             && self.xobjects == other.xobjects
             && self.forms == other.forms
             && self.ext_gstates == other.ext_gstates
@@ -160,6 +171,30 @@ impl Resources {
         let gs_values = named(&table("ExtGState"));
         let fonts = named(&table("Font"));
         let xobjects = named(&table("XObject"));
+        // The colour spaces, and out of them the ICC-based ones. A colour space resource
+        // is an array whose second element is the profile, so this is the one table whose
+        // values have to be followed a second time: `named` dereferences the array, and
+        // the profile inside it is dereferenced here. Anything that is not `[/ICCBased …]`
+        // has no entry, which is what keeps the interpreter's lookup a single question.
+        let colour_spaces = named(&table("ColorSpace"));
+        let mut icc = std::collections::BTreeMap::new();
+        for (name, value) in &colour_spaces {
+            let Some(array) = value.as_array() else {
+                continue;
+            };
+            if array
+                .first()
+                .and_then(mangle_syntax::object::Object::as_name)
+                != Some(b"ICCBased")
+            {
+                continue;
+            }
+            let profile = array
+                .get(1)
+                .and_then(resolve)
+                .or_else(|| array.get(1).cloned());
+            icc.insert(name.clone(), IccBased::from_profile(profile.as_ref()));
+        }
         // A form's own resources are read here, through the same resolver, rather than
         // when the form is executed: this is the only place a reference can be followed,
         // and a form's `/Resources` is an indirect object in most files.
@@ -220,7 +255,8 @@ impl Resources {
             xobjects,
             forms,
             shadings: named(&table("Shading")),
-            colour_spaces: named(&table("ColorSpace")),
+            colour_spaces,
+            icc,
             patterns: named(&table("Pattern")),
             ext_gstates: {
                 // A `/gs` name resolves against a table whose values are usually
@@ -282,6 +318,18 @@ impl Resources {
     #[must_use]
     pub fn font_is_composite(&self, name: &str) -> bool {
         self.composite_fonts.contains(name)
+    }
+
+    /// What the named colour space's profile declares, when it selected one.
+    ///
+    /// `None` for a name that is not an `[/ICCBased …]` resource, and for an ICC-based
+    /// resource whose profile could not be read — which reads as a profile that declares
+    /// neither an `/N` nor an `/Alternate`, and is therefore reported rather than
+    /// converted. A reader that resolves nothing sees every ICC space this way, which is
+    /// the same answer it would give a profile with no alternate in it.
+    #[must_use]
+    pub fn icc_profile(&self, name: &str) -> Option<&IccBased> {
+        self.icc.get(name)
     }
 
     /// Every name a content stream could refer to, for the Inspector.

@@ -5,10 +5,10 @@ and Tier B; ≤ 3% of pages below 0.95, each documented in `docs/known-diffs.md`
 cause and evidence."*
 
 **The Tier-B target is not met, and not narrowly.** Against `mutool draw` at 150 DPI over the
-77-file wild corpus: **460 of 542 pages were compared** and the median SSIM is **0.6929**, and
-**436 of those 460 pages (94.8%) are below 0.95**. Thirty-four of the 77 files could not be
-opened at all; **four cannot** now that D2 is fixed. This page records what the corpus found
-and the evidence for each claim.
+77-file wild corpus: **738 of 745 pages produced an SSIM** and the page-level median is
+**0.95795**, and **254 of those 738 pages (34.4%) are below 0.95**. Seventy-three of the 77
+files open; **four cannot**. This page records what the corpus found and the evidence for each
+claim.
 
 The corpus is `corpus/wild/`, pinned by SHA-256 in `corpus/wild/MANIFEST.toml`, fetched with
 `cargo xtask corpus fetch`, and measured by `crates/mangle-render/tests/wild_corpus.rs`.
@@ -16,15 +16,15 @@ That test asserts nothing: the numbers below come from `corpus/wild/report/SUMMA
 the per-file reports beside it, which are git-ignored and regenerated on every run. Oracle
 versions: `mutool 1.28.5`, `pdftotext` (poppler), `qpdf` (system).
 
-> **The SSIM figures below predate [D2](#d2--a-cross-reference-stream-could-never-be-read-at-all-so-every-pdf-15-file-reported-zero-pages)
-> and are now too pessimistic by one file in three.** They were measured when 34 of the 77
-> files could not be opened at all, and a file that cannot be opened contributes no pages
-> and so no SSIM. **73 of 77 now open**, against 43 before, and every one of them reports
-> `as written` — the reader uses the file's own cross-reference information and repairs
-> nothing. The 460-of-542 comparison count, the 0.6929 median and the 94.8%-below-0.95
-> figure all describe a corpus with a third of it missing, and none of them should be read
-> as a fidelity number until the corpus is re-run. The two-hour re-run is the next thing
-> wanted, and this file will be wrong again until it happens.
+> **These figures are a re-run, not an estimate.** The block above is the whole 77-file corpus
+> measured end to end after D2 and D3 were fixed: 77 files, 16195.80s, **0 panicked**, 73
+> opened and 4 closed. It replaces a run that was made when 34 of the 77 files could not be
+> opened at all, and every figure in it — the 460-of-542 comparison count, the 0.6929 median and
+> the 94.8%-below-0.95 figure the previous version of this file carried — described a corpus
+> with a third of it missing. **Of the 73 that open, 67 read their structure as written; 6 needed
+> recovery** (`bug1795263`, `bug1980958`, `GHOSTSCRIPT-698804-1-fuzzed`, `issue15590`,
+> `issue15893_reduced`, `PDFBOX-3148-2-fuzzed`), and the run's own summary counts 9 of the 77 as
+> having needed recovery once the three that did not open but left reader notes are included.
 
 **The test is `#[ignore]`d, on purpose.** One run over the corpus takes about two hours, so
 leaving it in the default suite makes `cargo test --workspace` unusable. The two cheap tests
@@ -37,9 +37,148 @@ cargo xtask corpus fetch
 cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture
 ```
 
-The 460/542 split matters as much as the SSIM does: **80 pages produced no SSIM at all**,
-because their buffers came out one pixel larger than the oracle's and `compare()` refuses
-images of different sizes. That was D3, and D3 is now fixed.
+### The run, in full
+
+| | |
+|---|---|
+| files | **77**, of which **73 opened** and **4 did not** |
+| wall clock | **16195.80s** |
+| panicked | **0** |
+| pages measured | **745** |
+| pages with an SSIM | **738** |
+| page-level median SSIM | **0.95795** |
+| size disagreements | **2** |
+| pages left uncompared on purpose | 2 |
+| pages the oracle could not render | 3 |
+
+The page-level median is not stated in the run's summary — it is computed from
+`corpus/wild/report/pages.tsv` over the **738** rows that carry an SSIM. Nothing else in this
+section is derived; the rest is quoted from the run.
+
+### Per file, by its worst page
+
+Over the **68** files that have at least one page with an SSIM (the four that do not open
+contribute none, and neither do the five whose only pages were skipped):
+
+| worst-page SSIM | files |
+|---|---|
+| ≥ 0.99 | 20 |
+| ≥ 0.95 | 22 |
+| ≥ 0.90 | 6 |
+| ≥ 0.80 | 14 |
+| < 0.80 | **6** |
+
+**Median 0.9698, mean 0.9214.** The mean is 0.048 below the median because those six files are
+not a little way under 0.80 — the best of the six is 0.7564 and the worst is 0.5716, and one of
+them is a single page.
+
+> **W075 has been re-measured since that run, and has moved out of this table.**
+> `gov__nist-sp800-88.pdf` had 41 of its 44 pages below 0.95 and a median of 0.7727 (0.7741 as
+> the run's own per-file summary rounds it);
+> [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-mask-never-read-was-never-reported)
+> below brings it to **10 of 44 below 0.95 and a median of 0.96095**, so it is no longer one of
+> the four worst files, and the corpus-wide count of pages below 0.95 is *at least 31 lower* than
+> the 254 that run measured — a projection rather than a measurement, since every corpus-wide
+> figure on this page is still that run's until the next full one.
+
+### Per page
+
+Over the **738** pages that carry an SSIM:
+
+| | pages | share |
+|---|---|---|
+| below 0.95 | **254** | **34.4%** |
+| below 0.90 | 174 | 23.6% |
+| below 0.80 | 94 | 12.7% |
+| below 0.50 | **0** | 0% |
+
+**Zero pages below 0.50** is the one unambiguous good number in the run, and it is worth saying
+what it means: no page is blank where the oracle has a page, and none is grossly wrong. Every
+one of the 254 is a page that draws *something* and draws it incompletely, in the wrong place, or
+in the wrong colour.
+
+### The seven pages with no SSIM, and why each is missing
+
+The 745/738 split matters as much as the SSIM does, because a page that produced no number is a
+page that was never measured and must never read as one that passed.
+
+| page | why there is no SSIM |
+|---|---|
+| `gov__usgs-topo-cnmi-1.pdf` 1 | 25119300 oracle pixels, above the 16777216 this harness will compare. Rendered at 150 DPI and **left uncompared on purpose** — the bound is the harness's own memory ceiling, not a property of the file. |
+| `gov__usgs-topo-cnmi-3.pdf` 1 | 25127777 oracle pixels, same bound. |
+| `pdfjs__freeculture.pdf` 1 | **size disagreement**: we rendered 1020x1531, mutool rendered 1020x1530 |
+| `pdfjs__freeculture.pdf` 2 | **size disagreement**: we rendered 915x901, mutool rendered 915x900 |
+| `pdfjs__issue15590.pdf` 1 | mutool produced no page 1; **it could not render it** |
+| `pdfjs__GHOSTSCRIPT-698804-1-fuzzed.pdf` 1 | mutool produced no page 1; **it could not render it** |
+| `pdfjs__issue15893_reduced.pdf` 1 | mutool produced no page 1; **it could not render it** |
+
+**Both size disagreements are ours and they are the same defect: we are one pixel taller than
+`mutool` on both pages.** It is D3's shape and D3's fix did not cover this case — `pixels_for`
+settles a value within `WHOLE_PIXEL_EPSILON` of an integer onto that integer, and whatever
+`freeculture`'s box asks for lands outside the epsilon on the height and inside it on the width.
+A real, narrow, reproducible defect, and the only thing standing between two pages and a
+measurement.
+
+The three pages `mutool` cannot render are not differences at all: there is no second opinion to
+have. They are recorded because a page the *oracle* refuses is a page nobody has checked.
+
+### Where the 254 are
+
+They are not scattered. **134 pages — 18.2% of everything measured — are four files**, and those
+four sit at medians between 0.64 and 0.79:
+
+| id | file | pages | median SSIM | pages below 0.95 |
+|---|---|---|---|---|
+| W034 | `gov__nist-nistir7255.pdf` | 66 | 0.7842 | 61 |
+| W075 | `gov__nist-sp800-88.pdf` | 44 | 0.7741 | 41 |
+| W076 | `pdfjs__TAMReview.pdf` | 23 | 0.7663 | 22 |
+| W038 | `pdfjs__S2.pdf` | 1 | 0.6386 | 1 |
+| | | **134** | | **125** |
+
+Each of the four has one named cause, and all four are **missing features rather than bugs** — a
+codec or a colour-space conversion this project does not have. That distinction is the most
+useful thing the diagnosis produced, because it says what to build next:
+
+| id | what is missing | what the renderer says |
+|---|---|---|
+| W034 | a **JPEG 2000** decoder (`JPXDecode`) | `a JPEG 2000 image was found but no decoder exists yet`, twice, on **all 66 pages**. Both images the page draws are JPX, and one of them carries a `JBIG2Decode` `/Mask`. **Fixed as a report: the mask is now named too** (see [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-skipped-mask-was-never-reported) below) — the decoder itself is still missing. |
+| ~~W075~~ | ~~**`ICCBased` colour conversion`~~ | **FIXED — see [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-skipped-mask-was-never-reported).** `CS0` is `[/ICCBased …]` over an sRGB profile that carries `/Alternate /DeviceRGB`, and that alternate is now what the colour is read through. **43 of the file's 44 pages went from zero ink pixels to ink, and the file's median SSIM from 0.7741 to 0.96095.** |
+| W076 | **`Separation`/`DeviceN` tint-transform evaluation** | `the colour text is painted in Cs8 could not be converted`, on 21 of its 23 pages. `Cs8` is `[/Separation /Black <ICCBased sRGB> <FunctionType 0, 255 samples>]`, and it is the colour of the entire article body; **16 of its 23 pages draw only the running furniture**, several of them to the identical pixel. **Still refused, and still correct to refuse**: this is a different gap — it needs the tint transform, not an alternate space — and D19 measured it unchanged. |
+| W038 | a **JPEG 2000** decoder, again | `a JPEG 2000 image was found but no decoder exists yet` six times, plus one naming `/Im7`. 13 JPX images carry the whole figure: we draw 31987 ink pixels against the oracle's 838668, and **99.8% of what we do draw is in the right place**. |
+
+`Colour::to_rgba` in `crates/mangle-content/src/state.rs` had arms for DeviceGray/CalGray,
+DeviceRGB/CalRGB and DeviceCMYK, a fallback for Separation/DeviceN, and **no arm at all for
+`ICCBased`, `Indexed` or `Lab`** — each of those fell through to `None`, and the mark was
+reported and dropped. The *image* path in `crates/mangle-render/src/image.rs` did read
+`ICCBased`, by counting `/N`, so the same colour space was approximated on an image and refused
+on a fill. That asymmetry was where W075 lived, and it was 42 blank pages. **`Indexed` and
+`Separation` are still gaps** — W076's is the largest single one left in the corpus — and they
+are not interchangeable with this one: an `Indexed` space needs its palette and a `Separation`
+needs its tint transform, and neither has an alternate to fall through to.
+
+### The result against Gate 3.1
+
+Gate 3.1 asks three things of this corpus. **None of the three is met.**
+
+> *"At 150 DPI: per-page best-of-oracles SSIM ≥ 0.95; median ≥ 0.985 across F12–F22, F31, and
+> Tier B; ≤ 3% of pages below 0.95, each documented in `docs/known-diffs.md` with root cause and
+> evidence."*
+
+- **per-page ≥ 0.95 — NOT MET.** 254 of the 738 pages are below it. **65.6%** of pages clear the
+  floor; 34.4% do not.
+- **median ≥ 0.985 — NOT MET on Tier B.** The Tier-B page median is **0.95795**, 0.027 short. The
+  gate's median is taken across F12–F22, F31 *and* Tier B, and this run measures only the last
+  of those, so 0.95795 is not by itself the gate's number — but 738 of the pages in that median
+  are Tier-B pages, and Tier B's own median is 0.958.
+- **≤ 3% of pages below 0.95 — NOT MET.** 34.4% against a 3% bound: at 738 pages the gate allows
+  **22** pages below 0.95 and there are **254**, a factor of 11.5.
+
+The page median is also the number most likely to be misread, so both halves belong here.
+**0.958 is a large improvement on 0.6929 and it is not a pass**: it is the median of a
+distribution whose worst file sits at 0.6386, and the four clusters above are 18.2% of the pages
+— very nearly the fifth of all pages that the gate's 3% allowance assumes can be wrong at once.
+Anyone deciding whether this is nearly done needs both numbers: **median 0.958, and 254 of 738
+pages below 0.95.** The second is the one the gate is written against.
 
 ### The four files that still do not open
 
@@ -95,6 +234,12 @@ four fail against the old code:
 Before, **all 542 pages of the 77-file wild corpus rendered with `marks: 0` and no ink.**
 After, 103 pages draw and 439 are still blank. So D1 was the cause of the blankness on
 19% of pages, and on the other 81% it was hiding a second, larger defect (D7) behind silence.
+
+Those 542 pages are the corpus as it stood then, when 34 files could not be opened. The corpus
+is now **745 pages** across 77 files, and none of those 439 is blank for this reason — the
+[re-run](#the-run-in-full) has **zero pages below 0.50**. Blank pages are not gone, but they now
+have one named cause: `gov__nist-sp800-88.pdf` alone renders **42 pages with no ink at all**,
+every mark on them painted in a colour this cannot convert (see [the 254](#where-the-254-are)).
 
 The page this finding was opened with barely moves, and the reason matters:
 
@@ -417,7 +562,10 @@ that is worth being able to point at.
 ## D5 — the fax scan on a multi-page TIFF page rendered as a black rectangle
 
 **Severity: was high — 0.38414 SSIM, 60.6% of pixels wrong. FIXED, as a codec defect and then
-as the placement defect D5b that sat on top of it. The page is now at 0.99747.**
+as the placement defect D5b that sat on top of it. The page is now at 0.99747, which the
+[re-run](#the-run-in-full) confirms: `pdfbox__multitiff.pdf` pages 1–3 measure 0.9975, 0.9977
+and 0.9984.** The three-page file is new to the numbers here — the table below was measured
+on page 1 alone.
 
 `pdfbox__multitiff.pdf` page 1, measured against `mutool draw` at 150 DPI:
 
@@ -731,7 +879,8 @@ charset.
 
 ## D7 — 78% of the corpus is blank because the font cannot be read, not because the content could not
 
-**Severity: critical, and it is what D1 was hiding. 422 of 542 pages.**
+**Severity: critical, and it is what D1 was hiding. 422 of 542 pages — of the 542 the corpus
+had then. The corpus is 745 pages now; see the [re-run](#the-run-in-full).**
 
 > **Partly fixed — see [D8](#d8--the-cff-charset-was-read-from-the-wrong-offset-and-looked-plausible-while-it-did-it).**
 > The charset half is done: a name-keyed CFF font's codes reach glyphs and the 355-page
@@ -808,6 +957,12 @@ against pages with ink. It is a real measurement of the defect it describes, and
 it describes is overwhelmingly not the one named at the top of it. Nothing in the SSIM
 figures in this file should be read as a fidelity claim until D7 is fixed, because a corpus
 that cannot draw a single glyph cannot say anything about fidelity.
+
+**That 0.6929 is no longer the Tier-B median.** It is kept here as the measurement it was, of
+the code as it stood, and the current figure — 0.95795 over 738 pages — is at the
+[top of this file](#the-result-against-gate-31). The 422 of 542 in this entry's severity line
+counts the same way: it is what the corpus looked like then, not what it looks like now.
+
 ---
 
 ## D9 — a filled path is transformed by the content stream's `cm` twice
@@ -964,8 +1119,9 @@ numbers written out beside it, so a change to the choice fails there first.
 The two IRS forms are forms of ruled boxes and lines, so they are the pages where a stroke's
 width is most of the drawing; `f1040` gains 0.034 of SSIM and reaches 96.3% of the oracle's ink
 where it reached 86.5%. Five files this renderer draws no strokes on measured identical before
-and after, which is what says the change is confined to strokes. A full 542-page re-run is
-wanted and takes two hours.
+and after, which is what says the change is confined to strokes. The full re-run has since been
+done — 745 pages, and `gov__irs-f1040` page 1 measures **0.9827** in the
+[corpus report](#the-run-in-full), past the 0.97348 above.
 
 #### The tests
 
@@ -1037,11 +1193,12 @@ which the specification reads as cyan → yellow → magenta and the code read a
 yellow → white. `mutool` agrees with the specification: at the gradient's `t = 0.1` it paints
 `(50, 255, 205)`, and `C0 + 0.2·(C1 − C0)` is exactly `(51, 255, 204)`.
 
-**Measured.** `pdfjs__issue13372.pdf` page 1 against `mutool` at 150 DPI: **0.83738 → 0.92923**.
-What is left after that is the dither, which is a separate rasteriser feature this project does
-not have: the oracle paints the gradient as ink dots at the coverage it wants and we paint the
-same average smoothly, and `compare()` scores two correct answers differently for that reason
-alone.
+**Measured.** `pdfjs__issue13372.pdf` page 1 against `mutool` at 150 DPI: **0.83738 → 0.92923**,
+and the [re-run](#the-run-in-full) puts it at **0.9292** with 411430 of 2176200 pixels above
+tolerance, so that figure stands. What is left after that is the dither, which is a separate
+rasteriser feature this project does not have: the oracle paints the gradient as ink dots at the
+coverage it wants and we paint the same average smoothly, and `compare()` scores two correct
+answers differently for that reason alone.
 
 ### Why it survived a test
 
@@ -1847,3 +2004,215 @@ Six in `image.rs`, five end to end in `pages.rs`:
   from the dictionary, and where the decoder allocates before it knows anything else;
 - and a mask's absence is full opacity rather than zero, which is the third of the three
   candidates this entry opened on, pinned so that it cannot drift into the second.
+
+## D19 — an `ICCBased` colour was refused where the file named the answer, and a mask never read was never reported
+
+**Severity: 42 of a 44-page NIST special publication rendered with zero ink pixels, and the
+report said `could not be converted` 211 times without saying which gap it was. Both are fixed.**
+
+Two defects, found together because they were found by reading the same file's report: a colour
+conversion that refused a space the file had already given the answer to, and a decoder that
+returned before it had looked at the rest of the image dictionary — so a picture it could not
+read also hid a mask it could not read.
+
+### First: `Colour` kept a name and threw away everything the name stood for
+
+`ColourSpace` was `{ name: String, colorant: Option<String> }`, and `cs`/`CS` filled `name` with
+the resource's name verbatim — `CS0` — so by the time a colour reached `Colour::to_rgba` the
+only thing left of `[/ICCBased 107]` was the two characters `CS0`. `to_rgba` matched on
+`name.as_str()` against a list of space *names*, none of which is `CS0`, so every colour in the
+space fell through to `None`, and the fill, the stroke and the text that used it were each
+reported and dropped. The file's own notes said so 211 times, 43 pages of a 44-page file.
+
+The information was destroyed at the one place it was available. `cs` runs where the resource
+table is in scope; `to_rgba` runs on a value carried out of the content stream with no document
+behind it, which is why it could never recover it. So the fix carries it rather than looking it
+up later:
+
+- `ColourSpace` gains `icc: Option<IccBased>`, carrying the profile's `/N` and `/Alternate`
+  (`crates/mangle-content/src/state.rs`);
+- `Resources` gains a table of what each ICC-based colour space declares, built in `read_at`
+  where the resolver lives — `/N` and `/Alternate` are keys of the profile stream, normally an
+  indirect object away from the array that names it, and the interpreter holds no document
+  (`crates/mangle-content/src/lib.rs`);
+- `set_colour_space` copies that entry onto the space (`crates/mangle-content/src/interp.rs`),
+  keeping the resource's own name for the report.
+
+`to_rgba` then reads the colour through `/Alternate` — which is the file telling the reader what
+to do, not an approximation of a profile this does not apply:
+
+```rust
+if self.space.icc.is_some() {
+    let through = self.space.through_alternate()?;
+    let mut resolved = self.clone();
+    resolved.space = through;
+    return resolved.to_rgba(ink);
+}
+```
+
+**`?` on an absent `/Alternate` is the whole of requirement 3.** No alternate means no answer,
+and the mark is reported by name — `the colour text is painted in the `ICCBased` space `CS0`,
+whose profile names no `/Alternate` to read it through`. A fallback to RGB would paint the page
+and be wrong about every pixel of it.
+
+### Second: three call sites, and they had to become one
+
+The fill, the stroke and the text each had their own `match colour.to_rgba(None)` and their own
+note. That is three places for a conversion to be right and three for it to be wrong, and the
+test that catches the difference is a page: the same space has to give the same colour as a fill,
+as a stroke and as text **on one page**, because that is the property a unit test of the converter
+cannot see. All four flat-colour sites — fill, stroke, text, and an image mask — now go through
+`flat_colour(colour, what, notes)` in `crates/mangle-render/src/page.rs`, which converts once and
+emits one note per distinct failure rather than one per mark.
+
+One of those four changed behaviour for a good reason. An image that is not a mask paints its own
+samples and never asks for the graphics state's colour, so a colour this cannot convert is no
+reason to refuse it; an image mask is painted *entirely* in that colour, so the conversion is
+now only made for a stencil. That was true before and is now said where the branch is.
+
+### Third: should the *image* path also route through `/Alternate`?
+
+`read_space` in `image.rs` already handled `ICCBased` — by counting `/N`, which is the asymmetry
+this whole defect was: the same profile approximated on an image and refused on a fill. **It now
+routes through `/Alternate` as well, and keeps `/N` as the fallback**, for two reasons:
+
+1. `/Alternate` is the specification's own answer for a reader that cannot apply the profile, so
+   it is the more correct reading of a profile that carries one — including the case where the
+   two disagree, which is where `/N` alone gets it wrong.
+2. The fallback is kept because an image and a colour fail differently. A colour with no answer
+   is reported and the mark is not drawn, which is one visible hole. An *image* with no answer
+   is a page with a photograph missing; reading its samples by `/N` and showing them approximately
+   beats showing nothing, and that asymmetry is a deliberate difference rather than an oversight.
+
+### Fourth: a mask that was never read was never reported
+
+`decode_role` returned `None` for `JPXDecode` about 125 lines **before** the `/Mask` branch, and
+for JBIG2 just above it. So an image whose samples could not be decoded also carried a `/Mask`
+that was never examined, and the note said nothing about it — one gap reported where there were
+two. `gov__nist-nistir7255.pdf` does exactly this, and its page carried no mention of its JBIG2
+mask at all.
+
+The codec arms are now the *only* thing that names the codec; everything else about the
+dictionary is reported by a wrapper that runs on every refusal:
+
+```rust
+fn note_skipped(dict: &Dict, resolve: &dyn Fn(&Object) -> Option<Object>,
+                role: Role, notes: &mut Vec<String>)
+```
+
+It reports the `/SMask`, the `/Mask`, and the codec of the `/Mask` where that codec is one this
+does not decode — so `a JPEG 2000 image was found but no decoder exists yet; the image's
+`/Mask` is a JBIG2 image and no decoder exists for one either, so it was not read` says that
+there are two gaps and that JPEG 2000 work alone will not close this page. An image with neither
+key reports only its own gap, which is the other half of the property: a note that lists
+everything is no use if it lists things that are not there.
+
+This matters for the JPEG 2000 work that is queued: it would have surfaced this gap the moment
+JPX was attempted, and finding it then costs a debugging session.
+
+### What it bought, measured against `mutool draw` at 150 DPI
+
+`gov__nist-sp800-88.pdf` (W075), all 44 pages, before and after. The "before" column is that
+file's own rows in `corpus/wild/report/pages.tsv` from the last full corpus run, so it is a
+measurement rather than a recollection:
+
+| | before | after |
+|---|---|---|
+| median SSIM | 0.7727 | **0.96095** |
+| pages below 0.95 | 41 of 44 | **10 of 44** |
+| worst page | **0.6352** (page 35) | **0.8103** (page 1) |
+| median RMS | 50.54 | **20.38** |
+| median pixels above tolerance | 166 481 | **85 951** |
+| pages with zero ink pixels | 42 | **1** |
+
+Page 35, the corpus's worst NIST page at 0.6352, is now **0.9023** — RMS 30.64, 117 245 pixels
+above tolerance (5.573%), 225 656 ink against the oracle's 275 874. Its whole remaining
+difference is unembedded-font substitution, which is D6's subject and the project's stated
+policy. That is what "comparable" looks like: this file's median is now 0.961 against a
+corpus-wide median of 0.958.
+
+Page 1 is the one page still below 0.81, and it is **not** the ICC gap:
+
+| page 1 | SSIM 0.8103 · RMS 36.09 · 232 787 above tolerance (11.065%) · 69 319 ink vs 316 363 |
+|---|---|
+| what it says | `a fill colour in Cs8 could not be converted` · `the colour text is painted in Cs8 could not be converted` |
+
+`Cs8` is `[/Separation /Black 1209 0 R 3124 0 R]` — the tint-transform gap W076 lives in, and
+the same one that dominates `pdfjs__TAMReview.pdf`. So the one page of 44 that is still badly
+wrong is the one whose blocker is a *different* missing feature, which is the useful shape for
+the diagnosis to have: this change removed the ICC gap and did not disguise the separation one.
+
+**Page 2 is the remaining zero-ink page, and it is not a colour space at all.** Its `/Contents` is
+an array of eight content streams, of which the reader resolves none — `page.content_streams`
+returns empty for it, so the page renders as paper with no note. It has no `/ColorSpace` entry
+beyond `/CS0`, and it draws 60 867 ink pixels' worth of vector outlines in the oracle. That is a
+content-stream defect of its own, not this one, and it is recorded here rather than fixed here.
+
+### The two files this was not supposed to disturb
+
+Both were measured page by page against the same oracle, and both are **unchanged**:
+
+| file | pages checked | SSIM before | SSIM after |
+|---|---|---|---|
+| `gov__nist-nistir7255.pdf` | 1, and 5–65 at stride 5 | 0.8655 / 0.6981 / 0.7949 / 0.7401 / 0.6706 / 0.6185 / 0.9883 | **identical** |
+| `pdfjs__TAMReview.pdf` | 1, and 5–20 at stride 5 | 0.9357 / 0.6786 / 0.8021 / 0.7789 | **identical** |
+
+`TAMReview` uses `Cs6` = `[/ICCBased …]` (64 `cs` and 5 `CS` across the file) and `Cs8` =
+`[/Separation /Black …]` (82 `cs`). `Cs6` now converts, and the pages do not move: the text was
+already drawn in a substitued face and the *body* of the article is in `Cs8`, which is still
+refused. `the colour text is painted in Cs8 could not be converted` is unchanged and is
+**correct**: a separation needs its tint transform evaluated, and there is no `/Alternate` to
+fall through to. A change that turned every unconvertible space into RGB would have moved these
+pages and been wrong.
+
+`nistir7255` contains no `ICCBased`, no `Separation` and no `Indexed` at all — 132 `JPXDecode`
+and 66 `JBIG2Decode`, which is the codec gap — so the numbers are identical to the last digit,
+which is the expected result and worth stating as such.
+
+### What the file actually uses
+
+`gov__nist-sp800-88.pdf`, counted across its 44 pages' `/ColorSpace` resource tables and its
+content streams:
+
+| name | resource | `cs`/`CS` uses | what it is |
+|---|---|---|---|
+| `CS0` | `[/ICCBased 1234 0 R]` | 43 `cs`, 17 `CS` | sRGB IEC61966-2.1, `/Alternate /DeviceRGB`, `/N 3` — **43 of the 44 pages** |
+| `Cs6` | `[/ICCBased 3122 0 R]` | 10 `cs` | sRGB, `/Alternate /DeviceRGB`, `/N 3` |
+| `Cs8` | `[/Separation /Black 1209 0 R 3124 0 R]` | 10 `cs` | spot black over `[/ICCBased 3122 0 R]`, tint transform in `3124` |
+| `Cs9` | `[/Indexed 1209 0 R 202 3126 0 R]` | 0 | a 203-entry palette over the same ICC space |
+
+So `ICCBased` was indeed the blocker and not `Indexed` or `Separation`: `Cs9` is declared and
+never selected by any content stream, and `Cs8` is selected on one page only. `ICCBased` was the
+answer to "which spaces does the file actually use", and the count confirms it.
+
+### What is pinned now
+
+**Fourteen tests**, each confirmed to fail on the code before this change and to pass on it
+after. Six in `state.rs`, four in `interp.rs`, six end to end in `pages.rs`, and one on the image
+path:
+
+- an `[/ICCBased …]` colour with `/Alternate /DeviceRGB` converts to **exactly** the `/DeviceRGB`
+  colour, asserted by identity and not by closeness, because it is the same space;
+- `/Alternate /DeviceGray` and `/Alternate /DeviceCMYK` route to those arms, and a four-component
+  profile's colour is CMYK *subtractive* — read as RGB it would be red;
+- `/N` decides how wide a colour is: 1 is grey, 3 is RGB, 4 is CMYK, and an `/N 2` or an
+  unreadable profile is three rather than something it is not;
+- a profile with **no** `/Alternate` is refused, the note names the space and says why, and
+  nothing is drawn in its place;
+- `cs` carries the profile from the resource table to the conversion — the test that would fail
+  if the information were dropped again at any point in between;
+- the same space gives the same colour as a **fill, a stroke and text on one page**, which is the
+  property that catches the three-call-site problem, and a page with three colours in one space
+  gives three colours rather than one;
+- an ordinary colour space renders exactly as before, marks, notes and all three squares' pixel
+  values;
+- a `Separation` is **still refused** and the page is not filled with a guess at what the tint
+  looks like;
+- an image we cannot decode with an `/SMask` we also cannot decode produces a note naming
+  **both**, and a `/Mask` whose codec is JBIG2 has that codec named too;
+- an image with no `/Mask` and no `/SMask` produces only its own note; and
+- a refusal that is **not** a codec — an impossible bit depth — reports its skipped mask too,
+  which is what says the reporting is not living in the codec arms.
+
+Plus one on the image path: an `[/ICCBased …]` image reads through its `/Alternate`, and where
+`/N` and the alternate disagree the alternate wins, which is the case counting `/N` gets wrong.

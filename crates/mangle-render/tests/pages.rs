@@ -475,6 +475,252 @@ fn region_is(
     true
 }
 
+// ── An ICC-based colour space on a page ───────────────────────────────────────
+
+/// A page whose colour space `CS0` is ICC-based, over a profile declaring `alternate`
+/// with `n` components, drawn in that one space as a **fill**, as a **stroke** and as
+/// **text**.
+///
+/// The three are on one page on purpose. A colour space this cannot convert is converted —
+/// or refused — in three different places in the renderer, and a page-level test is the
+/// only thing that says the three agree: a conversion that works for a fill and not for a
+/// stroke leaves the same ink in two colours on the same page, which no unit test of the
+/// converter would catch.
+///
+/// The profile is a stream whose body is four bytes rather than an ICC profile, because
+/// nothing here reads one: `/Alternate` is the file's own statement of what to do instead
+/// of applying it, and that is the whole of what a reader without a colour-management
+/// engine has to go on.
+fn icc_page(alternate: &str, n: i64, content: &str) -> Vec<u8> {
+    let profile = format!("<< /N {n} /Alternate /{alternate} /Length 4 >>\nstream\nab\nendstream");
+    let font = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+    pattern_page(
+        "/ColorSpace << /CS0 5 0 R >> /Font << /F1 7 0 R >>",
+        content.as_bytes(),
+        &[b"[/ICCBased 6 0 R]", profile.as_bytes(), font],
+    )
+}
+
+/// The colour of the darkest pixel in a region, as the page was drawn.
+///
+/// A glyph or a stroked edge is antialiased against the paper, so the colour that was
+/// *asked for* is the one at the darkest pixel in it — the interior of the mark, where the
+/// ink is complete. Comparing anything else would be measuring the blend.
+fn deepest(image: &mangle_render::Image, x0: usize, y0: usize, x1: usize, y1: usize) -> [u8; 3] {
+    let mut best = (0u32, [255u8; 3]);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let Some([r, g, b, _]) = image.get(x, y) else {
+                continue;
+            };
+            let d = darkness(image, x, y);
+            if d > best.0 {
+                best = (d, [r, g, b]);
+            }
+        }
+    }
+    best.1
+}
+
+/// The same colour as a fill, a stroke and text on one page — the property that catches
+/// the three-call-site problem.
+#[test]
+fn an_icc_space_paints_a_fill_a_stroke_and_text_the_same_colour() {
+    // Pure magenta in `CS0`, as a filled square in the lower left, a stroked square in
+    // the upper left, and text across the middle. `/Helvetica` with no `/Widths` is a
+    // document that names a standard font without embedding it, which a substitute draws.
+    let content = "/CS0 cs 1 0 1 sc 0 0 40 40 re f \
+                   /CS0 CS 1 0 1 SC 6 w 60 0 40 40 re S \
+                   BT /CS0 cs 1 0 1 sc /F1 24 Tf 10 55 Td (W) Tj ET";
+    let render = render(icc_page("DeviceRGB", 3, content), 1.0);
+    assert!(
+        !render
+            .notes
+            .iter()
+            .any(|n| n.contains("could not be converted")),
+        "an ICC-based space with an `/Alternate` converts, so nothing is reported about it: \
+         {:?}",
+        render.notes
+    );
+    let want = [255, 0, 255];
+    // Pixel rows counted from the top of the image, so the page's own `y` is measured from
+    // the bottom. The stroked square is an outline, so the sample is its top edge rather
+    // than its middle: the inside of a stroked path is the paper, which is not a colour.
+    let fill = deepest(&render.image, 10, 70, 30, 90);
+    let stroke = deepest(&render.image, 70, 57, 90, 63);
+    let text = deepest(&render.image, 5, 20, 45, 50);
+    assert_eq!(fill, want, "the fill is the colour the alternate names");
+    assert_eq!(
+        stroke, want,
+        "and the stroke is that same colour, not a second conversion of the same space"
+    );
+    assert_eq!(
+        text, want,
+        "and so is the text: three call sites, one answer"
+    );
+}
+
+/// The same space in three colours at once, which is what says the conversion is a
+/// conversion rather than a constant.
+#[test]
+fn an_icc_space_paints_each_colour_it_carries() {
+    let content = "/CS0 cs 1 0 0 sc 0 0 100 33 re f \
+                   /CS0 cs 0 1 0 sc 0 33 100 33 re f \
+                   /CS0 cs 0 0 1 sc 0 66 100 34 re f";
+    let render = render(icc_page("DeviceRGB", 3, content), 1.0);
+    // Bands drawn from the bottom of the page up, and read from the top of the image down.
+    assert_eq!(
+        deepest(&render.image, 20, 75, 80, 95),
+        [255, 0, 0],
+        "the red band"
+    );
+    assert_eq!(
+        deepest(&render.image, 20, 40, 80, 58),
+        [0, 255, 0],
+        "the green band"
+    );
+    assert_eq!(
+        deepest(&render.image, 20, 10, 80, 25),
+        [0, 0, 255],
+        "the blue band"
+    );
+}
+
+/// A four-component profile is CMYK, and the subtractive answer is the giveaway: reading
+/// its components as RGB would paint cyan as a pale blue rather than as nothing at all.
+#[test]
+fn a_four_component_icc_profile_is_cmyk() {
+    let content = "/CS0 cs 1 0 0 0 sc 0 0 100 100 re f";
+    let render = render(icc_page("DeviceCMYK", 4, content), 1.0);
+    assert!(
+        !render
+            .notes
+            .iter()
+            .any(|n| n.contains("could not be converted")),
+        "an `/N 4` profile converts through its `/Alternate`: {:?}",
+        render.notes
+    );
+    assert_eq!(
+        deepest(&render.image, 20, 20, 80, 80),
+        [0, 255, 255],
+        "CMYK is subtractive, so 1 0 0 0 is cyan and nothing else — read as RGB it would be \
+         red"
+    );
+}
+
+/// A one-component profile is grey, and a stream that sets it with one operand has to be
+/// read as one component rather than padded out to three.
+#[test]
+fn a_one_component_icc_profile_is_grey() {
+    let content = "/CS0 cs 0.25 sc 0 0 100 100 re f";
+    let render = render(icc_page("DeviceGray", 1, content), 1.0);
+    assert!(
+        !render
+            .notes
+            .iter()
+            .any(|n| n.contains("could not be converted")),
+        "an `/N 1` profile converts through its `/Alternate`: {:?}",
+        render.notes
+    );
+    let got = deepest(&render.image, 20, 20, 80, 80);
+    assert_eq!(
+        (got[0], got[1], got[2]),
+        (got[0], got[0], got[0]),
+        "grey is grey: {got:?}"
+    );
+    assert!(
+        got[0].abs_diff(64) <= 2,
+        "and 0.25 is a quarter of the way to black: {got:?}"
+    );
+}
+
+/// A profile that names no `/Alternate` has said nothing about what its components mean,
+/// and no profile is applied here — so the mark is not drawn and the report says so. A
+/// fallback to RGB here would paint the page and be wrong about every pixel of it.
+#[test]
+fn an_icc_space_with_no_alternate_is_reported_and_nothing_is_drawn() {
+    let mut page = icc_page("DeviceRGB", 3, "/CS0 cs 1 0 1 sc 0 0 100 100 re f");
+    // The profile's `/Alternate`, by rewriting object 6 — the array in object 5 names it,
+    // and a file that leaves it out is the case under test.
+    let without = String::from_utf8_lossy(&page)
+        .replace(" /Alternate /DeviceRGB", "")
+        .into_bytes();
+    page = without;
+    let render = render(page, 1.0);
+    let said = render.notes.join("; ");
+    assert!(
+        said.contains("could not be converted")
+            && said.contains("CS0")
+            && said.contains("ICCBased"),
+        "the note names the space and says why: {said:?}"
+    );
+    assert!(
+        said.contains("/Alternate"),
+        "and the reason is the missing alternate, not merely the name: {said:?}"
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
+        "and nothing is drawn in its place, rather than a guess at what the profile meant"
+    );
+}
+
+/// An ordinary colour space is unaffected. The whole change sits behind `icc`, so a page
+/// that uses none of it must render exactly as it did — this is the test that says the
+/// existing arms did not shift.
+#[test]
+fn an_ordinary_colour_space_is_unchanged() {
+    let render = render(shapes_page(), 1.0);
+    assert_eq!(render.marks, 3);
+    assert!(
+        render.notes.is_empty(),
+        "a page of DeviceRGB fills says nothing: {:?}",
+        render.notes
+    );
+    assert!(
+        region_is(&render.image, 20, 20, 80, 80, [255, 0, 0]),
+        "the red square"
+    );
+    assert!(
+        region_is(&render.image, 120, 20, 180, 80, [0, 0, 255]),
+        "the blue square"
+    );
+    assert!(
+        region_is(&render.image, 20, 120, 80, 180, [0, 0, 0]),
+        "the black square"
+    );
+}
+
+/// A separation is still refused. That is a different gap — it needs the tint transform,
+/// not an alternate space — and a fix for one must not quietly paper over the other by
+/// turning every unconvertible space into RGB.
+#[test]
+fn a_separation_is_still_refused_rather_than_read_as_rgb() {
+    let separation = b"<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 \
+                      /ColorSpace [/Separation /Black /DeviceGray << /FunctionType 2 \
+                      /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>] /Coords [0 0 100 0] \
+                      /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> \
+                      /Extend [true true] >> /Matrix [1 0 0 1 0 0] >>";
+    let page = pattern_page(
+        "/ColorSpace << /Cs8 5 0 R >> /Pattern << /P0 6 0 R >>",
+        b"/Cs8 cs /P0 scn 0 0 100 100 re f",
+        &[
+            b"[/Separation /Black /DeviceGray 7 0 R]",
+            separation.as_slice(),
+            b"",
+        ],
+    );
+    let render = render(page, 1.0);
+    let said = render.notes.join("; ");
+    assert!(
+        said.contains("could not be converted") || said.contains("not drawn"),
+        "a separation with no tint transform evaluated is still reported: {said:?}"
+    );
+    assert!(
+        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
+        "and the page is not filled with a guess at what the tint looks like"
+    );
+}
+
 #[test]
 fn a_page_renders_at_the_size_it_asks_for() {
     let render = render(shapes_page(), 1.0);

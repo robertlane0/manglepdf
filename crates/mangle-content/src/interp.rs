@@ -565,6 +565,7 @@ impl Context<'_> {
                         ColourSpace {
                             name: "DeviceCMYK".into(),
                             colorant: None,
+                            icc: None,
                         },
                         &nums,
                     );
@@ -701,9 +702,15 @@ impl Context<'_> {
 
     fn set_colour_space(&mut self, name: Option<Vec<u8>>, stroking: bool) {
         let Some(n) = name else { return };
+        let key = String::from_utf8_lossy(&n).into_owned();
         let space = ColourSpace {
-            name: String::from_utf8_lossy(&n).into_owned(),
+            // The name as written is what a report leads with. Whether it names an
+            // ICC-based resource is a fact about the resource table rather than about the
+            // operator, so it is read here — the one place the table can be consulted —
+            // and carried on the space from there to the conversion.
+            name: key.clone(),
             colorant: None,
+            icc: self.resources.icc_profile(&key).cloned(),
         };
         let target = if stroking {
             &mut self.state.stroking
@@ -723,6 +730,7 @@ impl Context<'_> {
             target.space = ColourSpace {
                 name: "Pattern".into(),
                 colorant: Some(String::from_utf8_lossy(&n).into_owned()),
+                icc: None,
             };
             return;
         }
@@ -1463,7 +1471,7 @@ mod tests {
 
     use super::*;
     use crate::Resources;
-    use mangle_syntax::object::{Dict, Object as Obj};
+    use mangle_syntax::object::{Dict, Object as Obj, Stream};
 
     fn run_bytes(data: &[u8]) -> PageContent {
         run(&ContentStream::parse(data))
@@ -2223,6 +2231,124 @@ mod tests {
         };
         assert_eq!(f.space.name, "DeviceGray");
         assert_eq!(f.components, vec![0.5]);
+    }
+
+    /// Resources whose `/ColorSpace` table names one ICC-based space `CS0`, over a profile
+    /// that declares `alternate` and `n`.
+    ///
+    /// The profile is a stream object rather than a reference because the resolver these
+    /// tests use hands back what it is given; every other part of this is as a file writes
+    /// it, and the page's `cs` sees a name and not a colour space.
+    fn icc_resources(alternate: Option<&str>, n: i64) -> Resources {
+        let mut profile = Dict::new();
+        profile.set("N", Obj::Int(n));
+        if let Some(alternate) = alternate {
+            profile.set("Alternate", Obj::name(alternate));
+        }
+        let mut table = Dict::new();
+        table.set(
+            "CS0",
+            Obj::Array(vec![
+                Obj::name("ICCBased"),
+                Obj::Stream(Stream::new(profile, vec![0u8; 4])),
+            ]),
+        );
+        let mut resources = Dict::new();
+        resources.set("ColorSpace", Obj::Dict(table));
+        Resources::from_dict(&resources, &|o| Some(o.clone()))
+    }
+
+    #[test]
+    fn cs_carries_the_icc_profile_with_the_colour() {
+        // The interpreter holds no document, so `cs` is the only place the resource table can
+        // be consulted. If what the profile declares is not read here and carried from here,
+        // every later stage sees a name and nothing else — which is what made a whole file
+        // blank.
+        let out = run_with(
+            &ContentStream::parse(b"/CS0 cs 0 1 0 sc 0 0 1 1 re f"),
+            &icc_resources(Some("DeviceRGB"), 3),
+        );
+        let Mark::Path { fill: Some(f), .. } = &out.records.first().expect("a mark").mark else {
+            panic!("expected a filled path");
+        };
+        assert_eq!(
+            f.space.name, "CS0",
+            "the name the stream used is what a report leads with"
+        );
+        let icc = f.space.icc.as_ref().expect("the profile came with it");
+        assert_eq!(icc.alternate.as_deref(), Some("DeviceRGB"));
+        assert_eq!(icc.components, Some(3));
+        assert_eq!(
+            f.to_rgba(None).map(|c| (c.r, c.g, c.b)),
+            Some((0.0, 1.0, 0.0)),
+            "and it converts, which is the whole point of carrying it"
+        );
+    }
+
+    #[test]
+    fn an_icc_space_with_no_alternate_reaches_the_conversion_as_a_refusal() {
+        let out = run_with(
+            &ContentStream::parse(b"/CS0 cs 0 1 0 sc 0 0 1 1 re f"),
+            &icc_resources(None, 3),
+        );
+        let Mark::Path { fill: Some(f), .. } = &out.records.first().expect("a mark").mark else {
+            panic!("expected a filled path");
+        };
+        assert!(
+            f.space
+                .icc
+                .as_ref()
+                .expect("it is still an ICC space")
+                .alternate
+                .is_none(),
+            "the profile that names no alternate is recorded as one that names none"
+        );
+        assert!(
+            f.to_rgba(None).is_none(),
+            "so the conversion refuses rather than guessing a space"
+        );
+    }
+
+    #[test]
+    fn a_one_or_four_component_profile_reaches_the_conversion_at_that_width() {
+        // The count comes from the profile's `/N`, and the components are read at that width:
+        // a one-component stream set with `sc` has one operand, and a four-component one has
+        // four, so a conversion that guessed the width would drop or pad the colour.
+        for (n, operands, want) in [
+            (1i64, "0.25", (0.25, 0.25, 0.25)),
+            (4i64, "0 1 1 0", (1.0, 0.0, 0.0)),
+        ] {
+            let alternate = if n == 1 { "DeviceGray" } else { "DeviceCMYK" };
+            let content = format!("/CS0 cs {operands} sc 0 0 1 1 re f");
+            let out = run_with(
+                &ContentStream::parse(content.as_bytes()),
+                &icc_resources(Some(alternate), n),
+            );
+            let Mark::Path { fill: Some(f), .. } = &out.records.first().expect("a mark").mark
+            else {
+                panic!("expected a filled path");
+            };
+            assert_eq!(f.components.len(), n as usize, "{n} components are kept");
+            let rgba = f.to_rgba(None).expect("the alternate converts");
+            assert_eq!((rgba.r, rgba.g, rgba.b), want, "an /N {n} profile");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_an_icc_space_carries_no_profile() {
+        let out = run_with(
+            &ContentStream::parse(b"/DeviceGray cs 0.5 sc 0 0 1 1 re f"),
+            &icc_resources(Some("DeviceRGB"), 3),
+        );
+        let Mark::Path { fill: Some(f), .. } = &out.records.first().expect("a mark").mark else {
+            panic!("expected a filled path");
+        };
+        assert!(
+            f.space.icc.is_none(),
+            "an ordinary space is unchanged: it has no profile and needs none"
+        );
+        assert_eq!(f.space.name, "DeviceGray");
+        assert!(f.to_rgba(None).is_some());
     }
 
     #[test]

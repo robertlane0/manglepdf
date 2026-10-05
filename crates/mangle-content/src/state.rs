@@ -111,13 +111,66 @@ impl RenderMode {
     }
 }
 
+/// What an `[/ICCBased …]` colour space resource declares about itself.
+///
+/// Two facts, and they are different questions, which is why they are two fields rather
+/// than one answer:
+///
+/// * `/N` is how many components a colour in the space has — a fact about the space.
+/// * `/Alternate` is the space a reader that cannot apply the profile is told to read them
+///   in — a fact about what to do with them.
+///
+/// The specification requires the second to have as many components as the first, and a
+/// profile that satisfies it converts to exactly what its `/Alternate` says. One that does
+/// not is reported rather than guessed at, which is what keeps a damaged profile from
+/// turning into a wrong colour instead of a missing one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IccBased {
+    /// `/Alternate`, absent where the profile names no space to convert through.
+    pub alternate: Option<String>,
+    /// `/N`, absent where the profile could not be read.
+    pub components: Option<usize>,
+}
+
+impl IccBased {
+    /// Read what an ICC stream's dictionary declares.
+    ///
+    /// `profile` is the stream the colour space array names, resolved: `/N` and
+    /// `/Alternate` are keys of that stream's dictionary and are usually an indirect
+    /// object away from the space that names them.
+    #[must_use]
+    pub fn from_profile(profile: Option<&Object>) -> Self {
+        let dict = profile.and_then(Object::as_dict);
+        Self {
+            alternate: dict
+                .and_then(|d| d.get("Alternate"))
+                .and_then(Object::as_name)
+                .map(|n| String::from_utf8_lossy(n).into_owned()),
+            components: dict
+                .and_then(|d| d.get("N"))
+                .and_then(Object::as_i64)
+                .and_then(|n| usize::try_from(n).ok()),
+        }
+    }
+}
+
 /// A colour space, as far as the graphics state needs to know.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ColourSpace {
-    /// `/DeviceGray`, `/DeviceRGB`, `/DeviceCMYK`, `/Pattern`, or a name to resolve.
+    /// `/DeviceGray`, `/DeviceRGB`, `/DeviceCMYK`, `/Pattern`, or the name the content
+    /// stream used — `/CS0` — which is what a report leads with, because it is what the
+    /// reader can go and look up.
     pub name: String,
     /// `/Separation`, `/DeviceN` and the rest carry a colorant name.
     pub colorant: Option<String>,
+    /// What `name` selected, when it selected an `[/ICCBased …]` resource.
+    ///
+    /// This is the whole of what a profile is read for, and it has to travel with the
+    /// colour: `cs`/`CS` are the only place the resource table can be consulted, so
+    /// everything the conversion needs is read there and carried from there. A space
+    /// without one is a space we know the name of and cannot convert, which is a report
+    /// rather than a blank.
+    pub icc: Option<IccBased>,
 }
 
 impl ColourSpace {
@@ -126,6 +179,7 @@ impl ColourSpace {
         Self {
             name: "DeviceGray".into(),
             colorant: None,
+            icc: None,
         }
     }
 
@@ -134,12 +188,28 @@ impl ColourSpace {
         Self {
             name: "DeviceRGB".into(),
             colorant: None,
+            icc: None,
         }
     }
 
     /// How many components a colour in this space has.
+    ///
+    /// For an ICC-based space that is the profile's `/N`, which is a fact about the space
+    /// itself and not a guess: it is the one number that says how wide a component is
+    /// even when the profile names no space to read the components in.
     #[must_use]
     pub fn components(&self) -> usize {
+        if let Some(icc) = &self.icc {
+            // Only the counts a colour space can actually have. `/N 2` is not a thing —
+            // no device space has two components — so an unusable count is the three
+            // that almost every profile means, and the profile that says otherwise is
+            // reported rather than laid out wrongly.
+            return match icc.components {
+                Some(1) => 1,
+                Some(4) => 4,
+                _ => 3,
+            };
+        }
         match self.name.as_str() {
             "DeviceGray" | "CalGray" | "Separation" | "Indexed" => 1,
             "DeviceRGB" | "CalRGB" | "Lab" => 3,
@@ -147,6 +217,47 @@ impl ColourSpace {
             "Pattern" => 1,
             // An unknown space: assume the common case rather than guessing wildly.
             _ => 3,
+        }
+    }
+
+    /// The space the components are finally read in, following `/Alternate`.
+    ///
+    /// `None` when there is no ICC profile behind the name, or when the profile names no
+    /// alternate — and in that second case `None` is the answer rather than a fallback:
+    /// the profile is the only thing that could convert the components, no profile is
+    /// applied, and a colour invented out of them would be a wrong answer wearing a
+    /// plausible hat.
+    #[must_use]
+    pub fn through_alternate(&self) -> Option<Self> {
+        let alternate = self.icc.as_ref()?.alternate.as_ref()?;
+        Some(Self {
+            name: alternate.clone(),
+            colorant: None,
+            icc: None,
+        })
+    }
+
+    /// The name a report uses for this space.
+    ///
+    /// The name the content stream used, and the kind beside it when the kind is the
+    /// news: a resource named `CS0` says nothing about what refused to convert, so an
+    /// ICC-based space is named as one.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match &self.icc {
+            Some(icc) => match &icc.alternate {
+                Some(alternate) => format!(
+                    "the `ICCBased` space `{}`, whose `/Alternate` is the `/{alternate}` this \
+                     does not convert",
+                    self.name
+                ),
+                None => format!(
+                    "the `ICCBased` space `{}`, whose profile names no `/Alternate` to read it \
+                     through",
+                    self.name
+                ),
+            },
+            None => self.name.clone(),
         }
     }
 }
@@ -250,6 +361,19 @@ impl Colour {
     /// the separations it names.
     #[must_use]
     pub fn to_rgba(&self, ink: Option<&Colour>) -> Option<Rgba> {
+        // An ICC-based space is read through the `/Alternate` its profile names, which is
+        // the specification's own provision for a reader that cannot apply the profile:
+        // the file has already said what to do instead, so following it is not an
+        // approximation of the profile but the substitute the file asks for. No profile is
+        // applied here and none will be — which is why this is the conversion rather than
+        // a better fallback, and why a profile that names no alternate is reported below
+        // instead of guessed at.
+        if self.space.icc.is_some() {
+            let through = self.space.through_alternate()?;
+            let mut resolved = self.clone();
+            resolved.space = through;
+            return resolved.to_rgba(ink);
+        }
         match self.space.name.as_str() {
             "DeviceGray" | "CalGray" => {
                 let g = self.components.first().copied()?.clamp(0.0, 1.0);
@@ -1277,6 +1401,113 @@ mod tests {
         assert_eq!((rgba.r, rgba.g, rgba.b), (1.0, 0.5, 0.0));
     }
 
+    // ── An ICC-based colour space ───────────────────────────────────────────────────
+
+    /// The resource name a page's `/ColorSpace` table gives an ICC-based space, and what
+    /// the profile it names declares. Written as a space the interpreter would carry, so
+    /// the tests below are about the conversion and not about how the table was read.
+    fn icc_space(alternate: Option<&str>, components: usize) -> ColourSpace {
+        ColourSpace {
+            name: "CS0".into(),
+            colorant: None,
+            icc: Some(IccBased {
+                alternate: alternate.map(str::to_string),
+                components: Some(components),
+            }),
+        }
+    }
+
+    /// An ICC-based space with an `/Alternate /DeviceRGB` is the same colour as
+    /// `/DeviceRGB`, and the assertion is identity rather than closeness because it *is*
+    /// the same space: `/Alternate` is the file's own statement of what the components
+    /// mean to a reader that cannot apply the profile, so nothing is approximated here.
+    /// Reading it as "nearly RGB" would be the weaker claim, and a profile the reader
+    /// could apply would be the one worth calling approximate.
+    #[test]
+    fn an_icc_space_with_an_rgb_alternate_is_that_rgb_colour() {
+        let mut icc = Colour::black();
+        icc.set(icc_space(Some("DeviceRGB"), 3), &[1.0, 0.5, 0.0]);
+        let mut device = Colour::black();
+        device.set(ColourSpace::device_rgb(), &[1.0, 0.5, 0.0]);
+        assert_eq!(
+            icc.to_rgba(None).expect("the alternate converts"),
+            device.to_rgba(None).expect("rgb converts"),
+            "an `/Alternate /DeviceRGB` colour is the `/DeviceRGB` colour, exactly"
+        );
+    }
+
+    #[test]
+    fn an_icc_space_with_a_gray_alternate_is_that_gray_colour() {
+        let mut icc = Colour::black();
+        icc.set(icc_space(Some("DeviceGray"), 1), &[0.25]);
+        let mut device = Colour::black();
+        device.set(ColourSpace::device_gray(), &[0.25]);
+        assert_eq!(
+            icc.to_rgba(None).expect("the alternate converts"),
+            device.to_rgba(None).expect("gray converts"),
+            "a one-component profile is read as grey, and it is the same grey"
+        );
+    }
+
+    #[test]
+    fn an_icc_space_with_a_cmyk_alternate_is_that_cmyk_colour() {
+        let mut icc = Colour::black();
+        icc.set(icc_space(Some("DeviceCMYK"), 4), &[0.0, 1.0, 1.0, 0.0]);
+        let mut device = Colour::black();
+        device.set(
+            ColourSpace {
+                name: "DeviceCMYK".into(),
+                colorant: None,
+                icc: None,
+            },
+            &[0.0, 1.0, 1.0, 0.0],
+        );
+        assert_eq!(
+            icc.to_rgba(None).expect("the alternate converts"),
+            device.to_rgba(None).expect("cmyk converts"),
+            "a four-component profile is read as CMYK, subtractive like any other"
+        );
+    }
+
+    /// `/N` decides how many components a colour in the space has, and the two ends of it
+    /// are the two counts that are not the same width.
+    #[test]
+    fn an_icc_space_is_as_wide_as_its_profile_says() {
+        assert_eq!(icc_space(Some("DeviceGray"), 1).components(), 1);
+        assert_eq!(icc_space(Some("DeviceRGB"), 3).components(), 3);
+        assert_eq!(icc_space(Some("DeviceCMYK"), 4).components(), 4);
+        // A count no colour space can have, and a profile that could not be read: three is
+        // what almost every profile means, so neither is laid out as something it is not.
+        assert_eq!(icc_space(Some("DeviceRGB"), 2).components(), 3);
+        assert_eq!(icc_space(None, 3).components(), 3);
+    }
+
+    /// A profile with no `/Alternate` has told us nothing about what its components mean,
+    /// and a profile is not applied here — so there is no conversion, and what there is
+    /// not is a name to report. Falling back to RGB would be inventing the answer to a
+    /// question the file declined to answer.
+    #[test]
+    fn an_icc_space_with_no_alternate_is_refused_and_named() {
+        let mut c = Colour::black();
+        c.set(icc_space(None, 3), &[0.2, 0.4, 0.6]);
+        assert!(
+            c.to_rgba(None).is_none(),
+            "with no `/Alternate` and no profile applied there is nothing to convert through"
+        );
+        let said = c.space.describe();
+        assert!(
+            said.contains("ICCBased") && said.contains("CS0") && said.contains("Alternate"),
+            "and the report names the space it refused: {said}"
+        );
+    }
+
+    /// The space is still the one the content stream used, so a report leads with a name
+    /// the reader can go and look up.
+    #[test]
+    fn an_icc_space_still_reports_the_name_the_stream_used() {
+        assert!(icc_space(Some("DeviceRGB"), 3).describe().contains("CS0"));
+    }
+
     #[test]
     fn cmyk_is_subtractive() {
         // Full ink in every channel is black; no ink at all is white. A renderer that
@@ -1286,6 +1517,7 @@ mod tests {
             ColourSpace {
                 name: "DeviceCMYK".into(),
                 colorant: None,
+                icc: None,
             },
             &[1.0, 1.0, 1.0, 1.0],
         );
@@ -1300,6 +1532,7 @@ mod tests {
             ColourSpace {
                 name: "DeviceCMYK".into(),
                 colorant: None,
+                icc: None,
             },
             &[0.0, 0.0, 0.0, 0.0],
         );
@@ -1320,6 +1553,7 @@ mod tests {
             ColourSpace {
                 name: "DeviceCMYK".into(),
                 colorant: None,
+                icc: None,
             },
             &[1.0, 0.0, 0.0, 0.5],
         );
@@ -1336,6 +1570,7 @@ mod tests {
             ColourSpace {
                 name: "Separation".into(),
                 colorant: Some("PANTONE 185 C".into()),
+                icc: None,
             },
             &[1.0],
         );
@@ -1356,6 +1591,7 @@ mod tests {
             ColourSpace {
                 name: "Lab".into(),
                 colorant: None,
+                icc: None,
             },
             &[50.0, 20.0, -30.0],
         );

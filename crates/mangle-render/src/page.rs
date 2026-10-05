@@ -18,7 +18,7 @@
 //! request beyond the bound is answered at the bound rather than by exhausting memory.
 
 use mangle_content::{
-    ContentStream, FillRule as ContentRule, Mark, Matrix, PathSegment, Resources, run_with,
+    ContentStream, FillRule as ContentRule, Mark, Matrix, PathSegment, Resources, Rgba, run_with,
 };
 use mangle_doc::Page;
 use mangle_syntax::{Document, Object, Rect as PageRect, object::Dict, stream::decode_stream};
@@ -634,6 +634,60 @@ fn pattern_name(colour: &mangle_content::Colour) -> Result<&str, String> {
         .ok_or_else(|| "a pattern colour names no pattern, so nothing was drawn in it".to_string())
 }
 
+/// What was being painted, for the note that says a colour could not be converted.
+///
+/// The four marks that can only be flat — a fill, a stroke, the colour of an image mask,
+/// and text — each carry the space name in their own note, because what the reader loses
+/// differs: a fill loses a shape, a stroke loses an outline, text loses every glyph in
+/// that colour on the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flat {
+    Fill,
+    Stroke,
+    ImageMask,
+    Text,
+}
+
+/// The colour for a mark that can only paint one flat colour, or the reason there is none.
+///
+/// Every one of those four sites goes through here, which is the point: a space this
+/// cannot convert has to be refused the same way everywhere it can be painted, and a
+/// conversion that worked for a fill and not for a stroke or for text would leave the
+/// same colour on a page in two different colours. The note is pushed only on the first
+/// refusal of a given page, because a colour repeated forty times says the same thing
+/// forty times over.
+fn flat_colour(
+    colour: &mangle_content::Colour,
+    what: Flat,
+    notes: &mut Vec<String>,
+) -> Option<Rgba> {
+    if let Some(rgba) = colour.to_rgba(None) {
+        return Some(rgba);
+    }
+    let space = colour.space.describe();
+    let note = match what {
+        Flat::Fill => {
+            format!("a fill colour in {space} could not be converted, so the shape was not drawn")
+        }
+        Flat::Stroke => format!(
+            "a stroke colour in {space} could not be converted, so the outline was not drawn"
+        ),
+        // A mask has no colours of its own: this is the only colour it is painted in, so
+        // there is nothing left to draw it with.
+        Flat::ImageMask => {
+            format!("an image mask painted in {space} could not be converted, so it was not drawn")
+        }
+        Flat::Text => format!(
+            "the colour text is painted in {space} could not be converted, so no text on the \
+             page in that colour was drawn"
+        ),
+    };
+    if !notes.contains(&note) {
+        notes.push(note);
+    }
+    None
+}
+
 /// A `/Matrix` array, or the identity when the dictionary has none.
 fn read_matrix(object: Option<&Object>) -> Matrix {
     let Some(values) = object.and_then(Object::as_array) else {
@@ -1087,17 +1141,8 @@ fn draw_mark(
                         }
                         Err(reason) => notes.push(reason),
                     }
-                } else {
-                    match colour.to_rgba(None) {
-                        Some(rgba) => {
-                            device.fill_polygon(&polygon, rule, rgba.to_rgba8(record.fill_alpha));
-                        }
-                        None => notes.push(format!(
-                            "a fill colour in {} could not be converted, so the shape was not \
-                             drawn",
-                            colour.space.name
-                        )),
-                    }
+                } else if let Some(rgba) = flat_colour(colour, Flat::Fill, notes) {
+                    device.fill_polygon(&polygon, rule, rgba.to_rgba8(record.fill_alpha));
                 }
             }
             if let Some(colour) = stroke {
@@ -1131,21 +1176,8 @@ fn draw_mark(
                         }
                         Err(reason) => notes.push(reason),
                     }
-                } else {
-                    match colour.to_rgba(None) {
-                        Some(rgba) => {
-                            device.stroke_polygon(
-                                &polygon,
-                                &style,
-                                rgba.to_rgba8(record.stroke_alpha),
-                            );
-                        }
-                        None => notes.push(format!(
-                            "a stroke colour in {} could not be converted, so the outline was not \
-                             drawn",
-                            colour.space.name
-                        )),
-                    }
+                } else if let Some(rgba) = flat_colour(colour, Flat::Stroke, notes) {
+                    device.stroke_polygon(&polygon, &style, rgba.to_rgba8(record.stroke_alpha));
                 }
             }
         }
@@ -1222,23 +1254,16 @@ fn draw_mark(
                                 None
                             }
                         }
+                    } else if raster.is_stencil {
+                        // A mask is painted entirely in the graphics state's colour — its
+                        // own samples say only which pixels — so that colour is the whole
+                        // of it and a space this cannot convert leaves nothing to draw
+                        // with. An image that is not a mask paints its own samples and
+                        // never asks, which is why the conversion is only made here for
+                        // the one case that needs it.
+                        flat_colour(fill, Flat::ImageMask, notes).map(FillColour::flat)
                     } else {
-                        match fill.to_rgba(None) {
-                            Some(colour) => Some(FillColour::flat(colour)),
-                            // An image that is not a mask paints its own samples, so a
-                            // colour this cannot convert is no reason to refuse it. For a
-                            // mask it was the only colour there was.
-                            None => {
-                                if raster.is_stencil {
-                                    notes.push(format!(
-                                        "an image mask painted in {} could not be converted, \
-                                         so it was not drawn",
-                                        fill.space.name
-                                    ));
-                                }
-                                None
-                            }
-                        }
+                        None
                     };
                     image::draw(
                         device,
@@ -1292,12 +1317,7 @@ fn draw_mark(
             {
                 notes.push(reason);
             }
-            let Some(rgba) = fill.to_rgba(None) else {
-                notes.push(format!(
-                    "the colour text is painted in {} could not be converted, so no text \
-                     on the page in that colour was drawn",
-                    fill.space.name
-                ));
+            let Some(rgba) = flat_colour(fill, Flat::Text, notes) else {
                 return;
             };
             let ink = rgba.to_rgba8(record.fill_alpha);

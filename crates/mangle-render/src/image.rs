@@ -57,7 +57,7 @@
 //! exists — because a mask nobody can check is a claim about transparency that must be reported
 //! rather than believed. See [`decode_soft_mask`].
 
-use mangle_content::Matrix;
+use mangle_content::{IccBased, Matrix};
 use mangle_syntax::object::{Dict, Object, Stream};
 use mangle_syntax::stream::decode_stream;
 
@@ -268,19 +268,32 @@ fn read_space(
     };
     match array.first()?.as_name()? {
         b"ICCBased" => {
-            // An ICC stream names its component count in `/N`. Without the profile the
-            // colours cannot be converted, but the count is enough to read the samples and
-            // show them approximately, which beats showing nothing.
-            let stream = array.get(1).and_then(resolve);
-            let n = stream
-                .as_ref()
-                .and_then(Object::as_dict)
-                .and_then(|d| d.get("N"))
-                .and_then(Object::as_i64)
-                .unwrap_or(3);
-            match n {
-                1 => Some(Space::Gray { decode: [0.0, 1.0] }),
-                4 => Some(Space::Cmyk {
+            // The same rule `Colour::to_rgba` follows, and for the same reason: `/Alternate`
+            // is the file's own statement of what to do with these samples without
+            // applying the profile, and no profile is applied here. It is also the answer
+            // that is right where `/N` is wrong — a CMYK profile whose `/N` reads 3 is
+            // telling the truth about the profile and not about the file, whereas the
+            // alternate is what the producer said the data should be read as.
+            let profile = array
+                .get(1)
+                .and_then(resolve)
+                .or_else(|| array.get(1).cloned());
+            let declared = IccBased::from_profile(profile.as_ref());
+            if let Some(space) = declared
+                .alternate
+                .as_deref()
+                .and_then(|name| simple_space(name.as_bytes()))
+            {
+                return Some(space);
+            }
+            // No alternate, or one this does not read. The count is still enough to read
+            // the samples and show them approximately, which beats showing nothing — and
+            // it is what an image does where a colour cannot: a wrong picture on the page
+            // is recoverable by looking at the page, and a colour invented from a
+            // component count is not.
+            match declared.components {
+                Some(1) => Some(Space::Gray { decode: [0.0, 1.0] }),
+                Some(4) => Some(Space::Cmyk {
                     decode: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
                 }),
                 _ => Some(Space::Rgb {
@@ -506,6 +519,93 @@ pub fn decode_soft_mask(
 }
 
 fn decode_role(
+    stream: &Stream,
+    resolve: &dyn Fn(&Object) -> Option<Object>,
+    notes: &mut Vec<String>,
+    role: Role,
+) -> Option<Raster> {
+    let Some(raster) = decode_samples(stream, resolve, notes, role) else {
+        // Whatever the refusal was, the image still has an `/SMask` and a `/Mask` that
+        // were never looked at, and saying so is the difference between a gap we can see
+        // and a gap we cannot.
+        note_skipped(&stream.dict, resolve, role, notes);
+        return None;
+    };
+    Some(raster)
+}
+
+/// Report the parts of an image that a refusal left unexamined.
+///
+/// An image is refused in about a dozen ways, and nearly all of them happen before the
+/// `/SMask` and `/Mask` keys are read — a codec this cannot read returns about a hundred
+/// lines above them. So a picture whose samples are JPEG 2000 and whose `/Mask` is JBIG2
+/// says only that the JPEG 2000 was not decoded: the mask is not mentioned, and a page
+/// missing two things reports one.
+///
+/// Every one of those refusals reports what else was skipped, so the note counts what the
+/// page lost rather than where the reading stopped. Naming the codec of the skipped part
+/// is the same thing one level down: a `/Mask` whose own filter is unreadable is two gaps,
+/// and saying so is what tells a reader whether the JPEG 2000 work will fix this page.
+fn note_skipped(
+    dict: &Dict,
+    resolve: &dyn Fn(&Object) -> Option<Object>,
+    role: Role,
+    notes: &mut Vec<String>,
+) {
+    // A mask under a mask is not a thing this follows, and it says so in its own words
+    // wherever it is met. Here it is only ever a fact about what was skipped.
+    if role == Role::SoftMask && dict.get("SMask").is_some() {
+        notes.push("a soft mask carries a soft mask of its own, which is not read".to_owned());
+    } else if dict.get("SMask").is_some() {
+        notes.push(
+            "the image's `/SMask` was not read either, because the image it belongs to was not \
+             decoded"
+                .into(),
+        );
+    }
+    let mask = dict
+        .get("Mask")
+        .and_then(resolve)
+        .or_else(|| dict.get("Mask").cloned());
+    let Some(mask) = mask else {
+        return;
+    };
+    let Object::Stream(mask) = mask else {
+        // A `/Mask` that is not an image is nothing this can say anything useful about:
+        // the shape of the key is itself the finding, and the report below stands.
+        notes.push(
+            "the image's `/Mask` is not an image this can read, and was not read because the \
+             image it masks was not decoded"
+                .into(),
+        );
+        return;
+    };
+    let codec = codec_name(&mask);
+    notes.push(match codec {
+        Some(codec) => format!(
+            "the image's `/Mask` is a {codec} image and no decoder exists for one either, so \
+             it was not read"
+        ),
+        None => "the image's `/Mask` was not read either, because the image it masks was not \
+                 decoded"
+            .into(),
+    });
+}
+
+/// The image codec a stream is under, named as a reader would name it.
+///
+/// Only the two that are not decoded here: a `/Mask` under `/FlateDecode` is not a second
+/// gap, and calling it one would bury the first.
+fn codec_name(stream: &Stream) -> Option<&'static str> {
+    stream.filters().iter().rev().find_map(|f| match &**f {
+        b"JPXDecode" => Some("JPEG 2000"),
+        b"JBIG2Decode" => Some("JBIG2"),
+        _ => None,
+    })
+}
+
+/// The body of [`decode_role`], which refuses without saying what else it skipped.
+fn decode_samples(
     stream: &Stream,
     resolve: &dyn Fn(&Object) -> Option<Object>,
     notes: &mut Vec<String>,
@@ -1590,6 +1690,73 @@ mod tests {
 
     /// A real eight-bit image has to be untouched by any of this: its samples really do
     /// span 0..255, and dividing them by 1 or by 15 would flatten it.
+    /// An `[/ICCBased …]` image resolves through the `/Alternate` its profile names, the
+    /// same way a colour in the same space does.
+    ///
+    /// The fixture is the one that matters: a four-component profile whose `/N` says 4 and
+    /// whose `/Alternate` says `/DeviceCMYK` is read as CMYK, and one whose `/N` says 3
+    /// while the alternate says `/DeviceCMYK` is *still* read as CMYK. A reader cannot
+    /// apply the profile, and the alternate is the producer's answer to exactly that, so
+    /// following it is not an approximation of the profile — it is what the file says to do
+    /// instead. Counting `/N` where the alternate is available would paint a CMYK image
+    /// from its components as though they were red, green and blue.
+    #[test]
+    fn an_icc_based_image_is_read_through_its_alternate() {
+        let profile = |n: i64, alternate: Option<&str>| {
+            let mut dict = Dict::new();
+            dict.set("N", Object::Int(n));
+            if let Some(alternate) = alternate {
+                dict.set("Alternate", Object::name(alternate));
+            }
+            Object::Stream(Stream::new(dict, vec![0u8; 4]))
+        };
+        let icc_image = |n: i64, alternate: Option<&str>, data: Vec<u8>| {
+            let mut dict = Dict::new();
+            dict.set("Width", Object::Int(1));
+            dict.set("Height", Object::Int(1));
+            dict.set("BitsPerComponent", Object::Int(8));
+            dict.set(
+                "ColorSpace",
+                Object::Array(vec![Object::name("ICCBased"), profile(n, alternate)]),
+            );
+            Stream::new(dict, data)
+        };
+        // 1 0 0 0 is cyan in CMYK and a very dark red read as RGB, so this distinguishes
+        // the two readings exactly.
+        let (raster, notes) = decode_ok(&icc_image(4, Some("DeviceCMYK"), vec![255, 0, 0, 0]));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(raster.at(0, 0)[..3], [0, 255, 255], "subtractive: cyan");
+
+        // And with a `/N` that contradicts the alternate, the alternate still wins.
+        let (raster, _) = decode_ok(&icc_image(3, Some("DeviceCMYK"), vec![255, 0, 0]));
+        assert_eq!(
+            raster.at(0, 0)[..3],
+            [0, 255, 255],
+            "the alternate is what the producer said the data is"
+        );
+
+        // A one-component profile is grey whether it says so or is merely counted as one.
+        let (raster, _) = decode_ok(&icc_image(1, Some("DeviceGray"), vec![128]));
+        let got = raster.at(0, 0);
+        assert_eq!(got[0..3], [got[0], got[0], got[0]], "grey is grey: {got:?}");
+
+        // With no alternate the count is still enough to read the samples, which is what
+        // an image does where a colour cannot.
+        let (raster, _) = decode_ok(&icc_image(4, None, vec![255, 0, 0, 0]));
+        assert_eq!(
+            raster.at(0, 0)[..3],
+            [0, 255, 255],
+            "the /N fallback still works"
+        );
+        let (raster, _) = decode_ok(&icc_image(1, None, vec![128]));
+        let got = raster.at(0, 0);
+        assert_eq!(
+            got[0..3],
+            [got[0], got[0], got[0]],
+            "and for grey too: {got:?}"
+        );
+    }
+
     #[test]
     fn a_genuine_eight_bit_image_is_unaffected() {
         let (raster, notes) = decode_ok(&grey_image(4, 1, vec![0, 1, 128, 255], 8));
@@ -1789,6 +1956,115 @@ mod tests {
         let mut notes = Vec::new();
         assert!(decode(&Stream::new(dict, vec![0u8; 16]), &|_| None, &mut notes).is_none());
         assert!(notes.iter().any(|n| n.contains("JPEG 2000")), "{notes:?}");
+    }
+
+    // ── What a refusal leaves unread ─────────────────────────────────────────────────
+
+    /// An image of `filter` whose own samples cannot be decoded here.
+    fn coded_image(filter: &str, w: usize, h: usize) -> Stream {
+        let mut dict = Dict::new();
+        dict.set("Width", Object::Int(w as i64));
+        dict.set("Height", Object::Int(h as i64));
+        dict.set("BitsPerComponent", Object::Int(8));
+        dict.set("ColorSpace", Object::name("DeviceRGB"));
+        dict.set("Filter", Object::name(filter));
+        Stream::new(dict, vec![0u8; w * h * 3])
+    }
+
+    /// An image we cannot decode, whose `/SMask` is also one we cannot decode, reports
+    /// both — and the mask's own codec by name.
+    ///
+    /// This is the shape of the failure the fix is about. The `/SMask` is read about a
+    /// hundred lines below the codec refusal, so the picture was missing and the mask was
+    /// never mentioned: one gap reported where there were two. A page that loses both has
+    /// to say so, because "a JPEG 2000 image was not decoded" reads as a codec gap when
+    /// the transparency is a second, independent one.
+    #[test]
+    fn an_undecodable_image_reports_the_mask_it_never_looked_at() {
+        let mut image = coded_image("JPXDecode", 4, 4);
+        image
+            .dict
+            .set("SMask", Object::Stream(coded_image("JBIG2Decode", 4, 4)));
+        let mut notes = Vec::new();
+        assert!(decode(&image, &|o| Some(o.clone()), &mut notes).is_none());
+        let said = said(&notes);
+        assert!(
+            said.contains("JPEG 2000"),
+            "the image is reported: {said:?}"
+        );
+        assert!(said.contains("`/SMask`"), "and the mask is: {said:?}");
+    }
+
+    /// The same for a `/Mask`, which is the case the corpus found: a JPEG 2000 picture
+    /// whose mask is JBIG2, where the mask's codec is named as well as the mask.
+    #[test]
+    fn an_undecodable_image_reports_the_jbig2_mask_it_never_looked_at() {
+        let mut image = coded_image("JPXDecode", 4, 4);
+        image
+            .dict
+            .set("Mask", Object::Stream(coded_image("JBIG2Decode", 4, 4)));
+        let mut notes = Vec::new();
+        assert!(decode(&image, &|o| Some(o.clone()), &mut notes).is_none());
+        let said = said(&notes);
+        assert!(said.contains("`/Mask`"), "the mask is reported: {said:?}");
+        assert!(
+            said.contains("JBIG2"),
+            "and so is the codec of the mask, which is a second gap and not the first: {said:?}"
+        );
+    }
+
+    /// A mask we could have read is still reported as skipped: it was skipped because the
+    /// image it belongs to was not decoded, and a note that says only "not decoded" leaves
+    /// the reader to guess whether anything else was lost.
+    #[test]
+    fn an_undecodable_image_reports_a_readable_mask_it_never_looked_at() {
+        let mut image = coded_image("JBIG2Decode", 4, 4);
+        image
+            .dict
+            .set("SMask", Object::Stream(soft_mask(4, 4, vec![255; 16], 8)));
+        let mut notes = Vec::new();
+        assert!(decode(&image, &|o| Some(o.clone()), &mut notes).is_none());
+        assert!(said(&notes).contains("`/SMask`"), "{notes:?}");
+    }
+
+    /// An image with no mask of either kind reports only its own gap, which is the other
+    /// half of the property: a note that lists everything is no use if it lists things
+    /// that are not there.
+    #[test]
+    fn an_undecodable_image_with_no_mask_reports_only_its_own_gap() {
+        let mut notes = Vec::new();
+        assert!(
+            decode(
+                &coded_image("JPXDecode", 4, 4),
+                &|o| Some(o.clone()),
+                &mut notes
+            )
+            .is_none()
+        );
+        let said = said(&notes);
+        assert!(said.contains("JPEG 2000"), "{said:?}");
+        assert!(
+            !said.contains("/Mask") && !said.contains("/SMask"),
+            "and nothing about a mask the file does not have: {said:?}"
+        );
+    }
+
+    /// A refusal that is not a codec is reported the same way, which is the reason the
+    /// reporting sits outside the codec arms rather than inside them.
+    #[test]
+    fn any_refusal_reports_what_was_skipped_with_it() {
+        let mut image = rgb_image(4, 4, vec![0; 48]);
+        // `/BitsPerComponent 7` is not a thing, and the refusal happens well before the
+        // mask keys are read.
+        image.dict.set("BitsPerComponent", Object::Int(7));
+        image
+            .dict
+            .set("SMask", Object::Stream(soft_mask(4, 4, vec![255; 16], 8)));
+        let mut notes = Vec::new();
+        assert!(decode(&image, &|o| Some(o.clone()), &mut notes).is_none());
+        let said = said(&notes);
+        assert!(said.contains("7 bits"), "{said:?}");
+        assert!(said.contains("`/SMask`"), "and the skipped mask: {said:?}");
     }
 
     #[test]
