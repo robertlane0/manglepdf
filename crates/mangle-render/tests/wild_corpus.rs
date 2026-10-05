@@ -589,6 +589,38 @@ struct FileOutcome {
 /// It needs the corpus fetched — see `corpus/wild/SOURCES.md` — and `mutool` and `pdftotext`
 /// installed for the two halves that compare against them. The two cheap tests in this file
 /// are *not* ignored: they check the harness itself, they need no corpus, and they are the
+/// Whether this run should measure `file`, given `MANGLE_CORPUS_ONLY`.
+///
+/// A whole-corpus run takes four and a half hours, which is the right cost for a baseline and the
+/// wrong cost for answering one question. Naming a few files measures just those, which is how a
+/// single feature's effect gets a number instead of an assertion.
+///
+/// The variable holds comma-separated substrings, and a name matches if it contains any of them,
+/// so `MANGLE_CORPUS_ONLY=tamreview,comments` works without knowing the file's full name. An
+/// unset or empty variable measures everything, so the default run is unchanged.
+fn selected(file: &str) -> bool {
+    match std::env::var("MANGLE_CORPUS_ONLY") {
+        Ok(filter) => selected_by(file, Some(&filter)),
+        Err(_) => true,
+    }
+}
+
+/// The filter itself, with the environment read out of it.
+///
+/// Split out so it can be tested: an environment variable is process-global, and a test that
+/// sets one would be racing every other test in the binary. `None` and an empty or
+/// comma-only filter both mean *everything*, so a stray `MANGLE_CORPUS_ONLY=` cannot silently
+/// reduce a baseline run to nothing and have it look like a clean result.
+fn selected_by(file: &str, filter: Option<&str>) -> bool {
+    let parts: Vec<&str> = filter
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    parts.is_empty() || parts.iter().any(|p| file.contains(p))
+}
+
 /// reason this file is worth having in the default suite at all.
 #[test]
 #[ignore = "two hours over the whole corpus; run it deliberately with --ignored"]
@@ -614,10 +646,12 @@ fn the_wild_corpus_is_measured_and_reported() {
     let present: Vec<&Entry> = entries
         .iter()
         .filter(|e| dir.join(&e.file).is_file())
+        .filter(|e| selected(&e.file))
         .collect();
     let absent: Vec<&Entry> = entries
         .iter()
         .filter(|e| !dir.join(&e.file).is_file())
+        .filter(|e| selected(&e.file))
         .collect();
 
     // Absence is printed with its reason and is never a silent pass: a corpus that was
@@ -2167,4 +2201,26 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
         pi += 1;
     }
     pi == p.len()
+}
+
+/// The corpus filter, which decides what a targeted run measures.
+///
+/// Every one of these is a way a filter could quietly reduce a run to nothing and have the
+/// result read as a clean pass, so each is pinned rather than assumed.
+#[test]
+fn the_corpus_filter_selects_by_substring_and_an_empty_filter_selects_everything() {
+    let f = "pdfjs__TAMReview.pdf";
+    // No filter at all: everything, which is what a baseline run needs.
+    assert!(selected_by(f, None));
+    // Set but empty, and set to nothing but separators: also everything, for the same reason.
+    assert!(selected_by(f, Some("")));
+    assert!(selected_by(f, Some(" , ")));
+    // One substring, matched anywhere in the name so the caller need not know the prefix.
+    assert!(selected_by(f, Some("TAMReview")));
+    assert!(selected_by(f, Some("TAM")));
+    // Several, any of which is enough, with whitespace tolerated.
+    assert!(selected_by(f, Some("freeculture, comments ,TAMReview")));
+    // A filter that names something else measures nothing, and says so rather than passing.
+    assert!(!selected_by(f, Some("freeculture")));
+    assert!(!selected_by(f, Some("nistir7255")));
 }

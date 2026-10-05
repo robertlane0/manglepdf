@@ -296,10 +296,24 @@ renderer that never has to ask the machine for a font.
    colour too — `SCN` names a pattern resource exactly as `scn` does, and a page whose only ink
    was patterned strokes used to render blank ([D12](docs/known-diffs.md)); `Device::stroke_outline`
    now builds the outline once and both paints fill it, so a patterned stroke cannot come out
-   dashed differently from a flat one. A `/PatternType 1` tiling
-   pattern needs a loop over cells in the pattern's own space — `/Matrix`, `/BBox`, `/XStep`,
-   `/YStep` and paint type — and is reported by name rather than approximated with one cell.
-   **Done: the pattern is read and the loop is written.** `tiling_pattern` in `page.rs` returns
+   dashed differently from a flat one.
+   **Done: the pattern is read and the loop is written** — and it turns out to have **no corpus
+   effect at all**, which corrects a claim made here earlier. Nine corpus files *declare* tiling
+   patterns (50 each in `comments`, `issue12337`, `highlights` and `bug1992868`, and 301 in
+   `bug1795263`), and it was counted from those declarations that the missing loop cost 12 pages.
+   **It does not.** Tracing every page of all nine with `mutool trace` finds **zero**
+   `colorspace="Pattern"` and **zero** `sh` operators: not one corpus file selects a pattern at
+   all. A targeted four-file run confirms it from the other end — after the loop landed, three of
+   them score **0.8667** and `comments` **0.8645**, identical to their pre-feature figures to every
+   digit. The count came from `mutool show <file> grep PatternType`, which reads the *object
+   structure* and cannot see inside a content stream: the same grep for ` re` returns **zero** on a
+   PDF full of rectangles, and a substring match for `sh` on a trace hits every line containing
+   `glyph`. **A declared resource is not a used one.** The loop is kept as a named M2/M3
+   deliverable with tests, not as a fidelity win, and no figure is claimed for it. What is still
+   wrong in those four files is **undiagnosed**: `bug1992868` page 3 is at 0.8667 against a file
+   median of 0.9633, with 103 marks and **no note of any kind**, so nothing is being refused and
+   the page is simply coming out different.
+   The loop itself: `tiling_pattern` in `page.rs` returns `tiling_pattern` in `page.rs` returns
    a `TilingPattern` — the cell's `/BBox`, the two steps, the `/Matrix`, the paint type and the
    cell's own content stream — and `tiling_fill` renders the cell **once** into an image and hands
    it to the fill sampler, which repeats it. The cell is drawn by `paint_records`, the same

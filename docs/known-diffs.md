@@ -2933,16 +2933,40 @@ Three things follow, and only the first is a build:
    affect that file's worst page, which is plain `DeviceGray` text, and its 49 images decode — so the
    gap is real and the cluster is not it.
 
-## D25 — a tiling pattern was refused rather than tiled, which is 12 pages of the corpus
+## D25 — a tiling pattern was refused rather than tiled
 
 **Fixed.** A `/PatternType 1` tiling pattern used as a fill or stroke colour was refused **by
 name** — `a fill in the PatternType 1 tiling pattern `/P0` was found and not drawn` — and nothing
 was drawn in its place. The refusal was the right *shape*: one cell of a tiling is a texture that
-looks plausible and is wrong everywhere, so drawing one cell stretched was never an option. But it
-left **12 pages below 0.95 across four corpus files** — `comments` 4, `issue12337` 3, `highlights` 3
-and `bug1992868` 2 — and all four sit at a median of 0.962 or better otherwise, so the missing loop
-was most of what was wrong with them. **Text highlights are conventionally drawn as a tiling
-pattern**, which is why the cluster is exactly the files that highlight text.
+looks plausible and is wrong everywhere, so drawing one cell stretched was never an option.
+
+### The correction: this has **no** corpus effect, and an earlier claim that it had 12 pages was wrong
+
+**Nine corpus files *declare* tiling patterns** — 50 of them in `bug1992868`, `issue12337`,
+`comments` and `highlights`, and 301 in `bug1795263`. An earlier draft of this entry concluded from
+that count that the missing loop cost **12 pages below 0.95 across four files**, and named text
+highlights as the reason. **Both halves of that were wrong.**
+
+Tracing **every page** of all nine files with `mutool trace` finds **zero** `colorspace="Pattern"`
+operators and **zero** `sh` operators. Not one corpus file selects a pattern at all: they declare
+them in a resource dictionary and never use them. A measured four-file run confirms it from the
+other end — after the loop landed, `bug1992868`, `issue12337` and `highlights` are at **0.8667** and
+`comments` at **0.8645**, which is what they scored **before** it, to every digit.
+
+**The mistake is worth recording because it is the same one this file keeps finding.** The count
+came from `mutool show <file> grep PatternType`, which reads the *object structure* and reports
+declarations. It cannot see inside a content stream at all — the same grep for ` re` and ` rg`
+returns **zero** on a PDF full of rectangles and colour operators. And the first attempt to confirm
+it by tracing matched `sh` inside `glyph`, so every glyph line looked like a hit. **A declared
+resource is not a used one**, and neither an object-dump grep nor a substring match on a trace is
+evidence that a page does anything.
+
+So the tiling loop is justified as a **named M2/M3 deliverable**, on spec-completeness grounds and
+because the four files that declare patterns are exactly the kind of document a reader will open.
+It is **not** justified by a corpus figure, and none is claimed. What is still unexplained in those
+four files is real and **undiagnosed**: `bug1992868`'s page 3 sits at **0.8667** against a file
+median of 0.9633, with 103 marks and **no note of any kind** — nothing is refused, so the page is
+being drawn and is coming out different.
 
 ### How it works now
 
@@ -3006,10 +3030,10 @@ than inherited:
 - the cell was drawn without y inverted while the sampler measured y from the bottom, so every
   cell came out vertically mirrored.
 
-**The corpus effect is not yet measured.** The feature landed with its unit tests and the two
-refusal tests replaced, but a full corpus re-run has not been done since, so **no page figures are
-claimed for it here**. The 12 pages above are what the last completed run measured as missing, and
-the honest statement is that they are the target rather than a result.
+**The corpus effect is measured, and it is zero.** See the correction at the top: a targeted
+four-file run put `bug1992868`, `issue12337` and `highlights` at 0.8667 and `comments` at 0.8645,
+identical to their pre-feature figures, because no corpus file selects a pattern. The feature is
+kept because it is a named deliverable and because it is tested, not because it moved a number.
 
 ## D26 — a `/CropBox` written to eight decimals made the buffer a pixel taller, and the tolerance meant to prevent that was a thousand times too tight
 
