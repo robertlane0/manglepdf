@@ -336,8 +336,37 @@ pub fn render_page(
     render.notes.extend(executed.notes.iter().cloned());
 
     let mut device = Device::new(render.image);
+    render.marks += paint_records(
+        &executed,
+        &mut device,
+        &placement,
+        resources,
+        doc,
+        &mut render.notes,
+    );
+    render.image = device.into_image();
+    render
+}
+
+/// Draw a run of executed marks into a device, and report how many were drawn.
+///
+/// Split out of `render_page` because a tiling pattern needs the same thing for a cell that is
+/// not the page: the cell is a content stream of its own, executed and drawn at a transform of
+/// its own, and the only difference between it and the page is which bytes were parsed and which
+/// transform they were drawn under. Keeping one loop means a mark inside a cell is drawn by the
+/// same code as a mark on the page, rather than by a second implementation that agrees with it
+/// today and drifts from it tomorrow.
+fn paint_records(
+    executed: &mangle_content::PageContent,
+    device: &mut Device,
+    placement: &Placement,
+    resources: &Resources,
+    doc: &Document,
+    notes: &mut Vec<String>,
+) -> usize {
+    let mut drawn = 0usize;
     for (name, span) in &executed.unknown_operators {
-        render.notes.push(format!(
+        notes.push(format!(
             "operator `{}` at byte {} is not in the table and was not executed",
             String::from_utf8_lossy(name),
             span.start
@@ -390,22 +419,21 @@ pub fn render_page(
             .and_then(|name| resources.form_resources(name));
         let named_in = own.as_deref().unwrap_or(resources);
         draw_mark(
-            &mut device,
+            device,
             &record.mark,
             &to_device,
             &placement.matrix,
             record,
-            &mut render.notes,
+            notes,
             &mut lookup,
             &mut shade_lookup,
             &mut font_lookup,
             named_in,
             doc,
         );
-        render.marks += 1;
+        drawn += 1;
     }
-    render.image = device.into_image();
-    render
+    drawn
 }
 
 /// Find and read the shading a `sh` names.
