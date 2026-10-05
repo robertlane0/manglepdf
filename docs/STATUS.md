@@ -190,9 +190,12 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   something to be *checked* rather than merely sampled, and see "A soft mask is a separate
   image" below. Placement maps each pixel *back* through the inverse transformation, which is
   what makes a rotated image come out the right shape instead of a staircase. Colour spaces
-  covered: DeviceGray, DeviceRGB, DeviceCMYK, CalGray, CalRGB, ICCBased (by its `/N`) and
-  Indexed. Lab and Separation are refused rather than guessed, because neither can be converted
-  without data this does not have.
+  covered: DeviceGray, DeviceRGB, DeviceCMYK, CalGray, CalRGB, ICCBased (through its
+  `/Alternate`) and Indexed. Lab is refused rather than guessed, because it cannot be converted
+  without a white point this does not have, and a **Separation or DeviceN** is refused rather than
+  guessed *unless* it carries a readable `/TintTransform`, in which case the tint is evaluated
+  through it and the output read in the space the file names as its `/Alternate` — see "A spot
+  colour is a tint, not a colour" below.
 
   **Shadings** paint. All four PDF function kinds are here, including the PostScript
   calculator — a small stack machine with the specification's operators, whose
@@ -240,8 +243,21 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   painted: this is a fill feature, and `Colour::to_rgba` now says a `Pattern` space is not a
   colour at all rather than handing a caller black, which is what a stroke in one used to get
   silently. A bare `/Separation` **tint** (`0.5 scn` in a separation space rather than a
-  pattern name) is a different question and still takes its pre-existing fallback — the
-  alternate colour, or black.
+  pattern name) is a different question and is answered by the tint transform, below.
+- **A spot colour is a tint, not a colour.** `0.5 scn` in a `[/Separation …]` space does not set
+  half of something; it names one number, and the space itself says what that number means by
+  way of a `/TintTransform` function. So converting a separation **is** evaluating a function the
+  file supplied, and the four kinds of PDF function that live in `mangle-content` for exactly
+  this reason are the ones that do it — a shaded gradient and a spot ink are the same object with
+  a different question. The transform's output is in the `/Alternate` space, which is usually a
+  device name and is an `[/ICCBased …]` array in most real files, so it is read through the same
+  route an `ICCBased` fill colour takes. A tint outside 0..1 is clamped rather than refused. A
+  `/DeviceN` carries one tint per colorant and takes either one function for all of them or one
+  function applied to each independently. **What is not done is any substitute**: a transform that
+  is missing or unreadable, one that cannot answer at this tint, and an output that does not fill
+  the alternate's components are each a **report by name**, because the previous behaviour —
+  painting every tint black — was a wrong answer wearing a plausible hat, and a spot colour is
+  the one space where a reader is most inclined to guess.
 - **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`.
   This is how "what does ManglePDF think of this file?" is asked without a window.
 - **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one

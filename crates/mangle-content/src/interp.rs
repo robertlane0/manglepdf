@@ -566,6 +566,7 @@ impl Context<'_> {
                             name: "DeviceCMYK".into(),
                             colorant: None,
                             icc: None,
+                            tint: None,
                         },
                         &nums,
                     );
@@ -703,14 +704,21 @@ impl Context<'_> {
     fn set_colour_space(&mut self, name: Option<Vec<u8>>, stroking: bool) {
         let Some(n) = name else { return };
         let key = String::from_utf8_lossy(&n).into_owned();
+        let tint = self.resources.tint_transform(&key).cloned();
         let space = ColourSpace {
             // The name as written is what a report leads with. Whether it names an
             // ICC-based resource is a fact about the resource table rather than about the
             // operator, so it is read here — the one place the table can be consulted —
             // and carried on the space from there to the conversion.
             name: key.clone(),
-            colorant: None,
+            // A tint space carries the colorant it names. A `/DeviceN` names several, and
+            // one field holds one of them, so the first is what a single-colorant report
+            // gets and the rest are in the [`Tint`] beside it.
+            colorant: tint.as_ref().and_then(|t| t.names.first().cloned()),
             icc: self.resources.icc_profile(&key).cloned(),
+            // A separation or device-N space, and the transform that says what its tints
+            // mean. Read from the same table, at the same moment, for the same reason.
+            tint,
         };
         let target = if stroking {
             &mut self.state.stroking
@@ -731,6 +739,9 @@ impl Context<'_> {
                 name: "Pattern".into(),
                 colorant: Some(String::from_utf8_lossy(&n).into_owned()),
                 icc: None,
+                // A pattern is not a tint: it names a painting rather than an ink, so it
+                // carries no transform and is converted by the pattern's own path.
+                tint: None,
             };
             return;
         }

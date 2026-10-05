@@ -690,9 +690,179 @@ fn an_ordinary_colour_space_is_unchanged() {
     );
 }
 
-/// A separation is still refused. That is a different gap — it needs the tint transform,
-/// not an alternate space — and a fix for one must not quietly paper over the other by
-/// turning every unconvertible space into RGB.
+// ── A separation on a page ────────────────────────────────────────────────────
+
+/// A page whose colour space `Cs8` is a separation with the transform given.
+///
+/// `transform` is the raw bytes of the object the space names as its `/TintTransform`, and
+/// `alternate` the `/Alternate` space name — or an `[/ICCBased …]` array with a profile
+/// declaring `n` components and that alternate, for the case where the alternate is a
+/// profile rather than a device space.
+///
+/// The transform is passed as bytes rather than as a parsed function so that the space's
+/// indirect reference is exercised the way a real file writes it. A test that inlined the
+/// dictionary would pass whether or not the reference were followed.
+fn separation_page(transform: &[u8], content: &str) -> Vec<u8> {
+    let font = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+    pattern_page(
+        "/ColorSpace << /Cs8 5 0 R >> /Font << /F1 7 0 R >>",
+        content.as_bytes(),
+        &[b"[/Separation /Black /DeviceGray 6 0 R]", transform, font],
+    )
+}
+
+/// A separation page whose alternate is an `[/ICCBased …]` profile rather than a device
+/// name, which is what a real file writes.
+fn icc_separation_page(n: i64, alternate: &str, transform: &[u8], content: &str) -> Vec<u8> {
+    let profile = format!("<< /N {n} /Alternate /{alternate} /Length 4 >>\nstream\nab\nendstream");
+    let font = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+    pattern_page(
+        "/ColorSpace << /Cs8 5 0 R >> /Font << /F1 9 0 R >>",
+        content.as_bytes(),
+        &[
+            b"[/Separation /Black 6 0 R 7 0 R]",
+            b"[/ICCBased 8 0 R]",
+            transform,
+            profile.as_bytes(),
+            font,
+        ],
+    )
+}
+
+/// A type-0 transform: three three-component samples — white, mid-grey, black — written as
+/// the bytes a stream would hold.
+///
+/// Three entries is enough to say what matters, which is that the middle is a number the
+/// file chose and not one a reader would interpolate: at tint 0 it is white, at tint 1 it is
+/// black, and at tint 0.5 it is exactly `128`. A converter that guessed a ramp between the
+/// two ends would agree at the ends and land somewhere else in the middle, which is what
+/// makes the mid-tint assertion the load-bearing one.
+fn grey_sampled_table() -> Vec<u8> {
+    let mut dict = b"<< /FunctionType 0 /Domain [0 1] /Range [0 1 0 1 0 1] /Size [3] \
+                   /BitsPerSample 8 /Length 9 >>\nstream\n"
+        .to_vec();
+    for v in [255u8, 128, 0] {
+        dict.extend_from_slice(&[v, v, v]);
+    }
+    dict.extend_from_slice(b"\nendstream");
+    dict
+}
+
+/// The same separation painted three ways on one page — as a **fill**, as a **stroke** and
+/// as **text** — comes out the same colour in all three.
+///
+/// Three call sites, one answer: a conversion that worked for a fill and not for a stroke
+/// would leave the same ink in two colours on the same page, and no test of the converter
+/// alone would see it.
+#[test]
+fn a_separation_paints_a_fill_a_stroke_and_text_the_same_colour() {
+    // Full tint, which the table says is black. The point is not the black: it is that
+    // three independent call sites agree on the transform's answer.
+    let content = "/Cs8 cs 1 sc 0 0 40 40 re f \
+                   /Cs8 CS 1 SC 6 w 60 0 40 40 re S \
+                   BT /Cs8 cs 1 sc /F1 24 Tf 10 55 Td (W) Tj ET";
+    let render = render(separation_page(&grey_sampled_table(), content), 1.0);
+    assert!(
+        !render
+            .notes
+            .iter()
+            .any(|n| n.contains("could not be converted")),
+        "a separation with a readable transform converts, so nothing is reported: {:?}",
+        render.notes
+    );
+    let fill = deepest(&render.image, 10, 70, 30, 90);
+    let stroke = deepest(&render.image, 70, 57, 90, 63);
+    let text = deepest(&render.image, 5, 20, 45, 50);
+    assert_eq!(fill, stroke, "a fill and a stroke of one separation agree");
+    assert_eq!(fill, text, "and so does text: three call sites, one answer");
+    assert!(
+        fill[0] <= 2 && fill[1] <= 2 && fill[2] <= 2,
+        "which is the transform's value at full tint, not a shade of black from elsewhere: \
+         {fill:?}"
+    );
+}
+
+/// Two tints of one separation on one page are two colours, and both are the transform's.
+///
+/// A converter that answered "black" for every tint would pass the previous test and fail
+/// this one, which is the whole reason for the pair.
+#[test]
+fn each_tint_of_one_separation_paints_its_own_colour() {
+    let content = "/Cs8 cs 1 sc 0 0 100 50 re f /Cs8 cs 0.5 sc 0 50 100 50 re f";
+    let render = render(separation_page(&grey_sampled_table(), content), 1.0);
+    let full = deepest(&render.image, 20, 55, 80, 95);
+    let half = deepest(&render.image, 20, 5, 80, 45);
+    assert!(full[0] <= 2, "tint 1 is the table's last entry: {full:?}");
+    assert_eq!(
+        half[0], 128,
+        "and tint 0.5 is the table's middle entry, which no guess would produce: {half:?}"
+    );
+    assert_eq!(
+        (half[0], half[1], half[2]),
+        (half[0], half[0], half[0]),
+        "a `/DeviceGray` alternate is grey: {half:?}"
+    );
+}
+
+/// An `ICCBased` alternate is read through the profile's own `/Alternate`, so a separation
+/// over an sRGB profile paints the `/DeviceRGB` colour its transform named — and does so
+/// without anything having to know what an sRGB profile is.
+#[test]
+fn a_separation_over_an_icc_profile_converts_through_the_alternate() {
+    // A type-2 transform from cyan to magenta, so the answer is neither grey nor the
+    // endpoints' average.
+    let transform = b"<< /FunctionType 2 /Domain [0 1] /Range [0 1 0 1 0 1] /C0 [0 1 1] \
+                     /C1 [1 0 1] /N 1 >>";
+    let content = "/Cs8 cs 0.5 sc 0 0 100 100 re f";
+    let render = render(icc_separation_page(3, "DeviceRGB", transform, content), 1.0);
+    assert!(
+        !render
+            .notes
+            .iter()
+            .any(|n| n.contains("could not be converted")),
+        "an ICC-based alternate converts the transform's output: {:?}",
+        render.notes
+    );
+    // 0.5 of the way from (0,1,1) to (1,0,1) is (0.5, 0.5, 1): the midpoint the transform
+    // gave and nothing else.
+    assert_eq!(
+        deepest(&render.image, 20, 20, 80, 80),
+        [128, 128, 255],
+        "the transform's own value, read through `/Alternate /DeviceRGB`"
+    );
+}
+
+/// A separation whose transform is missing, or is not a function, has no colour in it.
+///
+/// Drawing black would be worse than drawing nothing: it is a colour the file did not ask
+/// for, and a spot colour is the one case where a reader is most inclined to guess. So the
+/// mark is not drawn and the report names the space, the colorant and the key at fault.
+#[test]
+fn a_separation_with_no_readable_transform_is_reported_and_nothing_is_drawn() {
+    for (label, transform) in [
+        ("null", &b"null"[..]),
+        ("a name, not a function", &b"/NotAFunction"[..]),
+    ] {
+        let content = "/Cs8 cs 1 sc 0 0 100 100 re f";
+        let render = render(separation_page(transform, content), 1.0);
+        let said = render.notes.join("; ");
+        assert!(
+            said.contains("could not be converted")
+                && said.contains("Cs8")
+                && said.contains("Black")
+                && said.contains("TintTransform"),
+            "with the transform {label}, the note names the space, the colorant and what is \
+             wrong with it: {said:?}"
+        );
+        assert!(
+            region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
+            "and nothing is drawn, rather than black where the file asked for a tint"
+        );
+    }
+}
+
+/// A separation used as a **pattern's** shading colour is still not a flat colour, and is
+/// still reported. Reading a tint transform is not a licence to paint a pattern.
 #[test]
 fn a_separation_is_still_refused_rather_than_read_as_rgb() {
     let separation = b"<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 \

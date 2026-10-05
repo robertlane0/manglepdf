@@ -130,10 +130,10 @@ four sit at medians between 0.64 and 0.79:
 | id | file | pages | median SSIM | pages below 0.95 |
 |---|---|---|---|---|
 | W034 | `gov__nist-nistir7255.pdf` | 66 | 0.7842 | 61 |
-| W075 | `gov__nist-sp800-88.pdf` | 44 | 0.7741 | 41 |
-| W076 | `pdfjs__TAMReview.pdf` | 23 | 0.7663 | 22 |
+| ~~W075~~ | ~~`gov__nist-sp800-88.pdf`~~ | 44 | ~~0.7741~~ **0.96095** | ~~41~~ **0** |
+| W076 | `pdfjs__TAMReview.pdf` | 23 | ~~0.7663~~ **0.8879** | 22 |
 | W038 | `pdfjs__S2.pdf` | 1 | 0.6386 | 1 |
-| | | **134** | | **125** |
+| | | **134** | | **84** |
 
 Each of the four has one named cause, and all four are **missing features rather than bugs** — a
 codec or a colour-space conversion this project does not have. That distinction is the most
@@ -143,7 +143,7 @@ useful thing the diagnosis produced, because it says what to build next:
 |---|---|---|
 | W034 | a **JPEG 2000** decoder (`JPXDecode`) | `a JPEG 2000 image was found but no decoder exists yet`, twice, on **all 66 pages**. Both images the page draws are JPX, and one of them carries a `JBIG2Decode` `/Mask`. **Fixed as a report: the mask is now named too** (see [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-skipped-mask-was-never-reported) below) — the decoder itself is still missing. |
 | ~~W075~~ | ~~**`ICCBased` colour conversion`~~ | **FIXED — see [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-skipped-mask-was-never-reported).** `CS0` is `[/ICCBased …]` over an sRGB profile that carries `/Alternate /DeviceRGB`, and that alternate is now what the colour is read through. **43 of the file's 44 pages went from zero ink pixels to ink, and the file's median SSIM from 0.7741 to 0.96095.** |
-| W076 | **`Separation`/`DeviceN` tint-transform evaluation** | `the colour text is painted in Cs8 could not be converted`, on 21 of its 23 pages. `Cs8` is `[/Separation /Black <ICCBased sRGB> <FunctionType 0, 255 samples>]`, and it is the colour of the entire article body; **16 of its 23 pages draw only the running furniture**, several of them to the identical pixel. **Still refused, and still correct to refuse**: this is a different gap — it needs the tint transform, not an alternate space — and D19 measured it unchanged. |
+| ~~W076~~ | ~~**`Separation`/`DeviceN` tint-transform evaluation`~~ | **PARTLY FIXED — see [D20](#d20--a-separation-was-painted-black-where-the-file-asked-for-a-tint-and-now-its-tint-transform-is-evaluated).** `Cs8` is `[/Separation /Black <ICCBased sRGB> <FunctionType 0, 255 samples>]`, and it is the colour of the entire article body. **The transform is evaluated now: no page of the file reports `could not be converted`, and the six pages that drew 5,937 ink pixels draw 100k–174k. The file's median SSIM went from 0.7692 to 0.8879.** The 22 pages still below 0.95 are now limited by something else — see D20 — and not by colour. |
 | W038 | a **JPEG 2000** decoder, again | `a JPEG 2000 image was found but no decoder exists yet` six times, plus one naming `/Im7`. 13 JPX images carry the whole figure: we draw 31987 ink pixels against the oracle's 838668, and **99.8% of what we do draw is in the right place**. |
 
 `Colour::to_rgba` in `crates/mangle-content/src/state.rs` had arms for DeviceGray/CalGray,
@@ -151,10 +151,10 @@ DeviceRGB/CalRGB and DeviceCMYK, a fallback for Separation/DeviceN, and **no arm
 `ICCBased`, `Indexed` or `Lab`** — each of those fell through to `None`, and the mark was
 reported and dropped. The *image* path in `crates/mangle-render/src/image.rs` did read
 `ICCBased`, by counting `/N`, so the same colour space was approximated on an image and refused
-on a fill. That asymmetry was where W075 lived, and it was 42 blank pages. **`Indexed` and
-`Separation` are still gaps** — W076's is the largest single one left in the corpus — and they
-are not interchangeable with this one: an `Indexed` space needs its palette and a `Separation`
-needs its tint transform, and neither has an alternate to fall through to.
+on a fill. That asymmetry was where W075 lived, and it was 42 blank pages. **`Indexed` is still
+a gap** — it needs its palette, and there is no alternate to fall through to — but
+**`Separation` and `DeviceN` are not**: D19 read an `ICCBased` space through its `/Alternate`,
+and D20 evaluates a separation's `/TintTransform` and reads its `/Alternate` the same way.
 
 ### The result against Gate 3.1
 
@@ -2131,16 +2131,20 @@ difference is unembedded-font substitution, which is D6's subject and the projec
 policy. That is what "comparable" looks like: this file's median is now 0.961 against a
 corpus-wide median of 0.958.
 
-Page 1 is the one page still below 0.81, and it is **not** the ICC gap:
+Page 1 was the one page still below 0.81, and it was **not** the ICC gap:
 
 | page 1 | SSIM 0.8103 · RMS 36.09 · 232 787 above tolerance (11.065%) · 69 319 ink vs 316 363 |
 |---|---|
-| what it says | `a fill colour in Cs8 could not be converted` · `the colour text is painted in Cs8 could not be converted` |
+| what it said | `a fill colour in Cs8 could not be converted` · `the colour text is painted in Cs8 could not be converted` |
 
 `Cs8` is `[/Separation /Black 1209 0 R 3124 0 R]` — the tint-transform gap W076 lives in, and
-the same one that dominates `pdfjs__TAMReview.pdf`. So the one page of 44 that is still badly
-wrong is the one whose blocker is a *different* missing feature, which is the useful shape for
+the same one that dominates `pdfjs__TAMReview.pdf`. So the one page of 44 that was still badly
+wrong was the one whose blocker was a *different* missing feature, which is the useful shape for
 the diagnosis to have: this change removed the ICC gap and did not disguise the separation one.
+
+**[D20](#d20--a-separation-was-painted-black-where-the-file-asked-for-a-tint-and-now-its-tint-transform-is-evaluated)
+then removed the other gap too, and page 1 is now 0.98501 with 313 368 ink against the oracle's
+316 364.**
 
 **Page 2 is the remaining zero-ink page, and it is not a colour space at all.** Its `/Contents` is
 an array of eight content streams, of which the reader resolves none — `page.content_streams`
@@ -2159,11 +2163,16 @@ Both were measured page by page against the same oracle, and both are **unchange
 
 `TAMReview` uses `Cs6` = `[/ICCBased …]` (64 `cs` and 5 `CS` across the file) and `Cs8` =
 `[/Separation /Black …]` (82 `cs`). `Cs6` now converts, and the pages do not move: the text was
-already drawn in a substitued face and the *body* of the article is in `Cs8`, which is still
+already drawn in a substitued face and the *body* of the article is in `Cs8`, which was still
 refused. `the colour text is painted in Cs8 could not be converted` is unchanged and is
 **correct**: a separation needs its tint transform evaluated, and there is no `/Alternate` to
 fall through to. A change that turned every unconvertible space into RGB would have moved these
 pages and been wrong.
+
+**[D20](#d20--a-separation-was-painted-black-where-the-file-asked-for-a-tint-and-now-its-tint-transform-is-evaluated)
+evaluated the tint transform, and the file's median moved from 0.7692 to 0.8879** — by evaluating
+`Cs8`, not by turning it into RGB. The 22 pages still below 0.95 are now limited by a `TJ` array
+truncation in the content lexer, which D20 names.
 
 `nistir7255` contains no `ICCBased`, no `Separation` and no `Indexed` at all — 132 `JPXDecode`
 and 66 `JBIG2Decode`, which is the codec gap — so the numbers are identical to the last digit,
@@ -2207,7 +2216,9 @@ path:
 - an ordinary colour space renders exactly as before, marks, notes and all three squares' pixel
   values;
 - a `Separation` is **still refused** and the page is not filled with a guess at what the tint
-  looks like;
+  looks like — *as of this change; D20 evaluates the tint transform, and what this one still
+  covers is a `Separation` used as a **pattern's** shading colour, which is not a flat colour
+  and is evaluated by the pattern, per pixel*;
 - an image we cannot decode with an `/SMask` we also cannot decode produces a note naming
   **both**, and a `/Mask` whose codec is JBIG2 has that codec named too;
 - an image with no `/Mask` and no `/SMask` produces only its own note; and
@@ -2216,3 +2227,172 @@ path:
 
 Plus one on the image path: an `[/ICCBased …]` image reads through its `/Alternate`, and where
 `/N` and the alternate disagree the alternate wins, which is the case counting `/N` gets wrong.
+
+---
+
+## D20 — a separation was painted black where the file asked for a tint, and now its tint transform is evaluated
+
+**Severity: it was the largest single colour-space gap in the corpus. Fixed for `/Separation` and
+`/DeviceN`; the pages it freed are now limited by a different defect, named below.**
+
+### What was wrong, and it was worse than a refusal
+
+D19 added the `ICCBased` route: read the components through the profile's `/Alternate`. A
+`Separation` has no such route, because its components are not a colour at all — one scalar per
+colorant, a *tint* — and what the space says a tint means is its `/TintTransform`. Until now the
+conversion for `"Separation" | "DeviceN"` was:
+
+```rust
+"Separation" | "DeviceN" => ink.and_then(|i| i.to_rgba(None)).or(Some(Rgba::BLACK)),
+```
+
+Two things are wrong with that line, and the second is the one that mattered.
+
+The first is that it ends in `Rgba::BLACK`. A spot colour is the **one** space where black is a
+plausible guess, which is exactly why it is the one where a guess is most likely to be believed:
+a reader that paints every tint of every spot colour black looks correct on a page that only ever
+uses tint 1. And `ink` was `None` at every call site in the product, so the `.or(Some(BLACK))` was
+what actually ran.
+
+The second is quieter and is where the pages were. `ColourSpace::name` is the **resource key** a
+content stream used — `Cs8`, not `Separation`. The `match` above is on that name, so the arm was
+**unreachable for every real file**; a separation fell through to `_ => None` and was reported. So
+the fallback never fired either, and 16 of TAMReview's 23 pages drew only their running furniture.
+
+### What it does now
+
+The tint transform is a PDF function, and all four kinds already existed in
+`crates/mangle-render/src/shading.rs` — `Sampled`, `Exponential`, `Stitching`, `Calculator`. No
+second evaluator was written. The four kinds and `Function::parse` moved **down** into a new
+`crates/mangle-content/src/function.rs`, because the dependency direction is
+`content -> render/text` and the conversion that needs them lives in `mangle-content`:
+`Colour::to_rgba` is in the graphics state, a shading's function is only how a shading is
+defined, and a `/TintTransform` is an ordinary document object that two unrelated callers need.
+`mangle-render` re-exports the module as `shading`, so a gradient's function is still reached the
+same way.
+
+What the change does, in the file's own order:
+
+1. read `[/Separation /Black <alternate> <transform>]` and `[/DeviceN /A /B … <alt> <xf>]`
+   once per page, in `Resources::read_at`, beside the ICC profiles, and carry the result on
+   `ColourSpace` — because `cs`/`CS` is the only moment the resource table can be consulted;
+2. take the tint, **clamped** to 0..1, and hand it to `/TintTransform`. A `/Separation` has one
+   tint; a `/DeviceN` has one per colorant, read from `/Names` rather than assumed;
+3. read the transform's output in `/Alternate`, which is usually a device name and is an
+   `[/ICCBased …]` array in most real files — kept whole, so it goes through the same
+   `through_alternate` an `ICCBased` fill colour does;
+4. **refuse, by name,** where any of that is unavailable. Not black. Not grey.
+
+Three things are refused rather than guessed, and the reasons are the same as everywhere else in
+this file: a transform that is missing or unreadable, a transform that cannot answer at this
+tint, and an output that does not fill the alternate's components — padding a one-value answer
+out to three invents two thirds of an RGB colour. A `/DeviceGray` alternate is the common case and
+needs none of that care: its single component *is* the grey level.
+
+`/DeviceN` supports both shapes the specification allows: one function taking one input per
+colorant, and one function taking a single input applied to each colorant independently. A
+function whose input count is neither is refused — a three-input transform for a two-colorant
+space has no reading, and picking the inputs that look right is how a colour becomes a
+coincidence.
+
+One latent bug came with it. `Function::inputs()` returned `domain.len() / 2`, and `domain` is
+already one `[min, max]` pair per input — so it reported **zero** inputs for every function in
+existence. No gradient noticed, because each kind reads `domain.first()` directly. Deciding how
+many tints to hand a transform is exactly the question it answers, so a separation's tint
+transform returned `None` on every tint until it was fixed.
+
+### What it measured
+
+Both against `mutool draw` at 150 DPI, all 23 pages of TAMReview and page 1 of sp800-88:
+
+| file | pages | before | after |
+|---|---|---|---|
+| `pdfjs__TAMReview.pdf` median SSIM | 23 | 0.7692 | **0.8879** |
+| pages below 0.95 | | 22 | 22 |
+| worst page | | 0.6532 | 0.8210 |
+| best page | | 0.9592 | 0.9840 |
+| page 17 ink pixels | | 5 937 | **173 940** (oracle 245 598) |
+| `gov__nist-sp800-88.pdf` page 1 SSIM | 1 | 0.81035 | **0.98501** |
+| page 1 ink pixels | | 69 341 | **313 368** (oracle 316 364) |
+
+**Not one page of either file reports `could not be converted` any more.** sp800-88's page 1 was
+the corpus's one badly-wrong NIST page; at 0.985 it is now among the best pages of the file, so
+its 0.96095 median can only have risen.
+
+### Why TAMReview is still 22 pages below 0.95 — and it is not colour
+
+`corpus/wild/report/W076-p17-diff.png` after the change shows the body text present and the
+diff almost empty. What is left is described by the pages' only remaining note — the unembedded
+`/TiRoARRN~1268702012` — and by measurement:
+
+| page 17 | ours | oracle |
+|---|---|---|
+| glyphs the interpreter places | 2 661 | 3 960 (`mutool trace`) |
+| of which `/EMMOLK+Cambria` | 2 388 | 3 687 |
+| `/EMMONL+Cambria-Bold` | **199** | **199** |
+| `/EMMOML+Calibri` | **5** | **5** |
+| `Times-Roman` | **69** | **69** |
+
+Three of the four faces match to the glyph, so the font layer is not failing: the loss is
+**entirely** in the regular Cambria. It is not a coverage failure either — every code is short by
+a near-constant 35%, which is what losing whole show operations looks like and not what missing
+glyphs look like.
+
+The page's text lives in one form XObject (`222 0 obj`, `/Name /ARUA`). Its `TJ` arrays are
+kerned per character, with **no whitespace between the elements**:
+
+```
+[(cid)82.3(cid)77.5(cid)81.6(cid)5.3(cid)82(012)82.5(cid08 cid)86.3 …]TJ
+```
+
+That show carries **84 strings**. `crates/mangle-content/src/tokens.rs` has
+`MAX_COLLECTION_DEPTH: usize = 32`, documented as a bound on how *deep* a bracketed collection
+may nest — and `collect` uses it as a bound on how many *items* a collection may hold:
+
+```rust
+other => {
+    if items.len() < MAX_COLLECTION_DEPTH {
+        items.push(object_of(other));
+    }
+}
+```
+
+So every array of more than 32 elements is silently truncated, and a `TJ` array is the commonest
+array in a text-heavy file. The first 32 items of that show are 16 strings and 16 kerns; the
+remaining 68 are dropped, and the line is cut mid-word. **That is the whole of the remaining
+0.8879.**
+
+This is a content-stream lexer defect, unrelated to colour, and it is **not fixed here** — it is a
+separate change with its own verification, and the bound is there for a reason (a hostile file
+can open a bracket and never close it). It is named because it is now the largest single cause of
+difference left in this corpus, and because nothing in the report above would be honest without
+saying what the number is still limited by.
+
+### What is pinned now
+
+**Fifteen tests**, each confirmed to fail on the code before this change and to pass on it after —
+nine in `state.rs` and five end to end in `pages.rs`, plus one that says the other colour spaces
+did not move:
+
+- a separation at tint 1 is **the transform's own value at 1**, asserted by identity against what
+  the transform returns rather than against a number written beside the assertion;
+- tint 0 is the transform's value at 0 and a mid tint is the transform's value there — the test
+  names the number a straight line between the two ends would have produced, so a converter that
+  interpolated would fail it;
+- a tint outside 0..1 is **clamped**, and the test says which end each one landed on;
+- the same separation gives the identical colour as a **fill, a stroke and text on one page**;
+- a `/DeviceN` transform with one input per colorant yields **both** colorants from the one
+  answer, and the test says that neither was defaulted to zero;
+- a `/DeviceN` transform taking **one** input is applied to each colorant independently, with the
+  answers concatenated;
+- a transform taking the wrong number of inputs is **refused**, which is the case worth saying
+  out loud: the multi-input form is supported, an input count that is neither one nor the colorant
+  count is not, and nothing else is either;
+- a `/DeviceGray` alternate reads the transform's own single value, and an `[/ICCBased …]`
+  alternate goes through the profile's `/Alternate` to the same `/DeviceRGB` colour;
+- a separation whose transform is **missing** or is not a function is reported **by name** — the
+  space, its colorant, and `/TintTransform` — and nothing is drawn;
+- the alternate-colour rendering fallback is still a fallback: it stands in where the file gave
+  nothing to convert, and never in place of a transform that answered;
+- and every other colour space — grey, RGB, CMYK, `CalRGB` — converts to exactly what it did, with
+  `Indexed` and `Pattern` still gaps rather than quietly becoming tints of something.

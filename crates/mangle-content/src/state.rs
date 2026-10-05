@@ -11,6 +11,7 @@ use mangle_font::metrics::DeclaredWidths;
 
 use mangle_syntax::object::{Dict, Object};
 
+use crate::function::Function;
 use crate::matrix::Matrix;
 
 /// How a line's ends are drawn.
@@ -154,8 +155,118 @@ impl IccBased {
     }
 }
 
+/// Which of the two tint spaces a [`Tint`] belongs to.
+///
+/// A question with two answers, asked only so a report can say which one it is looking at:
+/// the two differ in how many tints a colour has, and nothing else this code does cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TintKind {
+    /// `[/Separation /Black …]`: one colorant, one tint.
+    Separation,
+    /// `[/DeviceN /Spot1 /Spot2 …]`: one tint per colorant.
+    DeviceN,
+}
+
+impl TintKind {
+    /// The name the specification gives the space.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Separation => "Separation",
+            Self::DeviceN => "DeviceN",
+        }
+    }
+}
+
+/// What a `/Separation` or `/DeviceN` space says its tint *means*.
+///
+/// A spot colour is not a colour. The content stream sets one number — the tint — and the
+/// space itself says what that number turns into: a `/TintTransform` function whose output
+/// is in the `/Alternate` space. So converting a separation is not a lookup and not a
+/// formula, it is **evaluating a function the file supplied**, and the answer is whatever
+/// that function returns.
+///
+/// That is why this carries the transform itself rather than a precomputed colour: a file is
+/// entitled to use twenty tints of the same spot colour on one page, and each of them is a
+/// different colour the file asked for by name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tint {
+    /// Which of the two tint spaces this is.
+    pub kind: TintKind,
+    /// `/Alternate`: the space the transform's output is expressed in, or `None` when the
+    /// space named one this could not read.
+    ///
+    /// Usually a device name, but an `[/ICCBased …]` array is what a real file writes and
+    /// one is kept whole here so that the output goes through the same
+    /// [`ColourSpace::through_alternate`] an `ICCBased` fill colour does. A transform's
+    /// output means nothing until we know what space it is expressed in, so `None` refuses
+    /// the tint rather than assuming the RGB that most files happen to use.
+    pub alternate: Option<ColourSpace>,
+    /// `/TintTransform`, or `None` when the space named none, or named one that could not be
+    /// read. `None` is a report rather than a guess: a separation whose transform is missing
+    /// has no colour in it, and painting it black or grey would be drawing a decision the
+    /// file did not make.
+    pub function: Option<Function>,
+    /// `/Names`: the colorants, one tint each. One for a `/Separation` by definition, and
+    /// as many as a `/DeviceN` declares.
+    pub colorants: usize,
+    /// `/Names` as written, kept so a report can name the colorants a space declares.
+    pub names: Vec<String>,
+}
+
+impl Tint {
+    /// The tints, each clamped to the 0-to-1 a tint is defined over.
+    ///
+    /// Clamping rather than refusing is what the specification asks for: a tint outside the
+    /// range is a damaged stream, and the nearest real tint is a better answer than no
+    /// colour. The clamp is what makes a tint of −1 paint as tint 0 rather than being
+    /// dropped, and a tint of 2 paint as tint 1.
+    #[must_use]
+    pub fn tints(&self, components: &[f64]) -> Vec<f64> {
+        let want = self.colorants.max(1);
+        let mut out: Vec<f64> = components.iter().copied().take(want).collect();
+        while out.len() < want {
+            out.push(0.0);
+        }
+        out.iter().map(|t| t.clamp(0.0, 1.0)).collect()
+    }
+
+    /// What one tint in each colorant comes to as components of the alternate space, or
+    /// `None` when the transform cannot answer.
+    ///
+    /// Both shapes a `/DeviceN` transform takes are here, and they are different questions
+    /// rather than one question with a special case:
+    ///
+    /// * **One function for all of them** — the ordinary case, taking one input per
+    ///   colorant and returning the whole alternate colour.
+    /// * **One function each** — a transform with a single input, which the specification
+    ///   allows, is applied to every tint independently and the answers are concatenated.
+    ///
+    /// A function that takes some other number of inputs is **refused**: a three-input
+    /// transform for a two-colorant space has no reading, and picking the inputs that look
+    /// right is how a colour becomes a coincidence.
+    #[must_use]
+    pub fn components_at(&self, tints: &[f64]) -> Option<Vec<f64>> {
+        let function = self.function.as_ref()?;
+        if function.inputs() == 0 || function.outputs() == 0 || tints.is_empty() {
+            return None;
+        }
+        if function.inputs() == 1 && tints.len() > 1 {
+            let mut out = Vec::with_capacity(function.outputs() * tints.len());
+            for tint in tints {
+                out.extend(function.apply1(*tint)?);
+            }
+            return Some(out);
+        }
+        if function.inputs() != tints.len() {
+            return None;
+        }
+        function.apply(tints)
+    }
+}
+
 /// A colour space, as far as the graphics state needs to know.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ColourSpace {
     /// `/DeviceGray`, `/DeviceRGB`, `/DeviceCMYK`, `/Pattern`, or the name the content
     /// stream used — `/CS0` — which is what a report leads with, because it is what the
@@ -171,6 +282,15 @@ pub struct ColourSpace {
     /// without one is a space we know the name of and cannot convert, which is a report
     /// rather than a blank.
     pub icc: Option<IccBased>,
+    /// What `name` selected, when it selected a `[/Separation …]` or `[/DeviceN …]`
+    /// resource — the tint transform and the space its output is in.
+    ///
+    /// Carried for the same reason as `icc`, and read in the same place: `cs`/`CS` is the
+    /// only moment the resource table can be consulted, so the tint transform is parsed once
+    /// per page and travels with every colour set afterwards. Shared rather than owned, so
+    /// the `sc` that sets each of the page's tints pays a pointer copy and not a copy of a
+    /// sampled table.
+    pub tint: Option<Arc<Tint>>,
 }
 
 impl ColourSpace {
@@ -180,6 +300,7 @@ impl ColourSpace {
             name: "DeviceGray".into(),
             colorant: None,
             icc: None,
+            tint: None,
         }
     }
 
@@ -189,6 +310,7 @@ impl ColourSpace {
             name: "DeviceRGB".into(),
             colorant: None,
             icc: None,
+            tint: None,
         }
     }
 
@@ -197,8 +319,19 @@ impl ColourSpace {
     /// For an ICC-based space that is the profile's `/N`, which is a fact about the space
     /// itself and not a guess: it is the one number that says how wide a component is
     /// even when the profile names no space to read the components in.
+    ///
+    /// For a tint space it is the colorant count, and that has to be read from the space
+    /// rather than from `name`: the name a content stream uses is a resource key like
+    /// `Cs8`, which says nothing about how wide the colour is, and a `/DeviceN` with six
+    /// colorants laid out as three tints and three zeros is a colour nobody asked for.
     #[must_use]
     pub fn components(&self) -> usize {
+        if let Some(tint) = &self.tint {
+            return match tint.kind {
+                TintKind::Separation => 1,
+                TintKind::DeviceN => tint.colorants.max(1),
+            };
+        }
         if let Some(icc) = &self.icc {
             // Only the counts a colour space can actually have. `/N 2` is not a thing —
             // no device space has two components — so an unusable count is the three
@@ -211,7 +344,8 @@ impl ColourSpace {
             };
         }
         match self.name.as_str() {
-            "DeviceGray" | "CalGray" | "Separation" | "Indexed" => 1,
+            "DeviceGray" | "CalGray" | "Indexed" => 1,
+            "Separation" => 1,
             "DeviceRGB" | "CalRGB" | "Lab" => 3,
             "DeviceCMYK" => 4,
             "Pattern" => 1,
@@ -234,6 +368,7 @@ impl ColourSpace {
             name: alternate.clone(),
             colorant: None,
             icc: None,
+            tint: None,
         })
     }
 
@@ -241,9 +376,41 @@ impl ColourSpace {
     ///
     /// The name the content stream used, and the kind beside it when the kind is the
     /// news: a resource named `CS0` says nothing about what refused to convert, so an
-    /// ICC-based space is named as one.
+    /// ICC-based space is named as one, and a separation is named by its colorant.
     #[must_use]
     pub fn describe(&self) -> String {
+        if let Some(tint) = &self.tint {
+            let colorants = if tint.names.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (`{}`)",
+                    tint.names
+                        .iter()
+                        .map(|n| format!("/{n}"))
+                        .collect::<Vec<_>>()
+                        .join("`, `/")
+                )
+            };
+            let named = format!(
+                "the `/{}` space `{}`{colorants}",
+                tint.kind.name(),
+                self.name
+            );
+            return match (&tint.function, &tint.alternate) {
+                (None, _) => {
+                    format!("{named}, whose `/TintTransform` is missing or could not be read")
+                }
+                (Some(_), None) => format!("{named}, whose `/Alternate` could not be read"),
+                (Some(_), Some(alternate)) => match &alternate.icc {
+                    Some(_) if alternate.through_alternate().is_none() => format!(
+                        "{named}, whose `/Alternate` is an `ICCBased` profile naming no space to \
+                         read through"
+                    ),
+                    _ => named,
+                },
+            };
+        }
         match &self.icc {
             Some(icc) => match &icc.alternate {
                 Some(alternate) => format!(
@@ -358,9 +525,25 @@ impl Colour {
     ///
     /// `ink` is the alternate-colour rendering fallback: a tint in a spot colour is
     /// drawn with it, which is what makes a page legible on a printer that has none of
-    /// the separations it names.
+    /// the separations it names. It is consulted **only** where the file itself gave nothing
+    /// to convert, and never as a stand-in for a transform that was there and answered.
     #[must_use]
     pub fn to_rgba(&self, ink: Option<&Colour>) -> Option<Rgba> {
+        self.to_rgba_at(ink, 0)
+    }
+
+    /// The conversion, with a bound on how far it may chain.
+    ///
+    /// A colour is converted by being routed through what the file says to read it in: an
+    /// `ICCBased` profile through its `/Alternate`, a separation through its tint transform
+    /// and *then* through the alternate the transform's output is in. Each of those is a
+    /// step, and a file whose two spaces name each other — `/A` whose alternate is `/B` and
+    /// `/B` whose alternate is `/A` — would otherwise loop until the stack ran out. Three
+    /// steps is one more than any conforming file needs and far fewer than a cycle does.
+    fn to_rgba_at(&self, ink: Option<&Colour>, depth: u32) -> Option<Rgba> {
+        if depth >= 3 {
+            return None;
+        }
         // An ICC-based space is read through the `/Alternate` its profile names, which is
         // the specification's own provision for a reader that cannot apply the profile:
         // the file has already said what to do instead, so following it is not an
@@ -372,7 +555,21 @@ impl Colour {
             let through = self.space.through_alternate()?;
             let mut resolved = self.clone();
             resolved.space = through;
-            return resolved.to_rgba(ink);
+            return resolved.to_rgba_at(ink, depth + 1);
+        }
+        // A tint space is recognised by **carrying its transform**, not by its name: the
+        // name a content stream uses is a resource key, and `Cs8` says nothing about the
+        // kind of space behind it. Matching on the name is what kept this arm unreachable
+        // for every real file, which is most of why a separation looked refused rather than
+        // unconverted. The name is accepted too, for a space built without a table.
+        if self.space.tint.is_some() || matches!(self.space.name.as_str(), "Separation" | "DeviceN")
+        {
+            // Never black, which is what this used to fall back to and which is a colour the
+            // file did not ask for. A spot colour is the one case where black is the most
+            // likely guess and so the one where a guess is most likely to be believed.
+            return self
+                .tint_rgba()
+                .or_else(|| ink.and_then(|i| i.to_rgba_at(None, depth + 1)));
         }
         match self.space.name.as_str() {
             "DeviceGray" | "CalGray" => {
@@ -408,10 +605,10 @@ impl Colour {
                     a: 1.0,
                 })
             }
-            // A tint or a device-N colour has one component per colorant, and neither can
-            // be converted without the colorant list and the alternate space. The
-            // fallback is what a reader is expected to draw instead.
-            "Separation" | "DeviceN" => ink.and_then(|i| i.to_rgba(None)).or(Some(Rgba::BLACK)),
+            // A tint or a device-N colour is answered above, by the transform it carries.
+            // Reaching here with one of these names means the space has no transform on it,
+            // which is a report rather than a colour.
+
             // A `Pattern` space is not a colour at all: its operand named a pattern resource,
             // and the pattern decides what is painted — a shading varies with position across
             // the shape, a tiling repeats a cell. There is no single colour to hand back, and
@@ -424,6 +621,54 @@ impl Colour {
             // relative to a white point this does not know. Returning nothing is honest.
             _ => None,
         }
+    }
+
+    /// A tint or a device-N colour, converted by **its own** tint transform.
+    ///
+    /// The steps are the file's own, in the file's own order: take the tint, hand it to
+    /// `/TintTransform`, and the answer is a colour in `/Alternate`. That last step is not
+    /// ours to simplify — an `ICCBased` alternate goes through
+    /// [`ColourSpace::through_alternate`] exactly as an `ICCBased` fill colour does, so a
+    /// separation over an sRGB profile lands on `/DeviceRGB` by the same route.
+    ///
+    /// Every step can fail, and each failure is `None` rather than a substitute colour:
+    ///
+    /// * no tint transform, or one that could not be read;
+    /// * a transform that cannot answer at this tint;
+    /// * an output that does not fill the alternate space's components. Padding a one-value
+    ///   answer out to three would invent two thirds of an RGB colour, and trimming a
+    ///   four-value one would invent a fourth; either is a colour the file never named, so
+    ///   the tint is reported instead.
+    ///
+    /// A `/DeviceGray` alternate is the common case and needs none of this care: its single
+    /// component *is* the grey level, so one output value is the whole answer.
+    fn tint_rgba(&self) -> Option<Rgba> {
+        let tint = self.space.tint.as_ref()?;
+        let alternate = tint.alternate.as_ref()?;
+        let tints = tint.tints(&self.components);
+        let out = tint.components_at(&tints)?;
+        let want = alternate.components();
+        if want == 0 || out.is_empty() {
+            return None;
+        }
+        let components = if out.len() == want {
+            out
+        } else if want == 1 {
+            vec![out.first().copied()?]
+        } else {
+            return None;
+        };
+        let mut converted = Colour {
+            space: alternate.clone(),
+            components,
+        };
+        // Clamped to the alternate's own range here, once, rather than in the device arms
+        // below: a transform is entitled to return a value outside 0 to 1 and the space it
+        // was handed for says what that means.
+        for c in &mut converted.components {
+            *c = c.clamp(0.0, 1.0);
+        }
+        converted.to_rgba_at(None, 1)
     }
 }
 
@@ -1193,6 +1438,8 @@ mod tests {
         clippy::indexing_slicing
     )]
 
+    use mangle_syntax::object::Stream;
+
     use super::*;
 
     fn near(a: f64, b: f64) -> bool {
@@ -1414,6 +1661,7 @@ mod tests {
                 alternate: alternate.map(str::to_string),
                 components: Some(components),
             }),
+            tint: None,
         }
     }
 
@@ -1459,6 +1707,7 @@ mod tests {
                 name: "DeviceCMYK".into(),
                 colorant: None,
                 icc: None,
+                tint: None,
             },
             &[0.0, 1.0, 1.0, 0.0],
         );
@@ -1518,6 +1767,7 @@ mod tests {
                 name: "DeviceCMYK".into(),
                 colorant: None,
                 icc: None,
+                tint: None,
             },
             &[1.0, 1.0, 1.0, 1.0],
         );
@@ -1533,6 +1783,7 @@ mod tests {
                 name: "DeviceCMYK".into(),
                 colorant: None,
                 icc: None,
+                tint: None,
             },
             &[0.0, 0.0, 0.0, 0.0],
         );
@@ -1554,6 +1805,7 @@ mod tests {
                 name: "DeviceCMYK".into(),
                 colorant: None,
                 icc: None,
+                tint: None,
             },
             &[1.0, 0.0, 0.0, 0.5],
         );
@@ -1563,25 +1815,552 @@ mod tests {
         assert!((rgba.b - 0.5).abs() < 1e-9);
     }
 
+    // ── A separation or a device-N colour ───────────────────────────────────────────
+
+    /// A type-0 tint transform: a table of `size` three-component entries.
+    ///
+    /// Written as the object a file would hold rather than as a [`Function`], so the tests
+    /// below compare a converted tint against **the transform's own answer** and not
+    /// against a number typed in beside the assertion. A test that hard-codes the expected
+    /// colour cannot tell a conversion from a coincidence; one that asks the transform
+    /// where that colour comes from can.
+    fn sampled_transform(size: usize, samples: Vec<f64>) -> Function {
+        let mut dict = Dict::new();
+        dict.set("FunctionType", Object::Int(0));
+        dict.set(
+            "Domain",
+            Object::Array(vec![Object::Real(0.0), Object::Real(1.0)]),
+        );
+        dict.set(
+            "Range",
+            Object::Array(vec![
+                Object::Real(0.0),
+                Object::Real(1.0),
+                Object::Real(0.0),
+                Object::Real(1.0),
+                Object::Real(0.0),
+                Object::Real(1.0),
+            ]),
+        );
+        dict.set("Size", Object::Array(vec![Object::Int(size as i64)]));
+        dict.set("BitsPerSample", Object::Int(8));
+        let raw: Vec<u8> = samples
+            .iter()
+            .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+            .collect();
+        Function::parse(&Object::Stream(Stream::new(dict, raw)), &|_: &Object| None)
+            .expect("a three-component sampled transform parses")
+    }
+
+    /// A three-colorant ramp that is emphatically **not** linear: 0 is pure red, 1 is pure
+    /// blue, and every step between them drops green by a third of its distance. A tint of
+    /// half therefore has to come out green-free, which an assumed linear ramp would not.
+    fn non_linear_ramp() -> Function {
+        let samples: Vec<f64> = (0..=16)
+            .flat_map(|i| {
+                let t = f64::from(i) / 16.0;
+                [t, (1.0 - t) / 3.0, 1.0 - t]
+            })
+            .collect();
+        sampled_transform(17, samples)
+    }
+
+    /// A `/Separation` over the alternate given, with the transform given.
+    fn separation(alternate: ColourSpace, function: Function) -> ColourSpace {
+        ColourSpace {
+            name: "CS0".into(),
+            colorant: Some("PANTONE 185 C".into()),
+            icc: None,
+            tint: Some(Arc::new(Tint {
+                kind: TintKind::Separation,
+                alternate: Some(alternate),
+                function: Some(function),
+                colorants: 1,
+                names: vec!["PANTONE 185 C".into()],
+            })),
+        }
+    }
+
+    /// A `/DeviceN` with `colorants` colorants, over the alternate given.
+    fn device_n(alternate: ColourSpace, function: Function, colorants: usize) -> ColourSpace {
+        ColourSpace {
+            name: "CS0".into(),
+            colorant: None,
+            icc: None,
+            tint: Some(Arc::new(Tint {
+                kind: TintKind::DeviceN,
+                alternate: Some(alternate),
+                function: Some(function),
+                colorants,
+                names: (0..colorants)
+                    .map(|i| format!("Spot {}", (b'A' + u8::try_from(i).unwrap_or(0)) as char))
+                    .collect(),
+            })),
+        }
+    }
+
+    /// What the transform itself says the tints are, which is the only definition of right.
+    fn through_the_transform(space: &ColourSpace, tints: &[f64]) -> Rgba {
+        let tint = space.tint.as_ref().expect("a tint space");
+        let clamped: Vec<f64> = tints.iter().copied().map(|t| t.clamp(0.0, 1.0)).collect();
+        let out = tint.components_at(&clamped).expect("the transform answers");
+        let mut wanted = Colour {
+            space: tint.alternate.clone().expect("the space names one"),
+            components: out,
+        };
+        for c in &mut wanted.components {
+            *c = c.clamp(0.0, 1.0);
+        }
+        wanted
+            .to_rgba(None)
+            .expect("and it is a colour this can read")
+    }
+
+    /// The same, for a one-colorant space.
+    fn one(space: &ColourSpace, tint: f64) -> Rgba {
+        through_the_transform(space, &[tint])
+    }
+
+    /// A separation at full tint is **the transform's value at one**, asserted as identity
+    /// against what the transform returns rather than against a number written down here.
+    /// The transform is arbitrary — a ramp, a table, a curve — and the point of the test is
+    /// that nothing here assumes which.
     #[test]
-    fn a_spot_colour_falls_back_to_the_alternate() {
-        let mut tint = Colour::black();
-        tint.set(
+    fn a_separation_at_full_tint_is_the_transform_s_own_answer() {
+        let space = separation(ColourSpace::device_rgb(), non_linear_ramp());
+        let mut c = Colour::black();
+        c.set(space.clone(), &[1.0]);
+        let got = c.to_rgba(None).expect("the separation converts");
+        let want = one(&space, 1.0);
+        assert_eq!(got, want, "identity, not a colour that looks about right");
+        assert!(
+            (got.b - got.r).abs() > 0.5,
+            "the fixture is a red-to-blue ramp, so this is not a grey that would pass either"
+        );
+    }
+
+    /// The two ends and the middle, each against the transform's own answer. The middle is
+    /// the load-bearing one: a separation evaluated by assuming a straight line from the
+    /// first tint to the last would agree at 0 and 1 and disagree everywhere else, and that
+    /// is precisely the bug this test exists to catch.
+    #[test]
+    fn every_tint_is_the_transform_s_own_value_and_not_an_interpolation() {
+        let space = separation(ColourSpace::device_rgb(), non_linear_ramp());
+        for tint in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let mut c = Colour::black();
+            c.set(space.clone(), &[tint]);
+            let got = c.to_rgba(None).expect("converts");
+            assert_eq!(
+                got,
+                one(&space, tint),
+                "at tint {tint} the transform's own value is the answer"
+            );
+        }
+        // And the assumption this forbids, shown by naming the number it would have produced. A
+        // straight line between the two ends puts green at a third where this transform
+        // puts it at a sixth, so the two are told apart by a wide margin rather than by a
+        // tolerance.
+        let mut half = Colour::black();
+        half.set(space, &[0.5]);
+        let rgba = half.to_rgba(None).expect("converts");
+        let straight_line = 1.0 + 0.5 * (0.0 - 1.0);
+        assert!(
+            (rgba.g - straight_line).abs() > 0.1,
+            "the transform's own value came back, not an interpolated one: {rgba:?}"
+        );
+        assert!(
+            (rgba.g - (1.0 - 0.5) / 3.0).abs() < 1.0 / 255.0,
+            "which is the transform's own middle entry, to within the eight bits a sampled \
+             table is quantised to: {rgba:?}"
+        );
+    }
+
+    /// A tint outside 0 to 1 is clamped to the nearer end rather than refused, and the two
+    /// ends are different colours so the test can say which end each one landed on.
+    #[test]
+    fn a_tint_outside_the_range_is_clamped_to_the_end_it_passed() {
+        let space = separation(ColourSpace::device_rgb(), non_linear_ramp());
+        let mut under = Colour::black();
+        under.set(space.clone(), &[-3.0]);
+        let mut over = Colour::black();
+        over.set(space.clone(), &[4.0]);
+        assert_eq!(
+            under.to_rgba(None).expect("a negative tint still paints"),
+            one(&space, 0.0),
+            "below the range, it paints as tint 0 — no ink at all"
+        );
+        assert_eq!(
+            over.to_rgba(None).expect("a tint above one still paints"),
+            one(&space, 1.0),
+            "above the range, it paints as tint 1 — full ink"
+        );
+        assert_ne!(
+            under.to_rgba(None),
+            over.to_rgba(None),
+            "the two ends are different colours, so the clamp is observable"
+        );
+    }
+
+    /// A `/DeviceN` transform taking one input per colorant returns the whole alternate
+    /// colour at once, and **every** component of it comes from that one answer.
+    ///
+    /// The transform is built so that each colorant lands somewhere distinct: the first
+    /// goes from white to red, the second from white to green, and the two are never equal
+    /// anywhere, so a colour built from one tint and zero for the other would be caught.
+    #[test]
+    fn a_device_n_colour_reads_every_colorant_out_of_its_transform() {
+        let two_input = Function::Exponential(crate::function::Exponential {
+            domain: vec![[0.0, 1.0], [0.0, 1.0]],
+            range: vec![[0.0, 1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 1.0]],
+            c0: vec![1.0, 1.0, 1.0],
+            c1: vec![1.0, 0.0, 0.0],
+        });
+        let space = device_n(ColourSpace::device_rgb(), two_input, 2);
+        let mut c = Colour::black();
+        c.set(space.clone(), &[1.0, 0.0]);
+        assert_eq!(c.components.len(), 2, "two colorants, two tints");
+
+        let full = c.to_rgba(None).expect("the device-N colour converts");
+        assert_eq!(
+            full,
+            through_the_transform(&space, &[1.0, 0.0]),
+            "identity against the transform's own two-input answer"
+        );
+        assert!(
+            (full.g - full.b).abs() < 1e-9,
+            "a full second colorant takes green and blue together: {full:?}"
+        );
+
+        let mut other = Colour::black();
+        other.set(space, &[0.0, 1.0]);
+        let swapped = other.to_rgba(None).expect("converts");
+        assert_ne!(
+            full, swapped,
+            "the two colorants are told apart, so neither was defaulted to zero"
+        );
+        assert!(
+            swapped.b > full.b,
+            "the first tint at zero leaves the second's blue alone: {swapped:?}"
+        );
+    }
+
+    /// A `/DeviceN` whose single transform takes **one** input is the other shape the
+    /// specification allows: the same function for every colorant, applied independently,
+    /// and the answers concatenated. That is supported, and this is what it means.
+    ///
+    /// The transform returns two values from one tint — a ramp from 1 to 0, then one from 0.5
+    /// to 0.25 — so the two colorants' answers are different numbers, and moving the tint
+    /// between them changes the colour. A grey alternate takes the first of the two.
+    #[test]
+    fn a_device_n_may_apply_one_transform_to_each_colorant() {
+        let split = || {
+            Function::Exponential(crate::function::Exponential {
+                domain: vec![[0.0, 1.0]],
+                range: vec![[0.0, 1.0, 1.0], [0.0, 1.0, 1.0]],
+                c0: vec![1.0, 0.5],
+                c1: vec![0.0, 0.25],
+            })
+        };
+        let grey = |tint: f64| {
+            let mut c = Colour::black();
+            c.set(
+                device_n(ColourSpace::device_gray(), split(), 2),
+                &[tint, 0.0],
+            );
+            c.to_rgba(None)
+                .expect("a gray alternate takes the first value")
+        };
+        assert!(
+            (grey(0.0).r - 1.0).abs() < 1e-9,
+            "the first tint at zero is 1: c0 + 0·(c1 − c0)"
+        );
+        assert!(
+            (grey(1.0).r - 0.0).abs() < 1e-9,
+            "and at one it is 0 — each tint went through the transform in its own right"
+        );
+        assert_ne!(
+            grey(0.0),
+            grey(1.0),
+            "so the two tints are not interchangeable"
+        );
+    }
+
+    /// A transform whose input count is neither one nor the colorant count has no reading
+    /// at all, and is **refused**. This is the case worth saying out loud: it is supported
+    /// nowhere else either, and a file that writes one is damaged rather than exotic.
+    #[test]
+    fn a_transform_taking_the_wrong_number_of_inputs_is_refused() {
+        let space = ColourSpace {
+            name: "CS0".into(),
+            colorant: Some("Spot A".into()),
+            icc: None,
+            tint: Some(Arc::new(Tint {
+                kind: TintKind::DeviceN,
+                alternate: Some(ColourSpace::device_rgb()),
+                function: Some(Function::Exponential(crate::function::Exponential {
+                    domain: vec![[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+                    range: vec![[0.0, 1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 1.0]],
+                    c0: vec![1.0, 1.0, 1.0],
+                    c1: vec![0.0, 0.0, 0.0],
+                })),
+                colorants: 2,
+                names: vec!["Spot A".into(), "Spot B".into()],
+            })),
+        };
+        let mut c = Colour::black();
+        c.set(space, &[0.5, 0.5]);
+        assert!(
+            c.to_rgba(None).is_none(),
+            "a three-input transform for a two-colorant space has no reading"
+        );
+    }
+
+    /// A `/DeviceGray` alternate is the common case and needs no interpretation: the
+    /// transform's one output component *is* the grey level.
+    #[test]
+    fn a_gray_alternate_reads_the_transform_s_own_single_value() {
+        let function = Function::Exponential(crate::function::Exponential {
+            domain: vec![[0.0, 1.0]],
+            range: vec![[0.0, 1.0, 1.0]],
+            c0: vec![0.8],
+            c1: vec![0.2],
+        });
+        let space = separation(ColourSpace::device_gray(), function);
+        let mut c = Colour::black();
+        c.set(space.clone(), &[0.5]);
+        let got = c.to_rgba(None).expect("a gray alternate converts");
+        let want = one(&space, 0.5);
+        assert_eq!(got, want);
+        // And the single value really is the level, in all three channels.
+        assert!((got.r - 0.5).abs() < 1e-9, "0.8 + 0.5·(0.2 − 0.8) is 0.5");
+        assert_eq!(got.r, got.g);
+        assert_eq!(got.g, got.b);
+    }
+
+    /// An `ICCBased` alternate is reached through the file's own `/Alternate`, by the same
+    /// route an `ICCBased` fill colour takes — so a separation over an sRGB profile lands
+    /// on `/DeviceRGB` without anything here knowing what an sRGB profile is.
+    #[test]
+    fn an_icc_based_alternate_converts_through_its_own_alternate() {
+        let alternate = ColourSpace {
+            name: "ICCBased".into(),
+            colorant: None,
+            icc: Some(IccBased {
+                alternate: Some("DeviceRGB".into()),
+                components: Some(3),
+            }),
+            tint: None,
+        };
+        let space = separation(alternate.clone(), non_linear_ramp());
+        let mut c = Colour::black();
+        c.set(space.clone(), &[1.0]);
+        let got = c.to_rgba(None).expect("an ICC-based alternate converts");
+        assert_eq!(got, one(&space, 1.0));
+        // Which is to say it is the `/DeviceRGB` colour the transform named and nothing
+        // else: an `ICCBased` alternate adds a step, not a conversion of its own.
+        assert_eq!(
+            alternate.through_alternate().expect("it has one").name,
+            "DeviceRGB",
+            "and the step it added was the profile's own `/Alternate`"
+        );
+        let mut plain = Colour::black();
+        plain.set(ColourSpace::device_rgb(), &[got.r, got.g, got.b]);
+        assert_eq!(plain.to_rgba(None).expect("rgb converts"), got);
+    }
+
+    /// A separation whose transform is missing, or whose answer cannot fill the alternate
+    /// space, has no colour in it. Drawing black would be a decision the file never made,
+    /// so nothing is drawn — and the report names the space, its colorant and, where the
+    /// transform is the thing that is wrong, which of its keys is at fault.
+    #[test]
+    fn a_separation_that_cannot_be_converted_is_refused_and_named() {
+        let mut absent = Colour::black();
+        absent.set(
             ColourSpace {
-                name: "Separation".into(),
-                colorant: Some("PANTONE 185 C".into()),
+                name: "Cs8".into(),
+                colorant: Some("Black".into()),
                 icc: None,
+                tint: Some(Arc::new(Tint {
+                    kind: TintKind::Separation,
+                    alternate: Some(ColourSpace::device_rgb()),
+                    function: None,
+                    colorants: 1,
+                    names: vec!["Black".into()],
+                })),
             },
             &[1.0],
         );
+        assert!(
+            absent.to_rgba(None).is_none(),
+            "a separation with no transform has no colour to draw"
+        );
+        let said = absent.space.describe();
+        for wanted in ["Cs8", "Black", "TintTransform"] {
+            assert!(said.contains(wanted), "the report names {wanted}: {said}");
+        }
+
+        // A transform that answers with one value into a three-component alternate has not
+        // named a colour: padding would invent two thirds of it and trimming would invent
+        // that one value's meaning. The report still names the space.
+        let mut too_narrow = Colour::black();
+        too_narrow.set(
+            separation(
+                ColourSpace::device_rgb(),
+                Function::Exponential(crate::function::Exponential {
+                    domain: vec![[0.0, 1.0]],
+                    range: vec![[0.0, 1.0, 1.0]],
+                    c0: vec![0.0],
+                    c1: vec![1.0],
+                }),
+            ),
+            &[0.5],
+        );
+        assert!(
+            too_narrow.to_rgba(None).is_none(),
+            "a grey answer to an RGB question is not a colour"
+        );
+        assert!(
+            too_narrow.space.describe().contains("CS0"),
+            "and the space is named regardless: {}",
+            too_narrow.space.describe()
+        );
+    }
+
+    /// The alternate-colour rendering fallback is still a fallback: it stands in where the
+    /// file gave nothing to convert, and never in place of a transform that answered. A
+    /// printer substitution must not overrule what the file said the ink looks like.
+    #[test]
+    fn the_alternate_colour_is_a_fallback_and_not_a_substitute() {
         let mut ink = Colour::black();
         ink.set(ColourSpace::device_rgb(), &[0.8, 0.0, 0.0]);
-        let rgba = tint.to_rgba(Some(&ink)).expect("the fallback is used");
-        assert_eq!((rgba.r, rgba.g, rgba.b), (0.8, 0.0, 0.0));
+        let rgba = Rgba {
+            r: 0.8,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
 
-        // With no alternate given, black rather than an invented colour.
-        let plain = tint.to_rgba(None).unwrap_or(Rgba::BLACK);
-        assert_eq!(plain, Rgba::BLACK);
+        // A tint space with no readable transform: the caller's colour is what there is.
+        let mut bare = Colour::black();
+        bare.set(
+            ColourSpace {
+                name: "Cs8".into(),
+                colorant: Some("PANTONE 185 C".into()),
+                icc: None,
+                tint: Some(Arc::new(Tint {
+                    kind: TintKind::Separation,
+                    alternate: Some(ColourSpace::device_rgb()),
+                    function: None,
+                    colorants: 1,
+                    names: vec!["PANTONE 185 C".into()],
+                })),
+            },
+            &[1.0],
+        );
+        assert_eq!(bare.to_rgba(Some(&ink)).expect("the fallback"), rgba);
+
+        // With a transform that answers, the file's answer wins and `ink` is not consulted.
+        let mut real = Colour::black();
+        real.set(
+            separation(ColourSpace::device_rgb(), non_linear_ramp()),
+            &[1.0],
+        );
+        assert_eq!(
+            real.to_rgba(Some(&ink)).expect("converts"),
+            one(&real.space, 1.0),
+            "the transform's own colour, not the caller's substitute"
+        );
+        assert_ne!(
+            real.to_rgba(Some(&ink)).expect("converts"),
+            rgba,
+            "which is not the substitute the caller offered"
+        );
+    }
+
+    /// Every space that converted before this one still converts to the same colour. A tint
+    /// transform is an addition to the conversion, and an addition that moved any other arm
+    /// would be a regression nobody would notice until a page came out the wrong colour.
+    #[test]
+    fn every_other_colour_space_converts_exactly_as_it_did() {
+        let mut gray = Colour::black();
+        gray.set(ColourSpace::device_gray(), &[0.25]);
+        assert_eq!(
+            gray.to_rgba(None).expect("grey"),
+            Rgba {
+                r: 0.25,
+                g: 0.25,
+                b: 0.25,
+                a: 1.0
+            }
+        );
+
+        let mut rgb = Colour::black();
+        rgb.set(ColourSpace::device_rgb(), &[1.0, 0.5, 0.0]);
+        assert_eq!(
+            rgb.to_rgba(None).expect("rgb"),
+            Rgba {
+                r: 1.0,
+                g: 0.5,
+                b: 0.0,
+                a: 1.0
+            }
+        );
+
+        let mut cmyk = Colour::black();
+        cmyk.set(
+            ColourSpace {
+                name: "DeviceCMYK".into(),
+                colorant: None,
+                icc: None,
+                tint: None,
+            },
+            &[0.0, 1.0, 1.0, 0.5],
+        );
+        assert_eq!(
+            cmyk.to_rgba(None).expect("cmyk"),
+            Rgba {
+                r: 0.5,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0
+            }
+        );
+
+        let mut cal = Colour::black();
+        cal.set(
+            ColourSpace {
+                name: "CalRGB".into(),
+                colorant: None,
+                icc: None,
+                tint: None,
+            },
+            &[0.1, 0.2, 0.3],
+        );
+        assert_eq!(
+            cal.to_rgba(None).expect("calrgb"),
+            Rgba {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.0
+            }
+        );
+
+        // And the two spaces that are still gaps are still gaps, rather than quietly
+        // becoming tints of something.
+        for name in ["Indexed", "Pattern"] {
+            let mut c = Colour::black();
+            c.set(
+                ColourSpace {
+                    name: name.into(),
+                    colorant: None,
+                    icc: None,
+                    tint: None,
+                },
+                &[0.4],
+            );
+            assert!(c.to_rgba(None).is_none(), "`/{name}` is not a tint");
+        }
     }
 
     #[test]
@@ -1592,6 +2371,7 @@ mod tests {
                 name: "Lab".into(),
                 colorant: None,
                 icc: None,
+                tint: None,
             },
             &[50.0, 20.0, -30.0],
         );

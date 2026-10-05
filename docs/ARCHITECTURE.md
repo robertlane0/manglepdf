@@ -22,8 +22,8 @@ Dependencies flow one way only. A lower crate never names a higher one.
 | `mangle-syntax` | The object model, lexer, parser, cross-references, object streams, recovery, and the writer. Lossless by construction. |
 | `mangle-doc` | Catalog, page tree with inheritance, name trees, outlines, destinations, page labels, optional-content groups, attachments, XMP. |
 | `mangle-font` | Font programs, encodings, CMaps, glyph names, metrics, subsetting, substitution. |
-| `mangle-content` | Content streams: tokens with byte spans, the interpreter, the graphics state, the page-object model. |
-| `mangle-render` | Rasterization: colour, paths, images, shadings, patterns, transparency, tiles. |
+| `mangle-content` | Content streams: tokens with byte spans, the interpreter, the graphics state, the page-object model, and **PDF functions** — a function dictionary is an ordinary document object, and both a gradient and a separation's tint transform are one. |
+| `mangle-render` | Rasterization: colour, paths, images, shadings, patterns, transparency, tiles. Re-exports `mangle_content::function` as `shading::` because a gradient's function is how a gradient is defined. |
 | `mangle-text` | Text extraction, reading order, search. |
 | `mangle-edit` | Commands, undo, surgical write-back, annotations, forms, redaction, flatten, page operations, optimize. |
 | `mangle-ui` | The application. |

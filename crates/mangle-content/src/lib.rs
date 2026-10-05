@@ -12,6 +12,7 @@
 //! |---|---|
 //! | [`tokens`] | lexical, with spans: a stream becomes a list of typed items |
 //! | [`ops`] | the operator table: what each operator consumes and does |
+//! | [`function`] | the four kinds of PDF function: table, exponential, stitching, calculator |
 //! | [`state`] | the graphics state `q` and `Q` act on |
 //! | [`interp`] | running a stream, producing marks with their spans |
 //! | [`matrix`] | the 2-D affine transform, in PDF's own layout |
@@ -35,6 +36,7 @@
 )]
 #![warn(missing_debug_implementations)]
 
+pub mod function;
 pub mod interp;
 pub mod matrix;
 pub mod ops;
@@ -45,6 +47,7 @@ use std::sync::Arc;
 
 use mangle_font::metrics::{CidWidths, Declared, DeclaredWidths};
 
+pub use function::Function;
 pub use interp::{
     BBox, FillRule, Mark, PageContent, Record, bbox_of, bounds_of, form_bbox, form_matrix, run,
     run_with, run_with_state,
@@ -52,7 +55,8 @@ pub use interp::{
 pub use matrix::Matrix;
 pub use state::{
     Clip, ClipBounds, Colour, ColourSpace, Dash, ExtGState, ExtGStates, GraphicsState, IccBased,
-    LineCap, LineJoin, PathSegment, RenderMode, Rgba, StateStack, StrokeStyle, TextState,
+    LineCap, LineJoin, PathSegment, RenderMode, Rgba, StateStack, StrokeStyle, TextState, Tint,
+    TintKind,
 };
 pub use tokens::{ContentKind, ContentStream, ContentToken, Operation};
 
@@ -88,6 +92,20 @@ pub struct Resources {
     /// an absent one mean "this name is not an ICC-based space" rather than "nothing was
     /// read".
     icc: std::collections::BTreeMap<String, IccBased>,
+    /// What each `/Separation` or `/DeviceN` colour space resource says its tints mean.
+    ///
+    /// The same shape of problem as `icc` and the same reason for a table: a tint transform
+    /// is an indirect object away from the array that names it, and `cs`/`CS` run once per
+    /// colour space a stream selects and hold no document to resolve it with. Parsing the
+    /// transform here means it is done once per page rather than once per `sc`, and a stream
+    /// that sets forty tints of one spot colour evaluates forty tints of **one** transform.
+    ///
+    /// A name that is not a tint space has no entry, which makes an absent one mean "this
+    /// name is not a separation" rather than "nothing was read". A tint space whose transform
+    /// is missing or unreadable **does** have an entry, with no function in it: that is the
+    /// difference between a space that says nothing and a space that says something unusable,
+    /// and only the second is worth a report.
+    tint: std::collections::BTreeMap<String, Arc<Tint>>,
     pub xobjects: std::collections::BTreeMap<String, mangle_syntax::object::Object>,
     /// Every form XObject's own resource table, by name.
     ///
@@ -118,6 +136,7 @@ impl PartialEq for Resources {
             && self.font_widths == other.font_widths
             && self.composite_fonts == other.composite_fonts
             && self.icc == other.icc
+            && self.tint == other.tint
             && self.xobjects == other.xobjects
             && self.forms == other.forms
             && self.ext_gstates == other.ext_gstates
@@ -178,22 +197,26 @@ impl Resources {
         // has no entry, which is what keeps the interpreter's lookup a single question.
         let colour_spaces = named(&table("ColorSpace"));
         let mut icc = std::collections::BTreeMap::new();
+        let mut tint = std::collections::BTreeMap::new();
         for (name, value) in &colour_spaces {
             let Some(array) = value.as_array() else {
                 continue;
             };
-            if array
+            let kind = array
                 .first()
                 .and_then(mangle_syntax::object::Object::as_name)
-                != Some(b"ICCBased")
-            {
+                .unwrap_or_default();
+            if kind == b"ICCBased" {
+                let profile = array
+                    .get(1)
+                    .and_then(resolve)
+                    .or_else(|| array.get(1).cloned());
+                icc.insert(name.clone(), IccBased::from_profile(profile.as_ref()));
                 continue;
             }
-            let profile = array
-                .get(1)
-                .and_then(resolve)
-                .or_else(|| array.get(1).cloned());
-            icc.insert(name.clone(), IccBased::from_profile(profile.as_ref()));
+            if let Some(read) = read_tint(array, kind, resolve) {
+                tint.insert(name.clone(), Arc::new(read));
+            }
         }
         // A form's own resources are read here, through the same resolver, rather than
         // when the form is executed: this is the only place a reference can be followed,
@@ -257,6 +280,7 @@ impl Resources {
             shadings: named(&table("Shading")),
             colour_spaces,
             icc,
+            tint,
             patterns: named(&table("Pattern")),
             ext_gstates: {
                 // A `/gs` name resolves against a table whose values are usually
@@ -332,6 +356,16 @@ impl Resources {
         self.icc.get(name)
     }
 
+    /// What a `/Separation` or `/DeviceN` space says its tints mean, when `name` is one.
+    ///
+    /// `None` for a name that is not a tint space. `Some` with no function in it is a tint
+    /// space whose transform was missing or unreadable, which is a finding about the file
+    /// and is what the report is written from.
+    #[must_use]
+    pub fn tint_transform(&self, name: &str) -> Option<&Arc<Tint>> {
+        self.tint.get(name)
+    }
+
     /// Every name a content stream could refer to, for the Inspector.
     #[must_use]
     pub fn counts(&self) -> ResourceCounts {
@@ -344,6 +378,102 @@ impl Resources {
             patterns: self.patterns.len(),
         }
     }
+}
+
+/// Read a `[/Separation …]` or `[/DeviceN …]` colour space array.
+///
+/// Both are `[ /Kind /Names… /Alternate /TintTransform ]`, and the only thing that differs
+/// is how many names there are: one colorant for a separation, one per colorant for a
+/// device-N. So one reader serves both, and the *kind* is carried on the result because a
+/// report should be able to say which of the two it is looking at.
+///
+/// The transform is parsed here, once, through the same resolver that read the table. It is
+/// the whole of what the space says a tint means, so there is no "assume a linear ramp from
+/// white to black" fallback to take when it is missing — a space whose transform cannot be
+/// read is a space with an entry and no function, and the conversion refuses it by name.
+fn read_tint(
+    array: &[mangle_syntax::object::Object],
+    kind: &[u8],
+    resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+) -> Option<Tint> {
+    let kind = match kind {
+        b"Separation" => TintKind::Separation,
+        b"DeviceN" => TintKind::DeviceN,
+        _ => return None,
+    };
+    // `/Names`, from the second element up to the last two. A `/Separation` has exactly one
+    // name, and a `/DeviceN` has as many as it declares colorants — so the count is read from
+    // the array rather than assumed, which is what makes a six-colorant space six wide.
+    let names: Vec<String> = array
+        .get(1..array.len().saturating_sub(2))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|o| o.as_name().map(|n| String::from_utf8_lossy(n).into_owned()))
+        .collect();
+    // The alternate is the second-to-last element and the transform the last, and both are
+    // normally indirect references. They are resolved rather than matched, so a file that
+    // inlines either one reads the same as a file that does not.
+    let alternate_object = array.get(array.len().saturating_sub(2)).cloned();
+    let transform_object = array.last().cloned();
+    let alternate = alternate_object
+        .as_ref()
+        .and_then(|o| read_alternate(o, resolve));
+    let function = transform_object
+        .as_ref()
+        .and_then(|o| Function::parse(o, resolve));
+    Some(Tint {
+        kind,
+        alternate,
+        function,
+        colorants: names.len().max(1),
+        names,
+    })
+}
+
+/// Read a `/Alternate` that may be a device name or an `[/ICCBased …]` array.
+///
+/// A name is the space itself; an ICC-based array is kept whole, profile and all, so that
+/// the components the transform produced are read through
+/// [`ColourSpace::through_alternate`] — the same route an `ICCBased` fill colour takes, and
+/// the reason a separation over an sRGB profile converts without anything here knowing what
+/// an sRGB profile is.
+///
+/// `None` when the alternate is neither, which is a report rather than a default: the
+/// transform's output means nothing until we know what space it is expressed in, and
+/// assuming RGB because that is what most files mean would be the guess this whole change
+/// exists to stop making.
+fn read_alternate(
+    object: &mangle_syntax::object::Object,
+    resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+) -> Option<ColourSpace> {
+    let resolved = resolve(object).unwrap_or_else(|| object.clone());
+    if let Some(name) = resolved.as_name() {
+        return Some(ColourSpace {
+            name: String::from_utf8_lossy(name).into_owned(),
+            ..ColourSpace::default()
+        });
+    }
+    let array = resolved.as_array()?;
+    let first = array
+        .first()
+        .and_then(mangle_syntax::object::Object::as_name);
+    if first == Some(b"ICCBased") {
+        let profile = array
+            .get(1)
+            .and_then(resolve)
+            .or_else(|| array.get(1).cloned());
+        return Some(ColourSpace {
+            name: "ICCBased".into(),
+            icc: Some(IccBased::from_profile(profile.as_ref())),
+            ..ColourSpace::default()
+        });
+    }
+    // A `[/CalRGB <<…>>]` or an `[/Indexed …]` alternate is a real thing a file can write,
+    // and neither converts here. The name is kept so a report can say what it was.
+    Some(ColourSpace {
+        name: first.map_or_else(String::new, |n| format!("/{}", String::from_utf8_lossy(n))),
+        ..ColourSpace::default()
+    })
 }
 
 /// Read each form XObject's own resource table, keyed by the name the page uses.
