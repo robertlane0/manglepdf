@@ -749,16 +749,14 @@ fn pattern_fill(
     resources: &Resources,
     doc: &Document,
     placement: &Matrix,
+    _uncoloured: Option<Rgba>,
 ) -> Result<FillColour, String> {
     let op = paint.name();
     let source = pattern_source(name, resources, doc)?;
     match source.kind {
         PatternKind::Shading => {}
         PatternKind::Tiling => {
-            return Err(format!(
-                "a {op} in the PatternType 1 tiling pattern `/{name}` was found and not \
-                 drawn: a tiling pattern as a {op} colour is not drawn yet"
-            ));
+            return tiling_fill(op, name, resources, doc, placement, _uncoloured);
         }
         PatternKind::Other(kind) => {
             return Err(format!(
@@ -785,7 +783,176 @@ fn pattern_fill(
     })
 }
 
-/// Which paint operator named a pattern, which is what a refusal has to say.
+/// Render one cell of a tiling pattern and hand it back as a fill colour.
+///
+/// The cell is rendered **once**, into an image one cell wide and tall, and the sampler repeats
+/// it. That is the whole reason this is affordable: a cell is a texture, and a page may paint
+/// one across a thousand shapes, so running the cell's content stream per pixel would cost more
+/// than the rest of the page together.
+///
+/// The cell is drawn at the pattern's own scale — one device pixel per `scale` of pattern space —
+/// and the *repeat* is what the sampler does, so nothing here needs to know how many cells the
+/// page will use.
+fn tiling_fill(
+    op: &str,
+    name: &str,
+    resources: &Resources,
+    doc: &Document,
+    placement: &Matrix,
+    _uncoloured: Option<Rgba>,
+) -> Result<FillColour, String> {
+    let Some(object) = resources.patterns.get(name).cloned() else {
+        return Err(format!(
+            "a {op} names the tiling pattern `/{name}`, which its resources do not define"
+        ));
+    };
+    let pattern = tiling_pattern(name, &object, &|o| doc.resolve_object(o))?;
+    if pattern.paint_type == PaintType::Uncoloured {
+        return Err(format!(
+            "a {op} in the uncoloured tiling pattern `/{name}` was found and not drawn: \
+             /PaintType 2 paints in the colour in force when the pattern is used, and a \
+             `Pattern` colour space has replaced that colour by then"
+        ));
+    }
+    // The cell's own size on the device, which is its box scaled — and which is asked of the
+    // dictionary before anything is allocated, so a hostile `/BBox` costs a few bytes of
+    // parsing rather than a gigabyte of image.
+    let to_pattern = placement.concat(pattern.matrix);
+    // `mean_scale` rather than a separate figure per axis: a cell is a texture and is drawn at
+    // one scale, and using the mean keeps a cell square rather than stretching it along one
+    // axis to match a skew it will not be tiled with anyway.
+    let scale = to_pattern.mean_scale().abs();
+    if scale <= 0.0 || !scale.is_finite() {
+        return Err(format!(
+            "the tiling pattern `/{name}` has a transformation with no scale on it, so its \
+             cell has no size on the page and was not drawn"
+        ));
+    }
+    let cell_w = ((pattern.bbox.right - pattern.bbox.left).abs() * scale)
+        .ceil()
+        .max(1.0);
+    let cell_h = ((pattern.bbox.top - pattern.bbox.bottom).abs() * scale)
+        .ceil()
+        .max(1.0);
+    if cell_w * cell_h > MAX_CELL_PIXELS {
+        return Err(format!(
+            "the tiling pattern `/{name}` has a cell of {cell_w:.0} by {cell_h:.0} pixels, \
+             above the {MAX_CELL_PIXELS} this draws, so it was not drawn"
+        ));
+    }
+    let (cell_w, cell_h) = (cell_w as usize, cell_h as usize);
+
+    // The cell's content, decoded and executed on its own resources.
+    let Object::Stream(stream) = &pattern.content else {
+        return Err(format!(
+            "the tiling pattern `/{name}` has no cell to draw, so it was not drawn"
+        ));
+    };
+    let cell_image = render_cell(
+        name,
+        stream,
+        doc,
+        pattern.matrix,
+        pattern.bbox,
+        scale,
+        cell_w,
+        cell_h,
+    )?;
+
+    Ok(FillColour::Tiling {
+        cell: cell_image,
+        // The cell image starts at pattern-space `bbox.x0, bbox.y0`, and the sampler measures
+        // from there, so the origin in device pixels is the top-left of the *box*, not of the
+        // pattern space.
+        origin: (0.0, 0.0),
+        scale: (scale, scale),
+        to_pattern,
+        step: (pattern.x_step, pattern.y_step),
+        bbox: (
+            pattern.bbox.left,
+            pattern.bbox.bottom,
+            pattern.bbox.right,
+            pattern.bbox.top,
+        ),
+        uncoloured: None,
+    })
+}
+
+/// The most a single tiling cell may be, in pixels. A cell is a small tile by definition; a
+/// pattern whose box covers a whole page is not a texture and is refused rather than rendered.
+const MAX_CELL_PIXELS: f64 = 4_000_000.0;
+
+/// Execute a cell's content stream and draw it into an image one cell wide.
+#[allow(clippy::too_many_arguments)]
+fn render_cell(
+    name: &str,
+    stream: &mangle_syntax::Stream,
+    doc: &Document,
+    matrix: Matrix,
+    bbox: PageRect,
+    scale: f64,
+    cell_w: usize,
+    cell_h: usize,
+) -> Result<Image, String> {
+    let decoded = decode_stream(stream);
+    if decoded.encoded {
+        return Err(format!(
+            "the cell of the tiling pattern `/{name}` is still encoded after its filters, so \
+             it was not drawn rather than read as operators"
+        ));
+    }
+    if decoded.data.is_empty() {
+        return Err(format!(
+            "the cell of the tiling pattern `/{name}` decoded to nothing, so it was not drawn"
+        ));
+    }
+    // A cell names its own fonts and images, so it carries its own resources and they are the
+    // ones its names resolve against.
+    let own = Resources::from_dict(
+        stream
+            .dict
+            .get("Resources")
+            .and_then(|r| doc.resolve_object(r))
+            .and_then(|r| r.as_dict().cloned())
+            .as_ref()
+            .unwrap_or(&Dict::new()),
+        &|o| doc.resolve_object(o),
+    );
+    let content = ContentStream::parse(&decoded.data);
+    let executed = run_with(&content, &own);
+    let mut notes = Vec::new();
+    // Pattern space to the cell image's own pixels: the box's top-left at the origin, at the
+    // cell's scale, **with y inverted**, because pattern space counts up and an image counts
+    // down. The page's own placement is deliberately not applied here — the cell image is
+    // already in device-oriented pixel space, and composing the placement in as well would
+    // place the cell twice.
+    let to_cell = Matrix::new(
+        scale,
+        0.0,
+        0.0,
+        -scale,
+        -bbox.left * scale,
+        bbox.top * scale,
+    );
+    let cell_placement = Placement {
+        matrix: to_cell.concat(matrix),
+        size: (cell_w, cell_h),
+    };
+    let mut device = Device::new(Image::new(cell_w, cell_h));
+    let _ = paint_records(
+        &executed,
+        &mut device,
+        &cell_placement,
+        &own,
+        doc,
+        &mut notes,
+    );
+    let image = device.into_image();
+    for note in &notes {
+        log::debug!("tiling pattern `/{name}`: {note}");
+    }
+    Ok(image)
+}
 ///
 /// A note that reads "a fill in the PatternType 1 tiling pattern was not drawn" when the
 /// content stream stroked a line is a note pointing at the wrong operator, and a note is
@@ -1315,9 +1482,13 @@ fn draw_mark(
                 // path as before — a page with an ordinary colour fill does not come near
                 // the per-pixel one.
                 if colour.space.name == "Pattern" {
-                    match pattern_name(colour)
-                        .and_then(|name| pattern_fill(Paint::Fill, name, resources, doc, placement))
-                    {
+                    match pattern_name(colour).and_then(
+                        |name| // A `/PaintType 2` cell paints in the colour in force when the pattern
+                            // is used, and a `Pattern` colour space has replaced that colour by
+                            // now, so there is nothing here to give it. Refused by name in
+                            // `tiling_fill` rather than guessed at.
+                            pattern_fill(Paint::Fill, name, resources, doc, placement, None),
+                    ) {
                         Ok(paint) => {
                             fill::polygon(device, &polygon, rule, &paint, record.fill_alpha);
                         }
@@ -1351,7 +1522,7 @@ fn draw_mark(
                 // strokes came out blank.
                 if colour.space.name == "Pattern" {
                     match pattern_name(colour).and_then(|name| {
-                        pattern_fill(Paint::Stroke, name, resources, doc, placement)
+                        pattern_fill(Paint::Stroke, name, resources, doc, placement, None)
                     }) {
                         Ok(paint) => {
                             fill::stroke(device, &polygon, &style, &paint, record.stroke_alpha);
@@ -1425,7 +1596,11 @@ fn draw_mark(
                         // painted in whatever the pattern says at each pixel it covers. The
                         // mask is filled rather than stroked, so it names itself as a fill.
                         match pattern_name(fill).and_then(|name| {
-                            pattern_fill(Paint::Fill, name, resources, doc, placement)
+                            // A `/PaintType 2` cell paints in the colour in force when the pattern
+                            // is used, and a `Pattern` colour space has replaced that colour by
+                            // now, so there is nothing here to give it. Refused by name in
+                            // `tiling_fill` rather than guessed at.
+                            pattern_fill(Paint::Fill, name, resources, doc, placement, None)
                         }) {
                             Ok(paint) => Some(paint),
                             Err(reason) => {

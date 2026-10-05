@@ -43,7 +43,7 @@ use mangle_content::{Matrix, Rgba};
 
 use crate::coverage::{FillRule, rasterise};
 use crate::shading::Shading;
-use crate::{Device, Polygon, StrokeStyle, over};
+use crate::{Device, Image, Polygon, StrokeStyle, over};
 
 /// The colour a fill paints in, which is not always a single colour.
 #[derive(Debug, Clone)]
@@ -64,6 +64,30 @@ pub enum FillColour {
         /// easiest to get backwards. A pattern says where it lives in the page's space, so a
         /// transformation that moves the shape it paints leaves the pattern where it was.
         to_shading: Matrix,
+    },
+    /// A `/PatternType 1` tiling pattern: one rendered cell, repeated.
+    ///
+    /// The same reasoning as the shading variant applies and a little more strongly. A tiling
+    /// pattern's colour depends on position *and* on which repeat of the cell the pixel falls
+    /// in, so it cannot be reduced to a colour; and the cell is rendered once rather than per
+    /// pixel because a cell is a texture.
+    Tiling {
+        cell: Image,
+        /// Where one cell's own top-left pixel sits on the device.
+        origin: (f64, f64),
+        /// Device pixels per unit of pattern space, along x and then y.
+        scale: (f64, f64),
+        /// The pattern's `/Matrix` composed inside the page's own placement, which is the same
+        /// composition the shading variant uses and for the same reason: a pattern says where
+        /// it lives in the page's space, so a transformation that moves the shape it paints
+        /// leaves the pattern where it was.
+        to_pattern: Matrix,
+        /// The pitch in pattern space. **Zero means not repeated in that direction.**
+        step: (f64, f64),
+        /// The cell's own box in pattern space, which clips it.
+        bbox: (f64, f64, f64, f64),
+        /// For `/PaintType 2`, the colour the operator asked for rather than the cell's own.
+        uncoloured: Option<Rgba>,
     },
 }
 
@@ -91,6 +115,23 @@ impl FillColour {
                 shading,
                 inverse: to_shading.inverse()?,
                 extend: shading.extend(),
+            }),
+            Self::Tiling {
+                cell,
+                origin,
+                scale,
+                to_pattern,
+                step,
+                bbox,
+                uncoloured,
+            } => Some(Sampler::Tiling {
+                cell,
+                origin: *origin,
+                scale: *scale,
+                inverse: to_pattern.inverse()?,
+                step: *step,
+                bbox: *bbox,
+                uncoloured: *uncoloured,
             }),
         }
     }
@@ -129,6 +170,110 @@ pub enum Sampler<'a> {
         inverse: Matrix,
         extend: [bool; 2],
     },
+    /// One rendered cell of a tiling pattern, repeated.
+    ///
+    /// The cell is held as pixels rather than as a content stream because the stream is run
+    /// once, not once per pixel: a cell is a texture, and re-executing it for every pixel of
+    /// every shape it paints would cost more than the rest of the page put together.
+    Tiling {
+        cell: &'a Image,
+        /// Where one cell's own top-left pixel sits on the device.
+        origin: (f64, f64),
+        /// Device pixels per unit of pattern space, along x and then y.
+        scale: (f64, f64),
+        /// Maps a device point *back* into pattern space.
+        inverse: Matrix,
+        /// The pitch in pattern space. **Zero means the cell is not repeated in that
+        /// direction** and is drawn once, which is why this is a pair and not an extent.
+        step: (f64, f64),
+        /// The cell's own box, in pattern space, which clips it.
+        bbox: (f64, f64, f64, f64),
+        /// For an uncoloured pattern, the colour the operator asked for.
+        uncoloured: Option<Rgba>,
+    },
+}
+
+impl Sampler<'_> {
+    /// One pixel of one cell of a tiling pattern.
+    ///
+    /// The arithmetic is: put the device pixel back into pattern space, find which repeat of
+    /// the cell it lands in, take its offset inside that repeat, and read the cell. A **zero
+    /// step means the cell is not repeated in that direction**, so the repeat index is forced to
+    /// zero rather than left to a division by zero — and the cell is then drawn once, anchored
+    /// at the pattern-space origin, which is where the specification puts it.
+    #[allow(clippy::too_many_arguments, clippy::unused_self)]
+    fn tile(
+        &self,
+        cell: &Image,
+        origin: (f64, f64),
+        scale: (f64, f64),
+        inverse: &Matrix,
+        step: (f64, f64),
+        bbox: (f64, f64, f64, f64),
+        uncoloured: Option<Rgba>,
+        x: usize,
+        y: usize,
+    ) -> Sample {
+        let nothing = Sample {
+            colour: [0.0, 0.0, 0.0],
+            coverage: 0.0,
+        };
+        let (px, py) = inverse.apply(x as f64 + 0.5, y as f64 + 0.5);
+        // Which repeat, and where inside it. `floor` rather than a truncation so that a pixel
+        // just below an origin belongs to the cell *before* it, which is the difference between
+        // a tiling and a staircase.
+        let (ix, lx) = split_cell(px, step.0);
+        let (iy, ly) = split_cell(py, step.1);
+        // The cell's own box clips it, and a box the wrong way round is read as the same box
+        // with its corners in order rather than as an empty one — the same choice the form
+        // XObject path makes, and for the same reason: an ordering mistake in a file should not
+        // be allowed to delete the page.
+        let (lo_x, lo_y) = (bbox.0.min(bbox.2), bbox.1.min(bbox.3));
+        let (hi_x, hi_y) = (bbox.0.max(bbox.2), bbox.1.max(bbox.3));
+        if lx < lo_x || lx > hi_x || ly < lo_y || ly > hi_y {
+            return nothing;
+        }
+        // Device pixel within the rendered cell. **y is measured from the box's *top***,
+        // because the cell image was drawn with pattern space inverted — the two must agree,
+        // or the cell is drawn one way and read the other and comes out mirrored.
+        let cx = (origin.0 + (lx - bbox.0) * scale.0).floor();
+        let cy = (origin.1 + (bbox.3 - ly) * scale.1).floor();
+        // The repeat offsets the cell within the cell image, which is itself one repeat wide.
+        let _ = (ix, iy);
+        let (cx, cy) = (
+            cx.rem_euclid(cell.width as f64),
+            cy.rem_euclid(cell.height as f64),
+        );
+        let (ux, uy) = (cx as usize, cy as usize);
+        let rgba = cell.get(ux, uy).unwrap_or([0, 0, 0, 0]);
+        // An uncoloured pattern paints in the operator's colour whatever the cell drew, so its
+        // own alpha is what is kept and its colour is discarded.
+        let colour = match uncoloured {
+            Some(c) => [c.r, c.g, c.b],
+            None => [
+                f64::from(rgba[0]) / 255.0,
+                f64::from(rgba[1]) / 255.0,
+                f64::from(rgba[2]) / 255.0,
+            ],
+        };
+        Sample {
+            colour,
+            coverage: f64::from(rgba[3]) / 255.0,
+        }
+    }
+}
+
+/// Which repeat of a cell a pattern-space coordinate falls in, and where inside it.
+///
+/// A **zero step is not tiled in that direction**: the coordinate is used as it stands, so the
+/// single cell is drawn once and anchored at the pattern-space origin, which is what the
+/// specification says a zero `/XStep` or `/YStep` means.
+fn split_cell(coord: f64, step: f64) -> (i64, f64) {
+    if step == 0.0 {
+        return (0, coord);
+    }
+    let index = (coord / step).floor();
+    (index as i64, coord - index * step)
 }
 
 impl Sampler<'_> {
@@ -143,6 +288,28 @@ impl Sampler<'_> {
     /// `None` for a flat colour, which has no gradient and therefore nothing to sample.
     #[must_use]
     pub fn sample(&self, x: usize, y: usize) -> Option<Sample> {
+        if let Self::Tiling {
+            cell,
+            origin,
+            scale,
+            inverse,
+            step,
+            bbox,
+            uncoloured,
+        } = self
+        {
+            return Some(self.tile(
+                cell,
+                *origin,
+                *scale,
+                inverse,
+                *step,
+                *bbox,
+                *uncoloured,
+                x,
+                y,
+            ));
+        }
         let Self::Shading {
             shading,
             inverse,
@@ -212,7 +379,11 @@ impl Sampler<'_> {
     pub fn at(&self, x: usize, y: usize, alpha: f64) -> Option<[u8; 4]> {
         match self {
             Self::Flat(colour) => Some(colour.to_rgba8(alpha)),
-            Self::Shading { .. } => {
+            // A tiling pattern's coverage is its own alpha — the cell's, or the operator's for
+            // an uncoloured one — so it multiplies the shape's coverage exactly as a shading's
+            // gradient coverage does. A cell that is transparent between its marks therefore
+            // lets the page through there, which is what a texture with gaps in it means.
+            Self::Tiling { .. } | Self::Shading { .. } => {
                 let sample = self.sample(x, y)?;
                 let a = (sample.coverage * alpha).clamp(0.0, 1.0);
                 Some([

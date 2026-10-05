@@ -3200,17 +3200,19 @@ fn a_pattern_is_in_the_pages_space_and_not_the_transforms() {
     );
 }
 
-/// A tiling pattern is a content stream repeated across the fill, which needs a loop over
-/// cells and the pattern's own space in each of them. That is not implemented, so the page
-/// has to say which kind of pattern it found and left alone — a name is the difference
-/// between a missing feature and a missing picture.
+/// A tiling pattern is a content stream repeated across the fill.
+///
+/// The cell's box is 20 units square but it paints only the lower-left 10 of them, and the
+/// pitch is 20, so a correct renderer shows red squares at every multiple of 20 with 10 units of
+/// paper between them. **Counting the red runs is the whole point of this test**: a renderer
+/// that stretched one cell over the whole shape would look identical at any single pixel, and
+/// would be wrong everywhere else. A cell that filled its own pitch would not distinguish the
+/// two at all, which is why the cell is smaller than the step.
 #[test]
-fn a_tiling_pattern_fill_is_reported_by_name() {
-    // A tiling pattern stream that paints one red square per cell. A renderer that ran it
-    // would show red squares; a renderer that refuses must show nothing at all.
+fn a_tiling_pattern_repeats_its_cell_across_the_fill() {
     let tiling = b"<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
                   /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >> \
-                  stream\n1 0 0 rg 0 0 20 20 re f\nendstream";
+                  stream\n1 0 0 rg 0 0 10 10 re f\nendstream";
     let page = pattern_page(
         "/Pattern << /P0 5 0 R >>",
         b"/Pattern cs /P0 scn 0 0 100 100 re f",
@@ -3218,242 +3220,184 @@ fn a_tiling_pattern_fill_is_reported_by_name() {
     );
     let render = render(page, 1.0);
     assert!(
-        render
-            .notes
-            .iter()
-            .any(|n| n.contains("PatternType 1") && n.contains("not drawn")),
-        "the note names the kind of pattern it did not draw: {:?}",
+        render.notes.iter().all(|n| !n.contains("not drawn")),
+        "a tiling pattern that draws is not reported as undrawn: {:?}",
         render.notes
     );
-    assert!(
-        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
-        "and nothing is drawn in its place, rather than one cell of it repeated wrongly"
+    // Red is only in the pattern's own cell boxes, so counting the red *runs* along the first
+    // row is what tells repetition from a stretched single cell: a stretch gives one run, and
+    // repetition gives five.
+    let row = 50usize;
+    let mut runs = 0usize;
+    let mut previous = false;
+    for x in 0..100 {
+        let red = render
+            .image
+            .get(x, row)
+            .is_some_and(|p| p[0] > 200 && p[1] < 60);
+        if red && !previous {
+            runs += 1;
+        }
+        previous = red;
+    }
+    assert_eq!(
+        runs, 5,
+        "five cells across a 100-unit fill at a pitch of 20, each 10 wide with 10 of paper \
+         between: {:?}",
+        render.notes
+    );
+    assert_eq!(
+        render.image.get(30, 50).map(|p| p[0]),
+        Some(255),
+        "and the gap between two cells really is paper, which a stretched cell would not \
+         leave: {:?}",
+        render.notes
     );
 }
 
-/// A shading whose colour space is a separation is one component wide, which is exactly what
-/// a grey function also produces. Reading it as grey would paint a spot colour as a picture
-/// of it, so the page is told the space instead.
+/// A **zero step is a value and not an absence**: it means the cell is not repeated in that
+/// direction, and is drawn once at the pattern-space origin.
+///
+/// A renderer that treats a zero step as "no pitch" divides by it and paints nothing at all, or
+/// tiles infinitely. Both are wrong, and both look like a missing feature rather than a missing
+/// rule, which is why this is a test of its own.
 #[test]
-fn a_pattern_fill_in_a_separation_colour_is_reported() {
-    let separation = b"<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 \
-                      /ColorSpace [/Separation /PANTONE 123 /TintTransform << \
-                      /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>] \
-                      /Coords [0 0 100 0] /Function << /FunctionType 2 /Domain [0 1] \
-                      /C0 [0] /C1 [1] /N 1 >> >> /Matrix [1 0 0 1 0 0] >>";
+fn a_zero_step_draws_the_cell_once_rather_than_repeating_it() {
+    // A cell 20 units square, no pitch along x, and a pitch of 20 along y: a column of cells
+    // down the left of the fill and white paper everywhere to the right of them.
+    let tiling = b"<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
+                  /BBox [0 0 20 20] /XStep 0 /YStep 20 /Resources << >> >> \
+                  stream\n1 0 0 rg 0 0 10 10 re f\nendstream";
     let page = pattern_page(
         "/Pattern << /P0 5 0 R >>",
         b"/Pattern cs /P0 scn 0 0 100 100 re f",
-        &[separation.as_slice()],
+        &[tiling.as_slice()],
     );
     let render = render(page, 1.0);
-    assert!(
-        render
-            .notes
-            .iter()
-            .any(|n| n.contains("Separation") && n.contains("not drawn")),
-        "the note names the colour space it cannot convert: {:?}",
-        render.notes
-    );
-    assert!(
-        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
-        "and the shape is not filled with a guess at what the tint looks like"
-    );
-}
-
-// ── A pattern as a stroke colour ──────────────────────────────────────────────
-
-/// A stroke's paint is a paint operator's paint, exactly as a fill's is.
-///
-/// `/Pattern CS` and `/P0 SCN` name a pattern resource as the *stroke* colour, and
-/// `SCN`/`SCN*` are the only operators that set one: `G`, `RG`, `K` and `g`/`rg`/`k` cannot
-/// name a pattern at all. So a page that strokes a line in a gradient is ordinary, and it is
-/// how a design tool draws a gradient rule — and a dashed gradient rule is a common way to
-/// draw one.
-///
-/// The bug this is for: a `Pattern` colour has no single colour behind it, so the stroke arm
-/// asked a colour converter for one, was told there was none, and dropped the mark. On a
-/// page whose only ink was such a stroke that is a blank page.
-#[test]
-fn a_pattern_stroke_paints_the_gradient_along_the_line() {
-    let page = pattern_page(
-        "/Pattern << /P0 5 0 R >>",
-        b"/Pattern CS /P0 SCN 8 w 0 50 m 100 50 l S",
-        &[rgb_gradient_pattern()],
-    );
-    let render = render(page, 1.0);
-    assert!(
-        render.notes.is_empty(),
-        "a shading pattern as a stroke colour should draw without complaint: {:?}",
-        render.notes
-    );
-    // The line runs along the gradient's own axis, so every pixel of it takes the colour the
-    // gradient gives at that x — the same closed form the fill test uses.
-    for x in [0usize, 1, 25, 50, 75, 98, 99] {
-        assert_eq!(
-            render.image.get(x, 50).map(|p| [p[0], p[1], p[2]]),
-            Some(gradient_rgb(x, 100.0)),
-            "at x = {x} the parameter is {} so the colour is {:?}",
-            (x as f64 + 0.5) / 100.0,
-            gradient_rgb(x, 100.0)
-        );
+    let row = 50usize;
+    let mut runs = 0usize;
+    let mut previous = false;
+    for x in 0..100 {
+        let red = render
+            .image
+            .get(x, row)
+            .is_some_and(|p| p[0] > 200 && p[1] < 60);
+        if red && !previous {
+            runs += 1;
+        }
+        previous = red;
     }
-    // The stroke is 8 points wide, so the paper above and below it is still paper. Without
-    // this the test would also pass for a fill of the whole page, which is the opposite
-    // defect wearing the same fixture.
-    assert!(
-        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.30, [255, 255, 255]),
-        "above a line 8 points wide at the middle of the page is paper"
-    );
-    assert!(
-        region_is_fraction(&render.image, 0.05, 0.70, 0.95, 0.95, [255, 255, 255]),
-        "and so is below it"
-    );
-}
-
-/// A dashed stroke in a pattern is one drawing, not two: the dashes are where the ink is
-/// and the gaps are paper.
-///
-/// This is the shape the corpus file that first showed this uses — a dashed rule stroked in
-/// a shading pattern — and it is the case where the two halves have to be right together.
-/// The outline is walked for dashes before it is filled, so getting the gradient right and
-/// the dashes wrong (or the reverse) is possible; a solid line would not tell them apart.
-#[test]
-fn a_dashed_pattern_stroke_dashes_and_gradients_together() {
-    let page = pattern_page(
-        "/Pattern << /P0 5 0 R >>",
-        b"/Pattern CS /P0 SCN 4 w [8 8] 0 d 0 50 m 100 50 l S",
-        &[rgb_gradient_pattern()],
-    );
-    let render = render(page, 1.0);
-    assert!(
-        render.notes.is_empty(),
-        "a dashed shading pattern as a stroke colour should draw without complaint: {:?}",
+    assert_eq!(
+        runs, 1,
+        "a zero /XStep draws the cell once along x, so one run and not five: {:?}",
         render.notes
     );
-    // The dash array starts at the line's beginning, so the run from 0 to 8 is ink, the run
-    // from 8 to 16 is paper, and the run from 16 to 24 is ink again. A pixel's centre decides
-    // it, so `x = 7` is the last inked column of the first dash and `x = 8` is already in the
-    // gap.
-    for (x, inked) in [
-        (0usize, true),
-        (3, true),
-        (7, true),
-        (8, false),
-        (12, false),
-        (16, true),
-        (20, true),
-        (24, false),
-    ] {
-        let pixel = render.image.get(x, 50).unwrap_or([255, 255, 255, 255]);
-        let black = pixel[0] < 128 || pixel[1] < 128 || pixel[2] < 128;
-        assert_eq!(
-            black,
-            inked,
-            "x = {x} is {} in an 8-on 8-off dash pattern (pixel {pixel:?})",
-            if inked { "ink" } else { "gap" }
-        );
-    }
-    // An inked pixel takes the gradient's colour at its own x, which is the point of painting
-    // per pixel rather than flattening the pattern to one colour.
-    assert_eq!(
-        render.image.get(20, 50).map(|p| [p[0], p[1], p[2]]),
-        Some(gradient_rgb(20, 100.0)),
-        "the second dash carries the gradient's colour where it lands"
-    );
 }
 
-/// A `/PatternType 2` pattern whose gradient is black at both ends, so every pixel it paints
-/// is black.
+/// The cell's own `/BBox` clips it, so content drawn outside the box does not appear.
 ///
-/// This is the control for the coverage comparison below. A gradient stroke cannot be
-/// compared against a one-colour stroke pixel for pixel, because the two put down different
-/// *colours* and a pixel's value then says as much about the gradient as about the shape. A
-/// pattern that paints one colour everywhere is the same paint either side of the two code
-/// paths, so any difference in the result is a difference in the shape.
-fn flat_black_pattern() -> &'static [u8] {
-    b"<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 /ColorSpace /DeviceRGB \
-      /Coords [0 0 100 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] \
-      /C1 [0 0 0] /N 1 >> /Extend [true true] >> /Matrix [1 0 0 1 0 0] >>"
-}
-
-/// The paint must not change the shape.
-///
-/// A patterned stroke and a one-colour stroke go down different code paths — one through
-/// `fill::stroke`, one through `Device::stroke_polygon` — and the only thing keeping them the
-/// same shape is that both fill the outline `Device::stroke_outline` builds. If a dash, a cap
-/// or a join were computed twice, once per path, the two could drift apart and nothing else
-/// would say so.
-///
-/// The pattern is the flat black one, so the comparison is exact rather than approximate: a
-/// difference in a single byte is a difference in coverage and not in colour.
+/// The cell paints a square twice as large as its own box, and only the half inside the box may
+/// show. A renderer that ignores the box paints the whole square and the gap between cells
+/// disappears, which looks like a correct tiling and is not one.
 #[test]
-fn a_pattern_stroke_covers_exactly_where_a_one_colour_stroke_does() {
-    // Dashes and two subpaths, so the outline has something to be wrong about.
-    let geometry = "4 w [8 8] 0 d 0 50 m 100 50 l 20 80 m 80 20 l S";
-    let flat = render(
-        pattern_page(
-            "/Pattern << /P0 5 0 R >>",
-            format!("0 0 0 RG {geometry}").as_bytes(),
-            &[flat_black_pattern()],
-        ),
-        1.0,
-    );
-    let patterned = render(
-        pattern_page(
-            "/Pattern << /P0 5 0 R >>",
-            format!("/Pattern CS /P0 SCN {geometry}").as_bytes(),
-            &[flat_black_pattern()],
-        ),
-        1.0,
-    );
-    assert!(
-        flat.notes.is_empty() && patterned.notes.is_empty(),
-        "{:?} {:?}",
-        flat.notes,
-        patterned.notes
-    );
-    let ink = flat
-        .image
-        .pixels
-        .chunks_exact(4)
-        .filter(|p| *p != [255, 255, 255, 255])
-        .count();
-    assert!(
-        ink > 100,
-        "the fixture must put down real ink, or it proves nothing: {ink}"
-    );
-    assert_eq!(
-        flat.image.pixels, patterned.image.pixels,
-        "the two strokes put ink on exactly the same pixels, at exactly the same values"
-    );
-}
-
-/// A tiling pattern as a stroke colour is the same unimplemented feature it is as a fill, and
-/// the note must say so by name rather than blaming the colour.
-#[test]
-fn a_tiling_pattern_stroke_is_reported_by_name() {
+fn a_tiling_patterns_bbox_clips_its_cell() {
     let tiling = b"<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
-                  /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >> \
-                  stream\n1 0 0 rg 0 0 20 20 re f\nendstream";
+                  /BBox [0 0 20 20] /XStep 40 /YStep 40 /Resources << >> >> \
+                  stream\n1 0 0 rg 0 0 40 40 re f\nendstream";
     let page = pattern_page(
         "/Pattern << /P0 5 0 R >>",
-        b"/Pattern CS /P0 SCN 4 w 0 50 m 100 50 l S",
+        b"/Pattern cs /P0 scn 0 0 100 100 re f",
+        &[tiling.as_slice()],
+    );
+    let render = render(page, 1.0);
+    // The cell's box is 20 of a 40 pitch, so the middle of the fill is paper: the second
+    // square starts at 40 and runs to 60, and the gap from 20 to 40 is outside every box.
+    assert_eq!(
+        render.image.get(30, 50).map(|p| p[0]),
+        Some(255),
+        "the gap between cells is paper, because the cell's box ends at 20 and the next begins \
+         at 40: {:?}",
+        render.notes
+    );
+    assert_eq!(
+        render.image.get(10, 50).map(|p| p[0]),
+        Some(255),
+        "and inside the first box it is the cell's red: {:?}",
+        render.notes
+    );
+}
+
+/// A `/PaintType 2` cell paints in the colour in force when the pattern is used, and a
+/// `Pattern` colour space has replaced that colour by then — so this refuses **by name**
+/// rather than painting the cell's own colour, which would be a plausible wrong answer.
+#[test]
+fn an_uncoloured_tiling_pattern_is_refused_by_name() {
+    let tiling = b"<< /Type /Pattern /PatternType 1 /PaintType 2 /TilingType 1 \
+                  /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >> \
+                  stream\n0 0 100 100 re f\nendstream";
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"/Pattern cs /P0 scn 0 0 100 100 re f",
         &[tiling.as_slice()],
     );
     let render = render(page, 1.0);
     assert!(
-        render
-            .notes
-            .iter()
-            .any(|n| n.contains("PatternType 1") && n.contains("not drawn")),
-        "the note names the kind of pattern it did not draw: {:?}",
+        render.notes.iter().any(|n| n.contains("PaintType 2")),
+        "the note says which kind of cell it would not guess at: {:?}",
         render.notes
     );
     assert!(
         region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
         "and nothing is drawn in its place"
     );
+}
+
+/// A tiling pattern names a stream that is not there, and the page says so instead of drawing
+/// a cell of nothing.
+#[test]
+fn a_tiling_pattern_that_is_not_a_stream_is_refused_by_name() {
+    let tiling = b"<< /Type /Pattern /PatternType 1 /TilingType 1 /BBox [0 0 20 20] \
+                  /XStep 20 /YStep 20 >>";
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"/Pattern cs /P0 scn 0 0 100 100 re f",
+        &[tiling.as_slice()],
+    );
+    let render = render(page, 1.0);
+    assert!(
+        render
+            .notes
+            .iter()
+            .any(|n| n.contains("tiling pattern `/P0`") && n.contains("no cell to draw")),
+        "the note names the pattern and what was wrong with it: {:?}",
+        render.notes
+    );
+}
+
+/// The gradient-pattern path must be untouched by any of this: a shading pattern still draws
+/// its ramp. This is the test that catches a change to the shared plumbing.
+#[test]
+fn a_shading_pattern_still_draws_after_the_tiling_loop_landed() {
+    let pattern = b"<< /Type /Pattern /PatternType 2 /Shading << /ShadingType 2 \
+                   /ColorSpace /DeviceGray /Coords [0 0 100 0] /Function << /FunctionType 2 \
+                   /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> /Extend [true true] >> \
+                   /Matrix [1 0 0 1 0 0] >>";
+    let page = pattern_page(
+        "/Pattern << /P0 5 0 R >>",
+        b"q /Pattern cs /P0 scn 0 0 100 100 re f Q",
+        &[pattern.as_slice()],
+    );
+    let render = render(page, 1.0);
+    let level = |x: usize| -> u8 { ((x as f64 + 0.5) / 100.0 * 255.0).round() as u8 };
+    for x in [8usize, 20, 35, 45] {
+        assert_eq!(
+            render.image.get(x, 50).map(|p| p[0]),
+            Some(level(x)),
+            "at page x = {x} the gradient's parameter is that column's own fraction of the \
+             page: {:?}",
+            render.notes
+        );
+    }
 }
 
 // ── Text, from a real font program ───────────────────────────────────────────
