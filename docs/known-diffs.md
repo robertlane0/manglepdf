@@ -2600,3 +2600,39 @@ explicit scope statement — is what this entry is.
   box begins, so mis-slicing it silently decodes the wrong bytes.
 
 Start at Annex B.10.7's `numbps`, then the tier-1 passes.
+
+## D23 — a page that lost every one of its content streams drew as paper and said nothing
+
+**Fixed.** `Page::content_streams` resolved each entry of a `/Contents` array through two chained
+`filter_map`s: an indirect reference that did not resolve was dropped, and so was an object that was
+not a stream. Neither loss was reported.
+
+The consequence was worse than the wrong text. `gov__nist-sp800-88.pdf` page 1 has an eight-entry
+`/Contents` array and **not one of them resolves to a stream this project can read**, so the page
+came back empty — and with no note at all. A page that silently produces nothing is the one failure
+shape this project cannot see from the outside: the corpus scores a blank page against a real one and
+calls it "roughly right", and no test failed. There was nothing to fail.
+
+A page that genuinely has no content and a page whose content was all thrown away now look the same
+on the page and completely different in the notes, which is the only place the difference can live.
+
+**What changed.** `content_streams` is now a thin wrapper over a new `content_parts`, which returns
+the streams *and* one note per entry it could not use. `decoded_contents_full` starts from those
+notes, so the losses reach the renderer. Two faults are named separately, because they are different
+faults and a reader fixing the file needs to know which one they have:
+
+* an **indirect reference that does not resolve** — `content stream 1 of 3 is an indirect reference
+  that does not resolve, so it was not drawn`;
+* an **object that is not a stream** — `content stream 2 of 3 is a number rather than a stream, so
+  it was not drawn`.
+
+**Two tests, both confirmed to fail on the code before the change** and to pass on it after:
+
+* an array of three in which all three are lost draws **zero marks and three notes**, naming each
+  entry by its position and by which fault it was — the assertion is on the note text, not on the
+  absence of a panic, because the old code's symptom was *silence*;
+* an array of two in which the first is an unresolvable reference **still draws the second**, so
+  turning on the reporting did not turn into dropping the page.
+
+The second test is the one that keeps this honest. Reporting every loss is only an improvement if the
+survivors are unaffected, and "we found out what we lost" is otherwise an easy way to lose more.

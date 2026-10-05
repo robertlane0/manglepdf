@@ -156,12 +156,12 @@ impl Page {
     /// bytes are still encoded, and reporting is the honest response to them.
     #[must_use]
     pub fn decoded_contents_full(&self, resolver: &dyn Resolver) -> Decoded {
-        let parts = self.content_streams(resolver);
+        let (parts, lost) = self.content_parts(resolver);
         let mut out = Decoded {
+            notes: lost,
             data: Vec::new(),
             complete: true,
             encoded: false,
-            notes: Vec::new(),
             one_byte_per_sample: false,
         };
         for (i, part) in parts.iter().enumerate() {
@@ -208,24 +208,51 @@ impl Page {
     /// The page's content streams, decoded one by one.
     #[must_use]
     pub fn content_streams(&self, resolver: &dyn Resolver) -> Vec<Stream> {
+        self.content_parts(resolver).0
+    }
+
+    /// `/Contents` resolved to the streams it names, and why any of them could not be used.
+    ///
+    /// A page whose `/Contents` is an array of eight streams and all eight of which are lost
+    /// here draws as blank paper, and a blank page with no note is a wrong answer rather than a
+    /// bug report: nothing downstream can tell it apart from a page that really is empty. So the
+    /// losses are carried out with the streams, one note each, naming the reason — an
+    /// unresolvable reference and an object that is not a stream are different faults.
+    fn content_parts(&self, resolver: &dyn Resolver) -> (Vec<Stream>, Vec<String>) {
         let Some(contents) = self.dict.get("Contents") else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let parts: Vec<Object> = match contents {
             Object::Array(a) => a.clone(),
             other => vec![other.clone()],
         };
-        parts
-            .iter()
-            .filter_map(|p| match p {
+        let total = parts.len();
+        let mut streams = Vec::with_capacity(total);
+        let mut notes = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            let resolved = match part {
                 Object::Ref(r) => resolver.resolve(*r),
                 other => Some(other.clone()),
-            })
-            .filter_map(|o| match o {
-                Object::Stream(s) => Some(s),
-                _ => None,
-            })
-            .collect()
+            };
+            let Some(object) = resolved else {
+                notes.push(format!(
+                    "content stream {} of {total} is an indirect reference that does not \
+                     resolve, so it was not drawn",
+                    i + 1
+                ));
+                continue;
+            };
+            match object {
+                Object::Stream(s) => streams.push(s),
+                other => notes.push(format!(
+                    "content stream {} of {total} is a {} rather than a stream, so it was not \
+                     drawn",
+                    i + 1,
+                    other.type_name()
+                )),
+            }
+        }
+        (streams, notes)
     }
 
     /// The annotations, in the order they are drawn.

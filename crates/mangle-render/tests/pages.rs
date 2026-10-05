@@ -1425,6 +1425,116 @@ fn an_array_of_content_streams_names_the_one_that_failed() {
     );
 }
 
+/// A page whose `/Contents` array loses **every** entry draws as paper, and a page of paper with
+/// no note about it is a wrong answer rather than a bug report — nothing downstream can tell it
+/// apart from a page that really is empty.
+///
+/// This is what `gov__nist-sp800-88.pdf` page 1 does: eight streams in `/Contents`, none of which
+/// resolves to anything this project can read, and the page said nothing at all.
+#[test]
+fn a_contents_array_that_loses_everything_still_says_so() {
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 4];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>\nendobj\n",
+    );
+    at[3] = out.len();
+    // Three entries: an indirect reference that does not resolve, a number, and a name.
+    out.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [9 0 R 4 0 R /Nothing] >>\nendobj\n",
+    );
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 4\n");
+    for offset in at.iter().take(4).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size 5 /Root 1 0 R /ID [<0102> <0304>] >>\nstartxref\n{xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+
+    let render = render(out, 1.0);
+    let said = render.notes.join("; ");
+    assert_eq!(
+        render.marks, 0,
+        "nothing on it is right: there is nothing on it to draw"
+    );
+    assert!(
+        said.contains("content stream 1 of 3") && said.contains("does not resolve"),
+        "the unresolvable reference is named and why: {said}"
+    );
+    assert!(
+        said.contains("content stream 2 of 3") && said.contains("rather than a stream"),
+        "and so is the one that is not a stream, which is a different fault: {said}"
+    );
+    assert!(
+        said.contains("content stream 3 of 3"),
+        "every entry accounted for, so 'nothing was drawn' is a finding and not a shrug: {said}"
+    );
+}
+
+/// One lost entry among several must not cost the ones that survived.
+#[test]
+fn one_lost_content_stream_leaves_the_others_drawn() {
+    let good = mangle_filters::deflate(
+        b"0 0 0 rg 0 0 100 100 re f",
+        mangle_filters::DeflateLevel::Default,
+    );
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = [0usize; 5];
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    at[1] = out.len();
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at[2] = out.len();
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>\nendobj\n",
+    );
+    at[3] = out.len();
+    out.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [9 0 R 4 0 R] >>\nendobj\n",
+    );
+    at[4] = out.len();
+    let mut stream = format!(
+        "4 0 obj\n<< /Length {} /Filter /FlateDecode >>\nstream\n",
+        good.len()
+    )
+    .into_bytes();
+    stream.extend_from_slice(&good);
+    stream.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(&stream);
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 5\n");
+    for offset in at.iter().take(5).skip(1) {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size 6 /Root 1 0 R /ID [<0102> <0304>] >>\nstartxref\n{xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+
+    let render = render(out, 1.0);
+    assert_eq!(
+        render.marks, 1,
+        "the stream that did resolve is still drawn"
+    );
+    assert!(
+        render
+            .notes
+            .iter()
+            .any(|n| n.contains("content stream 1 of 2")),
+        "and the lost one is still named: {:?}",
+        render.notes
+    );
+}
+
 #[test]
 fn the_corpus_pages_render_without_a_panic() {
     // Every Tier-A fixture, rendered at two scales. This does not check that the result
