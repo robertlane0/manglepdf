@@ -43,7 +43,7 @@ use mangle_content::{Matrix, Rgba};
 
 use crate::coverage::{FillRule, rasterise};
 use crate::shading::Shading;
-use crate::{Device, Image, Polygon, StrokeStyle, over};
+use crate::{BlendMode, Device, Image, Polygon, StrokeStyle, over_blend};
 
 /// The colour a fill paints in, which is not always a single colour.
 #[derive(Debug, Clone)]
@@ -411,6 +411,7 @@ pub fn polygon(
     rule: FillRule,
     colour: &FillColour,
     alpha: f64,
+    blend: BlendMode,
 ) -> bool {
     let Some(bounds) = shape.bounds() else {
         return false;
@@ -445,7 +446,7 @@ pub fn polygon(
         let Some(dst) = device.image().get(px, py) else {
             continue;
         };
-        device.put(px, py, over(dst, src, src_alpha));
+        device.put(px, py, over_blend(dst, src, src_alpha, blend));
         drawn += 1;
     }
     drawn > 0
@@ -466,13 +467,14 @@ pub fn stroke(
     style: &StrokeStyle,
     colour: &FillColour,
     alpha: f64,
+    blend: BlendMode,
 ) -> bool {
     let outlines = device.stroke_outline(shape, style);
     let mut drawn = false;
     for outline in &outlines {
         // The non-zero rule, because that is the rule a one-colour stroke's outline is
         // filled under, and a dash's own winding has to come out the same either way.
-        drawn |= polygon(device, outline, FillRule::NonZero, colour, alpha);
+        drawn |= polygon(device, outline, FillRule::NonZero, colour, alpha, blend);
     }
     drawn
 }

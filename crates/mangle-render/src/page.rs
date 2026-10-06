@@ -23,6 +23,7 @@ use mangle_content::{
 use mangle_doc::Page;
 use mangle_syntax::{Document, Object, Rect as PageRect, object::Dict, stream::decode_stream};
 
+use crate::BlendMode;
 use crate::fill::{self, FillColour};
 use crate::image::{self, Raster};
 use crate::shading::{self, Shading};
@@ -1681,6 +1682,31 @@ fn clip_region(clip: &mangle_content::Clip, placement: &Matrix) -> ClipRegion {
 
 /// Draw one mark.
 #[allow(clippy::too_many_arguments)]
+/// The blend mode a mark composites under, and a note if it is one we do not implement.
+///
+/// **A mode this renderer does not implement is reported and composited as `Normal`**, rather
+/// than guessed at. Substituting `Normal` for `Difference` or `Luminosity` puts the wrong colours
+/// on the page while looking entirely plausible, which is the failure this project keeps finding;
+/// a note says which mode was dropped, so the page is at least self-describing. The four modes
+/// that *are* implemented are the ones documents write in practice — `Multiply` above all, since
+/// it is how a highlight is normally expressed.
+fn blend_for(record: &mangle_content::Record, notes: &mut Vec<String>) -> BlendMode {
+    let name = record.blend_mode.trim();
+    if name.is_empty() || name == "Normal" {
+        return BlendMode::Normal;
+    }
+    match BlendMode::parse(name) {
+        Some(mode) => mode,
+        None => {
+            notes.push(format!(
+                "the blend mode `{name}` is not one this renderer implements, so what it drew \
+                 was composited as Normal instead"
+            ));
+            BlendMode::Normal
+        }
+    }
+}
+
 fn draw_mark(
     device: &mut Device,
     mark: &Mark,
@@ -1726,6 +1752,8 @@ fn draw_mark(
                 mangle_content::FillRule::EvenOdd => FillRule::EvenOdd,
                 mangle_content::FillRule::NonZero => FillRule::NonZero,
             };
+            // Resolved once per mark and reported once, rather than per pixel or per leg.
+            let blend = blend_for(record, notes);
             if let Some(colour) = fill {
                 // A `Pattern` colour space means the operands named a pattern rather than a
                 // colour value, so the pattern has to be read and its own evaluator built.
@@ -1741,7 +1769,7 @@ fn draw_mark(
                             pattern_fill(Paint::Fill, name, resources, doc, placement, None),
                     ) {
                         Ok(paint) => {
-                            fill::polygon(device, &polygon, rule, &paint, record.fill_alpha);
+                            fill::polygon(device, &polygon, rule, &paint, record.fill_alpha, blend);
                         }
                         Err(reason) => notes.push(reason),
                     }
@@ -1776,7 +1804,14 @@ fn draw_mark(
                         pattern_fill(Paint::Stroke, name, resources, doc, placement, None)
                     }) {
                         Ok(paint) => {
-                            fill::stroke(device, &polygon, &style, &paint, record.stroke_alpha);
+                            fill::stroke(
+                                device,
+                                &polygon,
+                                &style,
+                                &paint,
+                                record.stroke_alpha,
+                                blend,
+                            );
                         }
                         Err(reason) => notes.push(reason),
                     }
@@ -2718,10 +2753,7 @@ mod tests {
                 ..RenderOptions::default()
             },
         );
-        assert_eq!(
-            render.image.get(200, 182),
-            Some([255, 255, 255, 255])
-        );
+        assert_eq!(render.image.get(200, 182), Some([255, 255, 255, 255]));
         assert!(
             render.notes.is_empty(),
             "a link that draws nothing is what the file said: {:?}",

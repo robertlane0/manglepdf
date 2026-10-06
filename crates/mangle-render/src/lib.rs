@@ -965,17 +965,94 @@ pub fn composite_masked(
 /// Straight (non-premultiplied) alpha throughout: the output's alpha is `αs + αd(1 − αs)`,
 /// and dividing the colour by it undoes the unpremultiply so the buffer stays straight.
 #[must_use]
-pub fn over(dst: [u8; 4], src: [u8; 4], src_alpha: f64) -> [u8; 4] {
+/// How a source colour meets what is already on the page.
+///
+/// PDF 32000-1 §11.3.5.2 names sixteen. **Four are implemented and the rest are refused by
+/// name**: `Normal` is the default and the one everything else was measured against, and
+/// `Multiply`, `Screen`, `Darken` and `Lighten` are the ones documents actually write. The
+/// separable ones — `Difference`, `Exclusion`, `Hue`, `Saturation`, `Colour` and `Luminosity` —
+/// are not implemented, because a renderer that silently substitutes `Normal` for `Difference`
+/// produces a page that looks plausible and has the wrong colours on it, which is the failure
+/// this project has been bitten by repeatedly. A missing blend mode is a note, not a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    /// No blending: the source replaces what is under it. The default.
+    #[default]
+    Normal,
+    /// `Multiply`, §11.3.5.2: darkens both, and is **how a highlight is normally written** — it
+    /// is what makes a highlight darken the text under it rather than hide it.
+    Multiply,
+    /// `Screen`: the inverse of `Multiply`, lightening both.
+    Screen,
+    /// `Darken`: the darker of the two, per channel.
+    Darken,
+    /// `Lighten`: the lighter of the two, per channel.
+    Lighten,
+}
+
+impl BlendMode {
+    /// Read the name a content stream or an `/ExtGState` gives, including the abbreviations the
+    /// specification allows for the lengthiest ones.
+    ///
+    /// `None` for a mode this renderer does not implement, which the caller turns into a note.
+    /// The abbreviations are single letters for exactly the ones with long names: `/H` hue,
+    /// `/S` saturation, `/C` colour, `/L` luminosity. `C` is here as `Colour`, which is a
+    /// different function from the `Luminosity` that `/L` names.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "Normal" | "N" => Some(Self::Normal),
+            "Multiply" | "M" => Some(Self::Multiply),
+            "Screen" | "Scr" => Some(Self::Screen),
+            "Darken" | "D" => Some(Self::Darken),
+            "Lighten" | "L" => Some(Self::Lighten),
+            _ => None,
+        }
+    }
+
+    /// The separable blend function `B(Cb, Cs)` of §11.3.5.2, for one channel.
+    ///
+    /// Every mode here is **separable** — it works the same on each channel independently —
+    /// which is why four of them fit in one function and the remaining twelve do not.
+    #[must_use]
+    pub fn channel(self, backdrop: f64, source: f64) -> f64 {
+        match self {
+            Self::Normal => source,
+            Self::Multiply => backdrop * source,
+            Self::Screen => backdrop + source - (backdrop * source),
+            Self::Darken => backdrop.min(source),
+            Self::Lighten => backdrop.max(source),
+        }
+    }
+}
+
+/// Source-over compositing, honouring a blend mode.
+///
+/// The formula is §11.3.5.2's general case, which is source-over with the blend function in
+/// place of the source colour where the backdrop is opaque:
+///
+/// ```text
+/// co = αs·(1 − αb)·Cs  +  αs·αb·B(Cb, Cs)  +  (1 − αs)·αb·Cb
+/// ```
+///
+/// `Normal` reduces that to plain source-over, which is what [`over`] is and why it stays: it is
+/// the hot path and it does not need the extra arithmetic.
+#[must_use]
+pub fn over_blend(dst: [u8; 4], src: [u8; 4], src_alpha: f64, mode: BlendMode) -> [u8; 4] {
     let dst_a = f64::from(dst[3]) / 255.0;
     let out_a = src_alpha + dst_a * (1.0 - src_alpha);
     let mut out = [0u8; 4];
-    // Walking the two colours together is what keeps the channels paired: an index
-    // into an array of four invites an off-by-one that a zip cannot express.
+    // Walking the two colours together is what keeps the channels paired: an index into an
+    // array of four invites an off-by-one that a zip cannot express.
     for ((s, d), slot) in src.iter().zip(dst.iter()).zip(out.iter_mut()).take(3) {
-        let s = f64::from(*s) / 255.0;
-        let d = f64::from(*d) / 255.0;
+        let cs = f64::from(*s) / 255.0;
+        let cb = f64::from(*d) / 255.0;
         let value = if out_a > 0.0 {
-            (s * src_alpha + d * dst_a * (1.0 - src_alpha)) / out_a
+            let blended = mode.channel(cb, cs);
+            (src_alpha * (1.0 - dst_a) * cs
+                + src_alpha * dst_a * blended
+                + (1.0 - src_alpha) * dst_a * cb)
+                / out_a
         } else {
             0.0
         };
@@ -985,6 +1062,10 @@ pub fn over(dst: [u8; 4], src: [u8; 4], src_alpha: f64) -> [u8; 4] {
         *slot = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
     }
     out
+}
+
+pub fn over(dst: [u8; 4], src: [u8; 4], src_alpha: f64) -> [u8; 4] {
+    over_blend(dst, src, src_alpha, BlendMode::Normal)
 }
 
 /// Where a device space lands on the page: a rectangle in device units and its pixel
@@ -1382,9 +1463,7 @@ impl Device {
 
 #[cfg(test)]
 mod tests {
-    // Tests state their expectations with `expect` and index a slice whose length they
-    // have just asserted; both are what a test is for. The panic-free rule is about what
-    // the product does with a file, not about how a test reads one.
+
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
@@ -1392,6 +1471,132 @@ mod tests {
         clippy::indexing_slicing,
         clippy::float_cmp
     )]
+
+    /// A blend mode a page actually writes, on the one pixel it lands on.
+    ///
+    /// The expected numbers are the definition computed by hand rather than read back off the
+    /// implementation, and **they are not the round numbers you would guess** — which is why they
+    /// are written out. The sample is 128, not 128.5, so `Multiply` is
+    /// `(128/255)² × 255 = 64.25` and rounds to **64**, while `Screen` is
+    /// `(2·128/255 − (128/255)²) × 255 = 191.75` and rounds to **192**. A blend that is quietly
+    /// `Normal` gives 128 for both, which is how this bug showed up in the first place: a
+    /// highlight drawn opaque over the text it should have darkened.
+    #[test]
+    fn a_blend_mode_changes_the_pixel_it_lands_on() {
+        let backdrop = [128u8, 128, 128, 255];
+        let source = [128u8, 128, 128, 255];
+        // Normal leaves the source alone.
+        assert_eq!(over_blend(backdrop, source, 1.0, BlendMode::Normal), source);
+        // Multiply: 0.5 * 0.5 = 0.25 -> 64.
+        assert_eq!(
+            over_blend(backdrop, source, 1.0, BlendMode::Multiply)[0],
+            64,
+            "multiply darkens both"
+        );
+        // Screen: 0.5 + 0.5 - 0.25 in exact halves is 0.75, but the sample is 128 rather than
+        // 128.5, so it is 191.75 and rounds to 192.
+        assert_eq!(
+            over_blend(backdrop, source, 1.0, BlendMode::Screen)[0],
+            192,
+            "screen lightens both"
+        );
+        // Darken and Lighten pick a side.
+        assert_eq!(over_blend(backdrop, source, 1.0, BlendMode::Darken)[0], 128);
+        assert_eq!(
+            over_blend(backdrop, source, 1.0, BlendMode::Lighten)[0],
+            128
+        );
+        // And they really do differ on an unequal pair, which the equal pair above cannot show.
+        let dark = [40u8, 0, 0, 255];
+        let light = [200u8, 0, 0, 255];
+        assert_eq!(
+            over_blend(dark, light, 1.0, BlendMode::Darken)[0],
+            40,
+            "darken takes the darker"
+        );
+        assert_eq!(
+            over_blend(dark, light, 1.0, BlendMode::Lighten)[0],
+            200,
+            "lighten takes the lighter"
+        );
+        assert_eq!(
+            over_blend(dark, light, 1.0, BlendMode::Normal)[0],
+            200,
+            "and Normal replaces, which is the default that made this invisible"
+        );
+    }
+
+    /// A blend only applies where the backdrop is opaque.
+    ///
+    /// On paper — a transparent backdrop — every blend mode must give the plain source-over
+    /// answer, because there is nothing behind the pixel to blend with. A blend that reached past
+    /// the alpha would tint the paper, which is the classic separable-blend mistake.
+    #[test]
+    fn a_blend_mode_changes_nothing_where_there_is_no_backdrop() {
+        let paper = [255u8, 255, 255, 0];
+        let source = [128u8, 0, 0, 255];
+        for mode in [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+        ] {
+            assert_eq!(
+                over_blend(paper, source, 1.0, mode)[..3],
+                source[..3],
+                "{mode:?} on an empty backdrop is just the source"
+            );
+        }
+    }
+
+    /// `over` is `over_blend` with `Normal`, and must stay the same function.
+    #[test]
+    fn over_is_the_normal_blend() {
+        for (dst, src, alpha) in [
+            ([10u8, 20, 30, 255], [200u8, 100, 50, 255], 1.0),
+            ([10u8, 20, 30, 128], [200u8, 100, 50, 255], 0.5),
+            ([0u8, 0, 0, 0], [255u8, 255, 255, 255], 1.0),
+        ] {
+            assert_eq!(
+                over(dst, src, alpha),
+                over_blend(dst, src, alpha, BlendMode::Normal),
+                "the two must not be allowed to drift apart"
+            );
+        }
+    }
+
+    /// The names a content stream or an `/ExtGState` may use, including the abbreviations.
+    ///
+    /// A name that parses to nothing must return `None` rather than `Normal`, because the
+    /// caller turns `None` into a note and `Normal` into a silently wrong page.
+    #[test]
+    fn a_blend_mode_name_parses_or_says_it_does_not() {
+        for (name, expect) in [
+            ("Normal", Some(BlendMode::Normal)),
+            ("Multiply", Some(BlendMode::Multiply)),
+            ("Screen", Some(BlendMode::Screen)),
+            ("Darken", Some(BlendMode::Darken)),
+            ("Lighten", Some(BlendMode::Lighten)),
+            // The specification's own short names.
+            ("M", Some(BlendMode::Multiply)),
+            ("Scr", Some(BlendMode::Screen)),
+            ("D", Some(BlendMode::Darken)),
+            ("L", Some(BlendMode::Lighten)),
+            // The separable ones this renderer does not do.
+            ("Difference", None),
+            ("Exclusion", None),
+            ("Hue", None),
+            ("Saturation", None),
+            ("Luminosity", None),
+            ("nonsense", None),
+        ] {
+            assert_eq!(BlendMode::parse(name), expect, "parsing `{name}`");
+        }
+    }
+    // Tests state their expectations with `expect` and index a slice whose length they
+    // have just asserted; both are what a test is for. The panic-free rule is about what
+    // the product does with a file, not about how a test reads one.
 
     use super::*;
     use mangle_content::Matrix;
