@@ -812,7 +812,11 @@ fn dangling_anchors(root: &Path) -> Vec<String> {
     for (rel, text) in &bodies {
         let dir = rel.parent().unwrap_or(Path::new(""));
         for (index, line) in text.lines().enumerate() {
-            let mut rest = line;
+            // An inline code span is documentation *about* a link, not a link: a page that
+            // teaches the syntax has to be able to write it down, and treating the example as a
+            // real link would make documenting this check impossible.
+            let line = strip_code_spans(line);
+            let mut rest = line.as_str();
             while let Some(at) = rest.find("](") {
                 rest = &rest[at + 2..];
                 let Some(close) = rest.find(')') else { break };
@@ -852,6 +856,23 @@ fn dangling_anchors(root: &Path) -> Vec<String> {
         }
     }
     findings
+}
+
+/// A line with its inline code spans blanked, leaving the line numbering intact.
+fn strip_code_spans(line: &str) -> String {
+    let mut out = String::new();
+    let mut ticks = 0;
+    for ch in line.chars() {
+        if ch == '`' {
+            ticks += 1;
+            out.push(' ');
+        } else if ticks == 0 {
+            out.push(ch);
+        } else {
+            out.push(' ');
+        }
+    }
+    out
 }
 
 /// Strip `./`, collapse `docs/../`, and keep the fragment out of the path.
