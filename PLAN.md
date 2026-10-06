@@ -313,8 +313,8 @@ renderer that never has to ask the machine for a font.
    wrong in those four files is **undiagnosed**: `bug1992868` page 3 is at 0.8667 against a file
    median of 0.9633, with 103 marks and **no note of any kind**, so nothing is being refused and
    the page is simply coming out different.
-   The loop itself: `tiling_pattern` in `page.rs` returns `tiling_pattern` in `page.rs` returns
-   a `TilingPattern` — the cell's `/BBox`, the two steps, the `/Matrix`, the paint type and the
+   The loop itself: `tiling_pattern` in `page.rs` returns a `TilingPattern` — the cell's
+   `/BBox`, the two steps, the `/Matrix`, the paint type and the
    cell's own content stream — and `tiling_fill` renders the cell **once** into an image and hands
    it to the fill sampler, which repeats it. The cell is drawn by `paint_records`, the same
    marks-to-pixels loop the page uses, so a mark inside a cell is not a second implementation
@@ -725,8 +725,12 @@ The last full run measured 738 pages with an SSIM and **167 below 0.95**. Of tho
   are identical**, so widths are not the difference and the mismatch is entirely in the outlines.
   **This is the project's stated policy, not a gap**, so those pages are not addressable by writing
   anything — which is exactly why it is the largest remaining cause of a page below 0.95.
-* **12 are the tiling-pattern cluster** (`comments` 4, `issue12337` 3, `highlights` 3,
-  `bug1992868` 2) — item 2 above, the loop over cells is still to be written.
+* **12 were the tiling-pattern cluster and are not** (`comments` 4, `issue12337` 3, `highlights` 3,
+  `bug1992868` 2). This entry said "the loop over cells is still to be written", which had stopped
+  being true when the loop landed and contradicted item 2 of the immediate queue **in this same
+  file**. They are in fact the **font-substitution cause above** — the diff images show every line
+  doubled and misregistered, and the four files declare tiling patterns without ever selecting one
+  ([D30](docs/known-diffs.md)). So they belong with the ~70 font pages, not in their own bucket.
 * The rest is `TAMReview`'s same font cause (22), `freeculture` (9), `sp800-88` (7) and a long tail
   of one or two pages across a dozen files.
 * **And one page is a genuine missing feature** (`fips197` p1: an `ICCBased` profile carrying no
