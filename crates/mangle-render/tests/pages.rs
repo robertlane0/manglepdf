@@ -7755,15 +7755,6 @@ fn a_mask_that_decodes_short_is_reported_rather_than_padded_with_zero_alpha() {
 /// the two are asserted against each other rather than against a remembered number — a number
 /// would still pass after the plumbing broke.
 #[test]
-// The blend reaches the mark — `record.blend_mode` is `"Multiply"` by the time `blend_for` is
-// called, which is verified — and `over_blend` itself is unit-tested against exact arithmetic. What
-// is **not** yet explained is that the grey backdrop this test paints never lands: the page comes
-// out white paper, so `Multiply` of white by white is white and the two renders agree. So either
-// `0.5 g` followed by a full-page `re f` is not drawing here, or it is drawing and something
-// later puts white back. Until that is answered this test would fail for a reason that has nothing
-// to do with blending, and a red suite is worse than a named gap. The corpus measurement is in any
-// case flat: see D28.
-#[ignore = "the backdrop fill in this test does not land, so it cannot yet tell blending from             nothing being drawn at all"]
 fn a_multiply_blend_mode_from_an_ext_gstate_reaches_the_pixel() {
     let with = blend_page(true);
     let without = blend_page(false);

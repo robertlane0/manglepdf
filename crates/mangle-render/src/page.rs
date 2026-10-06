@@ -1774,7 +1774,7 @@ fn draw_mark(
                         Err(reason) => notes.push(reason),
                     }
                 } else if let Some(rgba) = flat_colour(colour, Flat::Fill, notes) {
-                    device.fill_polygon(&polygon, rule, rgba.to_rgba8(record.fill_alpha));
+                    device.fill_polygon(&polygon, rule, rgba.to_rgba8(record.fill_alpha), blend);
                 }
             }
             if let Some(colour) = stroke {
@@ -1816,7 +1816,12 @@ fn draw_mark(
                         Err(reason) => notes.push(reason),
                     }
                 } else if let Some(rgba) = flat_colour(colour, Flat::Stroke, notes) {
-                    device.stroke_polygon(&polygon, &style, rgba.to_rgba8(record.stroke_alpha));
+                    device.stroke_polygon(
+                        &polygon,
+                        &style,
+                        rgba.to_rgba8(record.stroke_alpha),
+                        blend,
+                    );
                 }
             }
         }
@@ -2028,7 +2033,7 @@ fn draw_mark(
                 // outer contour and a hole wound the other way both come out filled, and
                 // a point inside two same-wound contours is inside the glyph, which is
                 // what the data says it is.
-                device.fill_polygon(&polygon, FillRule::NonZero, ink);
+                device.fill_polygon(&polygon, FillRule::NonZero, ink, blend_for(record, notes));
             }
         }
     }

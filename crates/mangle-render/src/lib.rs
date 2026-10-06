@@ -911,8 +911,14 @@ fn normalise(v: (f64, f64)) -> (f64, f64) {
 /// and what a caller hands over. The arithmetic is the specification's: the destination
 /// contributes `as·(1 - αs)` and the source contributes `αs`, so compositing the same
 /// colour twice converges to it rather than overshooting.
-pub fn composite(image: &mut Image, cov: &Coverage, rgba: [u8; 4], origin: (usize, usize)) {
-    composite_masked(image, cov, rgba, origin, None);
+pub fn composite(
+    image: &mut Image,
+    cov: &Coverage,
+    rgba: [u8; 4],
+    origin: (usize, usize),
+    blend: BlendMode,
+) {
+    composite_masked(image, cov, rgba, origin, None, blend);
 }
 
 /// Composite a coverage buffer, with a per-pixel clip mask folded into the coverage.
@@ -922,12 +928,17 @@ pub fn composite(image: &mut Image, cov: &Coverage, rgba: [u8; 4], origin: (usiz
 /// The mask is a *coverage* and is multiplied into the shape's own, so the two edges
 /// antialias against each other. Treating it as a boundary instead would round each pixel
 /// to 1 or 0 at the clip edge, which is the hard step a diagonal clip must not have.
+#[allow(
+    clippy::fn_params_excessive_bools,
+    reason = "one mask and one blend mode, both orthogonal"
+)]
 pub fn composite_masked(
     image: &mut Image,
     cov: &Coverage,
     rgba: [u8; 4],
     origin: (usize, usize),
     mask: Option<(&[u8], usize)>,
+    blend: BlendMode,
 ) {
     let alpha = f64::from(rgba[3]);
     for (x, y, a) in cov.covered() {
@@ -951,7 +962,7 @@ pub fn composite_masked(
         if src_a <= 0.0 {
             continue;
         }
-        image.put(px, py, over(dst, rgba, src_a));
+        image.put(px, py, over_blend(dst, rgba, src_a, blend));
     }
 }
 
@@ -1379,7 +1390,13 @@ impl Device {
     /// fill that crosses a diagonal clip is antialiased against that edge. Clipping to the
     /// mask as a boundary would draw a staircase, which is exactly what a bounding box does
     /// today and exactly what a clip is supposed not to do.
-    pub fn fill_polygon(&mut self, polygon: &Polygon, rule: FillRule, colour: [u8; 4]) {
+    pub fn fill_polygon(
+        &mut self,
+        polygon: &Polygon,
+        rule: FillRule,
+        colour: [u8; 4],
+        blend: BlendMode,
+    ) {
         let Some(bounds) = polygon.bounds() else {
             return;
         };
@@ -1396,13 +1413,19 @@ impl Device {
             .clip_mask
             .as_ref()
             .map(|m| (m.as_slice(), self.image.width));
-        composite_masked(&mut self.image, &cov, colour, origin, mask);
+        composite_masked(&mut self.image, &cov, colour, origin, mask, blend);
     }
 
     /// Stroke a polygon's outline, with caps, joins and dashes.
-    pub fn stroke_polygon(&mut self, polygon: &Polygon, style: &StrokeStyle, colour: [u8; 4]) {
+    pub fn stroke_polygon(
+        &mut self,
+        polygon: &Polygon,
+        style: &StrokeStyle,
+        colour: [u8; 4],
+        blend: BlendMode,
+    ) {
         for outline in self.stroke_outline(polygon, style) {
-            self.fill_polygon(&outline, FillRule::NonZero, colour);
+            self.fill_polygon(&outline, FillRule::NonZero, colour, blend);
         }
     }
 
@@ -2152,7 +2175,7 @@ mod tests {
             subpaths: vec![Subpath::open(vec![(10.0, 50.0), (30.0, 50.0)])],
         };
         let mut device = paper(60, 100);
-        device.stroke_polygon(&line, &style, BLACK);
+        device.stroke_polygon(&line, &style, BLACK, BlendMode::Normal);
 
         // A row through the middle of a two-unit stroke at y = 50 is row 50, and the dash
         // boundaries land on whole pixels because every length here is a whole number.
@@ -2183,7 +2206,13 @@ mod tests {
             },
             FillRule::NonZero,
         );
-        composite(&mut image, &cov, [0, 0, 255, 255], (0, 0));
+        composite(
+            &mut image,
+            &cov,
+            [0, 0, 255, 255],
+            (0, 0),
+            BlendMode::Normal,
+        );
         assert_eq!(image.get(2, 2), Some([0, 0, 255, 255]), "blue over red");
     }
 
@@ -2200,7 +2229,13 @@ mod tests {
             },
             FillRule::NonZero,
         );
-        composite(&mut image, &cov, [255, 255, 255, 255], (0, 0));
+        composite(
+            &mut image,
+            &cov,
+            [255, 255, 255, 255],
+            (0, 0),
+            BlendMode::Normal,
+        );
         let pixel = image.get(0, 0).unwrap_or([0, 0, 0, 0]);
         // Half white over black: about 128.
         let grey = u16::from(pixel[0]);
@@ -2214,7 +2249,13 @@ mod tests {
     fn compositing_nothing_changes_nothing() {
         let mut image = Image::filled(2, 2, [1, 2, 3, 255]);
         let empty = Coverage::default();
-        composite(&mut image, &empty, [255, 255, 255, 255], (0, 0));
+        composite(
+            &mut image,
+            &empty,
+            [255, 255, 255, 255],
+            (0, 0),
+            BlendMode::Normal,
+        );
         assert_eq!(image.get(0, 0), Some([1, 2, 3, 255]));
     }
 
@@ -2292,6 +2333,7 @@ mod tests {
             &square(0.0, 0.0, 10.0, 10.0),
             FillRule::NonZero,
             [0, 0, 0, 255],
+            BlendMode::Normal,
         );
         assert_eq!(
             device.image().get(5, 5),
@@ -2338,7 +2380,12 @@ mod tests {
             subpaths: vec![Subpath::open(vec![(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)])],
         };
         device.clip_to_path(&clip, FillRule::NonZero);
-        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        device.fill_polygon(
+            &square(0.0, 0.0, 100.0, 100.0),
+            FillRule::NonZero,
+            BLACK,
+            BlendMode::Normal,
+        );
 
         assert_eq!(
             device.image().get(10, 10),
@@ -2368,7 +2415,12 @@ mod tests {
         let mut device = paper(100, 100);
         let disc = disc(50.0, 50.0, 40.0);
         device.clip_to_path(&disc, FillRule::NonZero);
-        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        device.fill_polygon(
+            &square(0.0, 0.0, 100.0, 100.0),
+            FillRule::NonZero,
+            BLACK,
+            BlendMode::Normal,
+        );
 
         for (x, y) in [(2, 2), (97, 2), (2, 97), (97, 97)] {
             assert_eq!(
@@ -2445,7 +2497,12 @@ mod tests {
             y1: 100.0,
         });
         device.clip_to_path(&square(0.0, 0.0, 100.0, 50.0), FillRule::NonZero);
-        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        device.fill_polygon(
+            &square(0.0, 0.0, 100.0, 100.0),
+            FillRule::NonZero,
+            BLACK,
+            BlendMode::Normal,
+        );
 
         assert_eq!(device.image().get(25, 25), Some(BLACK), "inside both");
         // Each of these is inside one of the two clips and outside the other, which is the
@@ -2478,7 +2535,12 @@ mod tests {
             y1: 40.0,
         });
         assert_eq!(device.clip_coverage(20, 20), None, "a box is not a mask");
-        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        device.fill_polygon(
+            &square(0.0, 0.0, 100.0, 100.0),
+            FillRule::NonZero,
+            BLACK,
+            BlendMode::Normal,
+        );
 
         for (x, y) in [(10, 10), (25, 25), (39, 39)] {
             assert_eq!(device.image().get(x, y), Some(BLACK), "({x},{y}) is inside");
@@ -2502,7 +2564,12 @@ mod tests {
         // stays invisible, because a clip that shows nothing is a state rather than an event.
         let mut device = paper(20, 20);
         device.clip_to_path(&Polygon::default(), FillRule::NonZero);
-        device.fill_polygon(&square(0.0, 0.0, 20.0, 20.0), FillRule::NonZero, BLACK);
+        device.fill_polygon(
+            &square(0.0, 0.0, 20.0, 20.0),
+            FillRule::NonZero,
+            BLACK,
+            BlendMode::Normal,
+        );
         assert!(
             device
                 .image()
@@ -2521,7 +2588,12 @@ mod tests {
             x1: 110.0,
             y1: 110.0,
         });
-        other.fill_polygon(&square(0.0, 0.0, 20.0, 20.0), FillRule::NonZero, BLACK);
+        other.fill_polygon(
+            &square(0.0, 0.0, 20.0, 20.0),
+            FillRule::NonZero,
+            BLACK,
+            BlendMode::Normal,
+        );
         assert!(
             other
                 .image()
@@ -2559,7 +2631,12 @@ mod tests {
                 "({x},{y}) is outside the mask or the box"
             );
         }
-        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        device.fill_polygon(
+            &square(0.0, 0.0, 100.0, 100.0),
+            FillRule::NonZero,
+            BLACK,
+            BlendMode::Normal,
+        );
         assert_eq!(device.image().get(50, 20), Some(BLACK), "inside both");
         assert_eq!(
             device.image().get(50, 60),
@@ -2583,7 +2660,12 @@ mod tests {
             y1: 90.0,
         });
         assert_eq!(second.clip_coverage(50, 50), Some(0.0), "the mask is empty");
-        second.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        second.fill_polygon(
+            &square(0.0, 0.0, 100.0, 100.0),
+            FillRule::NonZero,
+            BLACK,
+            BlendMode::Normal,
+        );
         assert!(
             second
                 .image()
@@ -2606,7 +2688,12 @@ mod tests {
             },
             FillRule::NonZero,
         );
-        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        device.fill_polygon(
+            &square(0.0, 0.0, 100.0, 100.0),
+            FillRule::NonZero,
+            BLACK,
+            BlendMode::Normal,
+        );
         // The triangle's area is 450, and the fifteen pixels along its hypotenuse are shared
         // with the page rather than fully covered, so the ink is a little under it.
         let black = near_black(device.image(), 200);
@@ -2623,7 +2710,12 @@ mod tests {
         device.reset_clip();
         assert_eq!(device.clip(), device.image().rect(), "the box is restored");
         assert_eq!(device.clip_coverage(80, 80), None, "and so is the mask");
-        device.fill_polygon(&square(0.0, 0.0, 100.0, 100.0), FillRule::NonZero, BLACK);
+        device.fill_polygon(
+            &square(0.0, 0.0, 100.0, 100.0),
+            FillRule::NonZero,
+            BLACK,
+            BlendMode::Normal,
+        );
         assert_eq!(device.image().get(80, 80), Some(BLACK), "the page is back");
     }
 
@@ -2634,6 +2726,7 @@ mod tests {
             &square(0.0, 0.0, 10.0, 10.0),
             FillRule::NonZero,
             [0, 0, 0, 255],
+            BlendMode::Normal,
         );
         assert_eq!(device.image().get(5, 5), Some([0, 0, 0, 255]), "inside");
         assert_eq!(
@@ -2656,6 +2749,7 @@ mod tests {
                 ..StrokeStyle::default()
             },
             [0, 0, 0, 255],
+            BlendMode::Normal,
         );
         let image = device.image();
         assert_eq!(image.get(20, 20), Some([0, 0, 0, 255]), "on the line");
