@@ -3196,7 +3196,8 @@ Five, all in `page.rs`, and **three confirmed to fail with the `paint_annotation
 
 ## D28 — blend modes were parsed into the graphics state and then ignored
 
-**Implemented, and it moved nothing.** `ExtGState` has always read `/BM` into
+**Implemented, and it works — but only after a second fix, which is the interesting part.**
+`ExtGState` has always read `/BM` into
 `GraphicsState::blend_mode`, `Record` has always carried it to the renderer, and **nothing ever
 read it**. Every mark composited source-over regardless of what the page asked for. Four modes are
 now implemented — `Normal`, `Multiply`, `Screen`, `Darken`, `Lighten` — with the separable blend
@@ -3207,10 +3208,45 @@ is written**: it is what makes a highlight darken the text under it rather than 
 `pdfjs__highlights.pdf`'s appearances use exactly that (`/R0 gs` with `/BM /Multiply` over a yellow
 fill).
 
-**Measured across the eleven annotation-bearing corpus files: every figure is unchanged to four
-decimal places.** `comments` 0.8591, `highlights` 0.8667, `bug1992868` 0.8667, `issue12337` 0.8667,
-`annotation-link-text-popup` 0.9997, and the rest as in [D27](#d27--annotations-were-not-drawn-at-all-which-is-most-of-a-page-on-a-document-that-uses-them).
-**No improvement is claimed, and the feature is not justified by a number.**
+### The first attempt reached almost nothing, and why
+
+The first version threaded the blend mode into `fill::polygon` — the path a **pattern** or
+**shading** fill takes — and left `Device::fill_polygon` alone. That is the path a **flat colour**
+takes, which is nearly every mark on every page: `draw_mark` calls `device.fill_polygon` directly
+for an ordinary colour and never goes near `fill::polygon` at all. So the blend was implemented,
+unit-tested, and reached only the rare marks.
+
+**Measured across the eleven annotation-bearing corpus files, that version changed nothing to four
+decimal places.** Every figure was identical, and the honest conclusion at the time was "no
+improvement is claimed". The test that would have caught it was written, failed, and was
+`#[ignore]`d with the reason recorded — which is what left a breadcrumb worth having.
+
+### The defect, and the fix
+
+`Device::fill_polygon`, `Device::stroke_polygon`, `composite` and `composite_masked` all composited
+with plain source-over. A blend mode therefore could not reach an ordinary fill or stroke at all.
+All four now take the mark's blend mode, and the ignored test passes and is no longer ignored.
+
+### Measured, after the fix
+
+| file | annotations only | annotations + blend |
+|---|---|---|
+| `pdfjs__comments.pdf` worst | 0.8591 | **0.8672** |
+| `pdfjs__comments.pdf` median | 0.9615 | **0.9633** |
+| `bug1992868`, `issue12337`, `highlights` | 0.8667 | 0.8667 |
+| the seven single-page annotation files | — | unchanged |
+
+**`comments` is the only file that moved**, and it moved past where it was before annotations
+existed at all (0.8645). The other three did not, and the reason is
+[D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect):
+their worst pages are 0.8667 because every line of text is a doubled grey ghost from substituting
+Liberation for Nimbus, and no amount of correct blending changes the glyph outlines.
+
+So: **one file, 0.008 of worst-page SSIM.** That is a small number for the work, and it is reported
+as what it is rather than rounded up. The feature is kept because `/BM` is part of the
+specification, because a page that asked for `Multiply` and got `Normal` was getting wrong colours,
+and because the defect it exposed — an ordinary fill unable to honour a graphics-state setting — was
+a real one that would have bitten every other graphics-state property routed the same way.
 
 The remaining twelve modes — `Difference`, `Exclusion`, `Hue`, `Saturation`, `Colour`, `Luminosity`
 and the rest — are **refused by name**, with a note saying the mark was composited as `Normal`
@@ -3229,13 +3265,8 @@ behind it to blend with; that `over` and `over_blend(.., Normal)` are the same f
 drift; and that `record.blend_mode` really does arrive as `"Multiply"` by the time the renderer
 resolves it, which was traced directly.
 
-**Not verified end to end.** The test that would prove a `/BM /Multiply` changes a rendered pixel
-is written and **`#[ignore]`d**, with the reason on it: the grey backdrop that test paints never
-lands — the page comes out white paper, so `Multiply` of white by white is white and the two
-renders agree whether or not blending works. Either `0.5 g` with a full-page `re f` is not drawing
-in that fixture, or it draws and something later puts white back. Until that is answered the test
-cannot distinguish blending from nothing being drawn, and a red suite is worse than a named gap.
-
-That gap is also the most likely reason the corpus figures did not move, and it is **not** evidence
-that the blend path is unreachable: the mode demonstrably reaches the mark. So this entry records a
-feature that is implemented and unit-tested, whose end-to-end effect is **still open**.
+**Verified end to end.** `a_multiply_blend_mode_from_an_ext_gstate_reaches_the_pixel` renders the
+same page twice, with and without `/BM /Multiply`, and asserts that the multiply version is
+**darker** — the two are compared against each other rather than against a remembered number, so
+the test still bites if the plumbing breaks again. It was the test that found the flat-fill defect
+in the first place, and it is no longer ignored.
