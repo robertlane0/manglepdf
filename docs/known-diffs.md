@@ -3308,3 +3308,35 @@ same page twice, with and without `/BM /Multiply`, and asserts that the multiply
 **darker** — the two are compared against each other rather than against a remembered number, so
 the test still bites if the plumbing breaks again. It was the test that found the flat-fill defect
 in the first place, and it is no longer ignored.
+
+## D29 — a `/ShadingType 7` drift shading was refused with the mesh types, though it is not a mesh
+
+**Fixed.** Shading type 7 (`Dr`) was refused by name alongside types 1, 4, 5 and 6. That grouping
+was wrong: **types 4–6 are the mesh types and type 7 is not one.** A drift shading is a type 3
+radial — the same six coordinates and two circles — with one addition: a `/D` function applied to
+the parameter, so the colour is `CF(D(t))` rather than `CF(t)`.
+
+It is its own variant rather than a flag on `Radial` for a reason worth stating: the parameter is
+transformed **before** the colour function sees it, while the coverage a caller derives from the
+raw parameter must **not** be. A flag would invite both to move together.
+
+**A `/D` that cannot be read is a refusal, not a plain radial.** Dropping the drift would paint a
+gradient the file did not ask for, and it would look entirely plausible — the same reasoning that
+keeps an `ICCBased` profile with no `/Alternate` reported rather than approximated.
+
+### Corpus effect
+
+**One file, one page**: `pdfjs__bug1703683_page2_reduced.pdf` is the only corpus file using an
+exotic shading, and it uses type 7. That is much smaller than the specification's size suggests, and
+it was worth measuring before building rather than after: types 4–6 remain refused and are named as
+such, which is a different decision from refusing 7 as though it were one of them.
+
+### Tests
+
+- **the drift reaches the colour** — `/D` doubles the parameter, which is *not* the identity, so
+  the **midpoint** is the probe: at half the radius the drifted parameter is already past 1 and the
+  colour is white, where a type 7 painted without its drift would be mid-grey. A single-pixel check
+  at the outer edge would pass either way, which is why the probe is where the two differ.
+- **a type 7 with no `/D` is refused.**
+- **types 1, 4, 5 and 6 are still refused** — adding 7 must not have widened what is accepted.
+
