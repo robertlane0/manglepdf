@@ -3340,3 +3340,33 @@ such, which is a different decision from refusing 7 as though it were one of the
 - **a type 7 with no `/D` is refused.**
 - **types 1, 4, 5 and 6 are still refused** — adding 7 must not have widened what is accepted.
 
+
+## D30 — the four papers that declare tiling patterns turned out to be font substitution, not tiling
+
+**Diagnosis, recorded because the earlier entry called them undiagnosed and they are not.**
+
+`pdfjs__bug1992868.pdf`, `pdfjs__issue12337.pdf`, `pdfjs__highlights.pdf` and `pdfjs__comments.pdf`
+were the four corpus files carrying the tiling cluster, and [D25](#d25--a-tiling-pattern-was-refused-rather-than-tiled)
+established that none of them *uses* a pattern. What was left was 12 pages below 0.95 with no
+explanation, and the honest answer took a look rather than a number.
+
+The diff images settle it. Every line of body text appears as a **doubled grey ghost** — the same
+registration signature as [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect),
+where substituting Liberation for Nimbus puts the same glyphs at slightly different widths and
+outlines. Nothing is missing, nothing is displaced, no image is absent, and no colour is wrong.
+
+`comments.pdf` page 1 is the clearest case, and it is worth describing because it looks alarming
+and is not. It shows large **solid bars** over the text, which read at first glance like
+annotations we failed to draw. They are not: they are the *difference* between a yellow highlight
+drawn at one width and the same highlight drawn at another, and drawing annotations ([D27](#d27--annotations-were-not-drawn-at-all-which-is-most-of-a-page-on-a-document-that-uses-them))
+is what turned those bars from 22.8% of the page's differing pixels into 7.0%.
+
+**So these 12 pages are the font-substitution policy, and the addressable total for it rises to
+roughly 70 pages** — which makes it by some distance the largest thing left that is not a missing
+codec.
+
+**The methodological note is the point.** Every wrong conclusion in this session's cluster analysis
+came from counting *something present* rather than looking at *what the page did*: `/PatternType 1`
+declarations read as pattern use, `mutool show … grep` read as content-stream evidence when it
+cannot see inside one, and a substring match for `sh` read as shading evidence when it matches
+`glyph`. A heatmap costs nothing and settles in one look what three greps got wrong.

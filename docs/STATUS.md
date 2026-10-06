@@ -995,7 +995,7 @@ concentrated in a handful of files too:
 | 25 | `gov__nist-fips197.pdf` | **diagnosed** (D24): 24 pages are the font-substitution policy, **1 page is a real gap** — an `ICCBased` profile with no `/Alternate` |
 | 22 | `pdfjs__TAMReview.pdf` | the same font-substitution policy |
 | 14 | `gov__nist-nistir7657.pdf` | **diagnosed** (D24): entirely the font-substitution policy |
-| 12 | `comments` 4, `issue12337` 3, `highlights` 3, `bug1992868` 2 | **undiagnosed** — *not* tiling, which these files declare but never use ([D25](known-diffs.md)) |
+| 12 | `comments` 4, `issue12337` 3, `highlights` 3, `bug1992868` 2 | **font substitution**, like [D24](known-diffs.md) — the diff images show every line doubled and misregistered. *Not* tiling: these files declare patterns and never select one ([D25](known-diffs.md)) |
 | 9 | `pdfjs__freeculture.pdf` | |
 | 7 | `gov__nist-sp800-88.pdf` | |
 | 3 | `gov__arxiv-1512.03385.pdf` | |
