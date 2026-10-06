@@ -752,16 +752,11 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
         .filter(|d| Path::new(d).extension().is_some_and(|e| e == "md"))
         .map(PathBuf::from)
         .collect();
-    // `PLAN.md` and everything under `docs/` beyond the required list, because a link can point
-    // at any of them and the point is to catch the ones that do not resolve.
-    if let Ok(entries) = std::fs::read_dir(root.join("docs")) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "md") {
-                out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
-            }
-        }
-    }
+    // Everything under `docs/`, **recursively**: the architecture decisions and the design notes
+    // live in subdirectories, and a link into one of those is as breakable as any other. A
+    // walk that stopped at the first level would report success while skipping them, which is
+    // the failure mode this check exists to remove.
+    markdown_under(&root.join("docs"), root, &mut out);
     // Everything at the root as well, because `FINISH.md` and `GOAL.md` are the two documents
     // most worth keeping honest and neither is in `REQUIRED_DOCS`. Only the one file that is
     // not part of the repository's documentation is left out.
@@ -782,6 +777,21 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Every Markdown file at or below `dir`, as paths relative to `root`.
+fn markdown_under(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            markdown_under(&path, root, out);
+        } else if path.extension().is_some_and(|e| e == "md") {
+            out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+        }
+    }
 }
 
 /// A GitHub-style heading anchor: lowercased, punctuation dropped, spaces to hyphens.
