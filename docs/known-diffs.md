@@ -2995,12 +2995,41 @@ a texture:
   image counts down, and the sampler measures from the box's *top* to match. A cell drawn one way
   and read back the other comes out mirrored — and a mirrored texture still looks like a texture.
 
-### What is still refused, and why
+### `/PaintType 2` is now implemented, and it needed the space a pattern replaced
 
-**`/PaintType 2`, an uncoloured cell, is refused by name.** It paints in the colour in force when
-the pattern is used, and a `Pattern` colour space has already replaced that colour by the time the
-pattern is reached, so there is nothing to hand it. Painting the cell's own colour would be
-plausible and wrong, which is the whole reason the entry above exists.
+It was refused by name here, on the reasoning that the cell paints "in the colour in force when the
+pattern is used" and a `Pattern` colour space has already replaced that colour. **That reasoning was
+half right, and the half that was wrong is the interesting part.**
+
+`cs` replaces the colour **space** and leaves the **components** alone. So after
+`1 0 0 rg /Pattern cs /P0 scn` the components are still `[1, 0, 0]` — exactly the colour the cell
+should paint in. What was missing was not the colour but the **space those components belong to**,
+which `cs` had discarded. `Colour` now carries it as `under`, set only when `cs` selects a `Pattern`
+space, and `to_rgba` routes a pattern's components through it.
+
+Three things that were wrong on the way, each caught by the test rather than by reading:
+
+- **The detection looked in the wrong table.** `cs` names a resource in `/ColorSpace`, so the check
+  is against the colour-space table for the name `/Pattern` — not against the *pattern* table for a
+  pattern called `Pattern`, which is what the first attempt did, found nothing, and silently left
+  the previous space unrecorded.
+- **The recursion did not terminate usefully.** The conversion clones the colour and swaps its
+  space, and `under` came along for the ride, so the new arm fired on its own output and recursed
+  to the depth bound — returning `None`, which made an uncoloured pattern look exactly like a page
+  that had set no colour at all. `under` is cleared on the resolved colour.
+- **`scn` was clearing it.** Naming the pattern rebuilt the colour's space and wiped the record the
+  `cs` had just made.
+
+**A test premise that was simply false.** The first draft asserted that a page which sets *no*
+colour leaves the cell with nothing to paint in. It does not: the graphics state begins black, so a
+colour is always in force and the cell correctly paints black. The case that genuinely has nothing
+to convert is a stream that names a pattern **without ever selecting the `Pattern` colour space**,
+and that is what the test now covers — reported by name, since there is no space to read the
+components in.
+
+**Corpus effect: none measured, and none claimed.** No corpus file uses a tiling pattern at all (see
+the correction at the top of this entry), so this cannot be justified by a figure. It is a named
+part of the specification, and the pattern-fill path is now complete for both paint types.
 
 ### Tests
 
@@ -3017,7 +3046,8 @@ first two replace a refusal assertion, and the one worth reading twice is the re
   that follows it asserted as well;
 - **`/BBox` clips** — a cell painting twice its own box leaves the gap between cells as paper,
   which is what a clipped tiling looks like and is not what an unclipped one looks like;
-- **`/PaintType 2` is refused by name** and nothing is drawn in its place;
+- **a `/PaintType 2` cell with no colour space behind it is refused by name** — see above —
+  while a normal uncoloured cell paints in the colour the page set;
 - **a pattern that is not a stream is refused by name**, and
 - **a shading pattern still draws its ramp** to the same values as before — the test that catches a
   change to the shared plumbing the tiling path now runs through.
