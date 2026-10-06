@@ -223,14 +223,20 @@ fn g0_2_no_unsafe(ws: &Workspace) -> Check {
         }
     }
     let scanned = scan_workspace(ws);
-    let clean = scanned.iter().filter(|(_, s)| !s.is_untouched()).count();
+    // Every crate in `scanned` was scanned for the rule above; the count is a note about how the
+    // scan went, not a score. It used to filter on `!is_untouched()` into a variable called
+    // `clean` and then print "6 of 14 crates scanned clean", which was wrong twice over: the
+    // six it named were the crates holding a spawn or todo marker, and the eight it did not
+    // name were the bare ones. A note that inverts its own subject is worse than no note.
+    let with_markers = scanned.iter().filter(|(_, s)| !s.is_untouched()).count();
     if findings.is_empty() {
         Check::pass(
             "G0.2",
             "no unsafe, no allow(unsafe_code), forbid in every target",
         )
         .note(format!(
-            "{clean} of {} first-party crates scanned clean",
+            "all {} first-party crates scanned; {with_markers} of them hold a spawn, process \
+             path or todo marker, which G0.4 and G0.6 audit",
             scanned.len()
         ))
     } else {
