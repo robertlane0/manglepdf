@@ -3286,9 +3286,10 @@ specification, because a page that asked for `Multiply` and got `Normal` was get
 and because the defect it exposed — an ordinary fill unable to honour a graphics-state setting — was
 a real one that would have bitten every other graphics-state property routed the same way.
 
-The remaining twelve modes — `Difference`, `Exclusion`, `Hue`, `Saturation`, `Colour`, `Luminosity`
-and the rest — are **refused by name**, with a note saying the mark was composited as `Normal`
-instead. That is a deliberate choice over substituting `Normal` silently: a page whose `Luminosity`
+The remaining modes — `Difference`, `Exclusion`, `Hue`, `Saturation`, `Colour`, `Luminosity` and
+the rest — are **refused by name**, with a note saying the mark was composited as `Normal`
+instead. (This entry first said *twelve*. Table 136 names sixteen, five of them are read, and
+sixteen minus five is **eleven**. The count was wrong and the decision was not.) That is a deliberate choice over substituting `Normal` silently: a page whose `Luminosity`
 highlight came out as an opaque one looks entirely plausible and has the wrong colours on it, which
 is the failure this project keeps finding. A name in a note is worth more than a plausible page.
 
@@ -3443,3 +3444,21 @@ that case needs is a second question from the one this entry answers.
 A name with no bundled stand-in would pass without this fix, so the substitution path is only
 reached at all if the name is one that *would* substitute. Verified by removing the guard: the
 test fails with the `substituted: true` value above.
+
+### The one abbreviation that is refused on purpose, and why
+
+`/L` used to be read as `Lighten`. **It is now refused**, because PDF 32000-1 Table 136 abbreviates
+`Lighten` *and* `Luminosity` with the same letter, and Adobe resolves it to `Luminosity` — which is
+one of the modes this project does not implement. So the old reading painted the wrong function on
+a page that meant the other one, and the result was a plausible picture with the wrong colours on
+it.
+
+The reason it survived so long is worth recording: **the file's own comment already said `/L` names
+`Luminosity`**, one screen above the line that mapped `"L"` to `Lighten`, and a test pinned the
+wrong answer. Documentation and test both agreed with each other and both disagreed with the code.
+Neither is evidence about what a *document* means, which is the only question here.
+
+That is the third time this session that a claim contradicted the code near it — after the tiling
+comment that said its own loop was unimplemented, and the `STATUS.md` line that said Type 3 pages
+were reported rather than drawn. **A comment near code is a statement of intent, not evidence of
+behaviour, and reading it as evidence is how a wrong answer survives review.**

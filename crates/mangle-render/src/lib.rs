@@ -1007,8 +1007,12 @@ impl BlendMode {
     ///
     /// `None` for a mode this renderer does not implement, which the caller turns into a note.
     /// The abbreviations are single letters for exactly the ones with long names: `/H` hue,
-    /// `/S` saturation, `/C` colour, `/L` luminosity. `C` is here as `Colour`, which is a
-    /// different function from the `Luminosity` that `/L` names.
+    /// `/S` saturation, `/C` colour, `/M` multiply, `/Scr` screen, `/D` darken.
+    ///
+    /// **`/L` is not among them, on purpose.** Table 136 abbreviates `Lighten` and `Luminosity`
+    /// with the same letter, and `C` here is `Colour`, which is a different function from the
+    /// `Luminosity` that `/L` also names. Rather than pick one and be plausibly wrong, `/L` is
+    /// refused and the note says so.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         match name {
@@ -1016,7 +1020,14 @@ impl BlendMode {
             "Multiply" | "M" => Some(Self::Multiply),
             "Screen" | "Scr" => Some(Self::Screen),
             "Darken" | "D" => Some(Self::Darken),
-            "Lighten" | "L" => Some(Self::Lighten),
+            // `/L` is **refused**, and deliberately so. PDF 32000-1 Table 136 abbreviates
+            // both `Lighten` and `Luminosity` as `L`, so the single letter names two different
+            // functions and a reader has to choose. Adobe resolves it to `Luminosity`, which is
+            // not implemented here, so answering `Lighten` would put the wrong function on the
+            // page for a document that meant the other one — and it would look entirely
+            // plausible, which is the failure this function exists to avoid. Refusing asks the
+            // writer to spell it out, and the note says which one was dropped.
+            "Lighten" => Some(Self::Lighten),
             _ => None,
         }
     }
@@ -1605,7 +1616,9 @@ mod tests {
             ("M", Some(BlendMode::Multiply)),
             ("Scr", Some(BlendMode::Screen)),
             ("D", Some(BlendMode::Darken)),
-            ("L", Some(BlendMode::Lighten)),
+            // The specification's one genuinely ambiguous abbreviation: `L` is both
+            // `Lighten` and `Luminosity`, so this asserts it is refused rather than guessed.
+            ("L", None),
             // The separable ones this renderer does not do.
             ("Difference", None),
             ("Exclusion", None),
