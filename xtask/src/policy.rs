@@ -70,6 +70,20 @@ const REQUIRED_DOCS: &[&str] = &[
     "THIRD_PARTY_LICENSES.md",
 ];
 
+/// Ignored tests the gate accepts, named one by one.
+///
+/// `FINISH.md` G0.5 asks for no ignored test at all. Exactly one exists and it is deliberate: the
+/// corpus run renders every page of the wild corpus twice and takes hours, so it is run on demand
+/// rather than on every gate invocation. That is a *narrow* exception, and this is what keeps it
+/// narrow.
+///
+/// **A count is not a gate.** The check used to exclude every ignored test from its judgement and
+/// merely report how many there were, which meant a test marked `#[ignore]` last week to get a
+/// commit through would pass the gate forever after. Naming the one exception is what makes the
+/// rest a failure, which is the same reason a missing heading in a documentation link fails rather
+/// than being counted.
+const SANCTIONED_IGNORED: &[&str] = &["the_wild_corpus_is_measured_and_reported"];
+
 /// Lints a library crate must deny rather than warn.
 const REQUIRED_DENIES: &[&str] = &[
     "clippy::unwrap_used",
@@ -451,14 +465,30 @@ fn judge_test_run(stdout: &str) -> TestVerdict {
         "cargo test: {} passed, {} failed, {} ignored, {} filtered out over {} test binaries",
         v.counts.passed, v.counts.failed, v.counts.ignored, v.counts.filtered, v.counts.binaries
     ));
+    let ignored = test_lines(stdout, "ignored");
+    // An ignored test is a deliberate choice to defer something, so the ones on the list are
+    // reported and accepted. Anything else on the list was ignored without saying why here, and
+    // it fails: "deferred" is a decision to record, not a place to leave work.
+    let unsanctioned: Vec<String> = ignored
+        .iter()
+        .filter(|name| !SANCTIONED_IGNORED.contains(&name.as_str()))
+        .cloned()
+        .collect();
+    if !unsanctioned.is_empty() {
+        v.findings.push(format!(
+            "{} test(s) are ignored without being on the sanctioned list: {}. Either it is \
+             deliberate and belongs in SANCTIONED_IGNORED, or it is not meant to be skipped.",
+            unsanctioned.len(),
+            listed(&unsanctioned)
+        ));
+    }
     v.notes.push(if v.counts.ignored == 0 {
         "no test was ignored".to_string()
     } else {
         format!(
-            "{} ignored test(s) were not run, so they are excluded from the judgement rather\n\
-             than counted as failures: {}",
+            "{} ignored test(s) were not run, and each is on the sanctioned list: {}",
             v.counts.ignored,
-            listed(&test_lines(stdout, "ignored"))
+            listed(&ignored)
         )
     });
     v
@@ -1038,6 +1068,16 @@ test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 ";
 
     /// What `cargo test -- --list` prints: no `... ` and no outcome.
+    /// A run where a second test is ignored without being on the sanctioned list.
+    const ONE_UNSANCTIONED: &str = "\
+running 3 tests
+test the_harness_finds_its_corpus ... ok
+test a_test_deferred_to_next_week ... ignored
+test the_wild_corpus_is_measured_and_reported ... ignored
+
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.02s
+";
+
     const LISTED: &str = "\
 the_wild_corpus_is_measured_and_reported: test
 tests::a_balanced_tree_parses: test
@@ -1057,6 +1097,30 @@ tests::an_unbalanced_tree_is_rejected: test
         );
     }
 
+    /// An ignored test that is **not** on the sanctioned list fails the gate.
+    ///
+    /// This is what the count was hiding. The check used to exclude *every* ignored test from its
+    /// judgement and report only how many there were, so a test marked `#[ignore]` to land a
+    /// commit would have passed the gate indefinitely, and the report would have agreed with it.
+    /// The count was never going to fail; the name is.
+    #[test]
+    fn an_unsanctioned_ignored_test_fails_the_gate() {
+        let v = judge_test_run(ONE_UNSANCTIONED);
+        assert!(
+            !v.findings.is_empty(),
+            "an ignored test nobody sanctioned must not be quietly excluded"
+        );
+        let finding = v.findings.join(" ");
+        assert!(
+            finding.contains("a_test_deferred_to_next_week"),
+            "and it must be named, so the reader knows what to deal with: {finding}"
+        );
+        assert!(
+            !finding.contains("the_wild_corpus_is_measured_and_reported"),
+            "the sanctioned test is not part of the failure: {finding}"
+        );
+    }
+
     #[test]
     fn a_failed_test_fails_the_gate_by_name() {
         let v = judge_test_run(ONE_FAILED);
@@ -1070,7 +1134,7 @@ tests::an_unbalanced_tree_is_rejected: test
     }
 
     #[test]
-    fn an_ignored_test_is_reported_and_excluded_not_failed() {
+    fn the_sanctioned_ignored_test_is_reported_and_not_failed() {
         let v = judge_test_run(ONE_IGNORED);
         assert!(v.findings.is_empty(), "{:?}", v.findings);
         assert_eq!(
@@ -1090,11 +1154,9 @@ tests::an_unbalanced_tree_is_rejected: test
             .map(String::as_str)
             .unwrap_or_default();
         assert!(
-            note.contains(
-                "1 ignored test(s) were not run, so they are excluded from the \
-                          judgement rather"
-            ) && note.contains("than counted as failures"),
-            "{note}"
+            note.contains("1 ignored test(s) were not run")
+                && note.contains("each is on the sanctioned list"),
+            "the note must say the test was sanctioned, not merely that it was excluded: {note}"
         );
         assert!(
             note.contains("the_wild_corpus_is_measured_and_reported"),
