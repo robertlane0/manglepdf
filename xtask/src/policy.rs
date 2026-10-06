@@ -762,8 +762,22 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    if root.join("PLAN.md").is_file() {
-        out.push(PathBuf::from("PLAN.md"));
+    // Everything at the root as well, because `FINISH.md` and `GOAL.md` are the two documents
+    // most worth keeping honest and neither is in `REQUIRED_DOCS`. Only the one file that is
+    // not part of the repository's documentation is left out.
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_markdown = path.is_file() && path.extension().is_some_and(|e| e == "md");
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            if is_markdown && name != "AGENTS.md" {
+                out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+            }
+        }
     }
     out.sort();
     out.dedup();
