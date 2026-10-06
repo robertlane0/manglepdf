@@ -675,6 +675,18 @@ fn g0_7_assets(ws: &Workspace) -> Check {
     }
 }
 
+/// Every bundled asset that needs a licence entry: everything under `assets/` except the
+/// hand-authored icons G0.8 already owns.
+///
+/// **This used to filter on an extension list** — `ttf`, `otf`, `pfb`, `ttc`, `txt`, `icc` — which
+/// made a gate titled "every bundled asset has a licence entry" check only the kinds of file it
+/// already knew about. A bundled `.woff2`, `.png` or `.pdf` would have been silently exempt, and
+/// the report would still have said every asset was covered. Nothing is exempt today, so no
+/// licence was actually missing; but the hole was one file away from mattering, and the case it
+/// was closest to mattering is a bundled web font.
+///
+/// Inverting the filter is the whole fix: unknown things are included rather than excluded, so
+/// the gate fails closed on a file it has not seen before.
 fn bundled_assets(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -684,10 +696,7 @@ fn bundled_assets(dir: &Path) -> Vec<PathBuf> {
         let p = e.path();
         if p.is_dir() {
             out.extend(bundled_assets(&p));
-        } else if matches!(
-            p.extension().and_then(|x| x.to_str()),
-            Some("ttf" | "otf" | "pfb" | "ttc" | "txt" | "icc")
-        ) {
+        } else if p.extension().and_then(|x| x.to_str()) != Some("svg") {
             out.push(p);
         }
     }
