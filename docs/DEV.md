@@ -27,6 +27,14 @@ cargo fmt --all
 release build, so it is the command that matters at the end of a change. Use
 `--only` while working so the loop stays fast.
 
+**G0.9 also resolves the documentation's own links.** Beyond confirming the required files
+exist, it checks every `[text](path#heading)` in `PLAN.md`, `README.md` and everything under
+`docs/`, and fails on one whose heading no longer exists. That check is there because a link to a
+heading that has been renamed sends a reader somewhere that does not say what they were told it
+says — the same failure as a comment claiming a feature is unimplemented one screen above the code
+that implements it. Both have been found here, which is why it is a gate rather than something to
+remember to run.
+
 ## Layout
 
 ```

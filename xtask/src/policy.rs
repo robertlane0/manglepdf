@@ -3,7 +3,7 @@
 //! Every check here answers a question the verifier can ask, and every finding names
 //! a file and a line. A check that cannot run says so instead of quietly passing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -731,16 +731,147 @@ fn svg_findings(path: &Path, name: &str) -> Vec<String> {
 }
 
 fn g0_9_docs(ws: &Workspace) -> Check {
-    let findings: Vec<String> = REQUIRED_DOCS
+    const TITLE: &str = "required documentation is present, and its links resolve";
+    let mut findings: Vec<String> = REQUIRED_DOCS
         .iter()
         .filter(|d| !ws.root.join(d).is_file())
         .map(|d| format!("{d} is missing or empty"))
         .collect();
+    findings.extend(dangling_anchors(&ws.root));
     if findings.is_empty() {
-        Check::pass("G0.9", "required documentation is present")
+        Check::pass("G0.9", TITLE)
     } else {
-        Check::fail("G0.9", "required documentation is present", findings)
+        Check::fail("G0.9", TITLE, findings)
     }
+}
+
+/// Every Markdown file the documentation set is built from, as paths relative to the root.
+fn markdown_files(root: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = REQUIRED_DOCS
+        .iter()
+        .filter(|d| Path::new(d).extension().is_some_and(|e| e == "md"))
+        .map(PathBuf::from)
+        .collect();
+    // `PLAN.md` and everything under `docs/` beyond the required list, because a link can point
+    // at any of them and the point is to catch the ones that do not resolve.
+    if let Ok(entries) = std::fs::read_dir(root.join("docs")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "md") {
+                out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+            }
+        }
+    }
+    if root.join("PLAN.md").is_file() {
+        out.push(PathBuf::from("PLAN.md"));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A GitHub-style heading anchor: lowercased, punctuation dropped, spaces to hyphens.
+///
+/// Deliberately the same algorithm a renderer applies, so that what this accepts is what a
+/// reader's link will find. It is a reimplementation because a gate may not depend on a crate
+/// whose whole job is to be a dependency.
+fn anchor_of(heading: &str) -> String {
+    let mut out = String::new();
+    for ch in heading.trim().trim_matches('#').trim().chars() {
+        if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch.is_whitespace() {
+            out.extend(ch.to_lowercase());
+        }
+    }
+    out.trim().replace(' ', "-")
+}
+
+/// Every `[text](path#fragment)` link whose fragment names a heading no target has.
+///
+/// A doc link to a heading that has been renamed is the same failure as a doc claiming a thing
+/// is unimplemented one screen above the code that does it: the reader is sent somewhere that
+/// does not say what they were told it says. Both have been found in this project, which is why
+/// this is a gate rather than something to remember to run.
+fn dangling_anchors(root: &Path) -> Vec<String> {
+    let files = markdown_files(root);
+    let mut headings: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    let mut bodies: Vec<(PathBuf, String)> = Vec::new();
+    for rel in &files {
+        let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+            continue;
+        };
+        let mut set = BTreeSet::new();
+        for line in text.lines() {
+            if line.starts_with('#') {
+                set.insert(anchor_of(line));
+            }
+        }
+        headings.insert(rel.clone(), set);
+        bodies.push((rel.clone(), text));
+    }
+    let mut findings = Vec::new();
+    for (rel, text) in &bodies {
+        let dir = rel.parent().unwrap_or(Path::new(""));
+        for (index, line) in text.lines().enumerate() {
+            let mut rest = line;
+            while let Some(at) = rest.find("](") {
+                rest = &rest[at + 2..];
+                let Some(close) = rest.find(')') else { break };
+                let target = &rest[..close];
+                rest = &rest[close + 1..];
+                let Some((path, fragment)) = target.split_once('#') else {
+                    continue;
+                };
+                if fragment.is_empty() {
+                    continue;
+                }
+                let joined = if path.is_empty() {
+                    rel.clone()
+                } else {
+                    dir.join(path).clone()
+                };
+                // A link may omit the `.md`; try it as written, then with it.
+                let normalised = normalise(&joined);
+                let candidates = [normalised.clone(), normalised.with_extension("md")];
+                let Some(target_set) = candidates.iter().find_map(|c| headings.get(c)) else {
+                    // Not a doc of ours, or a file that is gone: that is a link to nothing.
+                    findings.push(format!(
+                        "{}:{} links to `{path}`, which is not a Markdown file here",
+                        rel.display(),
+                        index + 1
+                    ));
+                    continue;
+                };
+                if !target_set.contains(&normalise_fragment(fragment)) {
+                    findings.push(format!(
+                        "{}:{} links to `{path}#{fragment}`, which names no heading there",
+                        rel.display(),
+                        index + 1
+                    ));
+                }
+            }
+        }
+    }
+    findings
+}
+
+/// Strip `./`, collapse `docs/../`, and keep the fragment out of the path.
+fn normalise(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The fragment as an anchor, so a fragment written with different case still resolves.
+fn normalise_fragment(fragment: &str) -> String {
+    fragment.to_lowercase().replace(' ', "-")
 }
 
 fn g0_10_fixtures(ws: &Workspace) -> Check {
