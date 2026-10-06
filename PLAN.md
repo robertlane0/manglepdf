@@ -804,3 +804,55 @@ One loose end on the write side: `StreamCompression::Flate` is defined but not w
 `encode_stream`, so a stream chosen for writing is not compressed. What the compressor now
 emits is a zlib stream, which `/FlateDecode` names and three other programs can read, so the
 work left is the call site rather than the format.
+
+## Type 3 fonts — the design, with the API facts checked
+
+Deferred rather than abandoned: the corpus scope is measured ([D31](docs/known-diffs.md)) and the
+mechanism is settled. Every API below was read before writing it down, so this is a design rather
+than a sketch. `gov__arxiv-1206.5537.pdf` is the target that justifies it — 23 pages, all of
+which score 0.95–0.995 **with no text at all**, because its `/FontMatrix 1 0 0 -1 0 0` CMMI font is
+the one thing drawn on them.
+
+**Why the recursion belongs in the renderer, not in `interp.rs`.** `execute_form` is the wrong
+model: a form is a sibling of the page, but a glyph procedure runs *inside* a text object, with
+the glyph's own matrix already applied and with the enclosing text state's colour, clip and font
+set. `Mark::Glyphs` already receives the per-glyph matrix, and `paint_records` is already the
+function that turns a `PageContent` into marks — so the renderer has both halves and the
+interpreter has neither.
+
+**The transform, which is the part that is easy to get subtly wrong.** `paint_records` computes
+`to_device = placement.matrix.concat(record.ctm)`, and a glyph currently draws at
+`placement · record.ctm · glyph_matrix`. A glyph procedure therefore has to enter with the state
+matrix already equal to `record.ctm · glyph_matrix · font_matrix`, and be handed the **same**
+page placement — not a modified one — so the two compose exactly once. Seeding the interpreter is
+`GraphicsState::new()` then one `concat(m)`, which reads as `ctm = identity.concat(m) = m`, and
+`concat` is `ctm = ctm.concat(m)`, so a second `concat` inside the procedure composes on the right
+side. `Resources::from_dict` takes the document as a resolver and is already used that way for a
+form's own resources, which is the same shape a font's `/Resources` needs.
+
+**The steps**
+
+1. **Parse.** `/Subtype /Type3` → `/FontMatrix` (identity is the default), `/FontBBox`,
+   `/CharProcs`, and `/Resources` read through `Resources::from_dict`. This replaces the refusal
+   added in [D31](docs/known-diffs.md), so that entry's reason is what the report says until this
+   lands — and it must keep naming the font, because a procedure that cannot be read is still a
+   refusal.
+2. **Select.** The code becomes a glyph name through the **existing** `encoding` — the same
+   `Encoding` the outline path already uses, and `Type3` fonts are simple fonts, so
+   `/Differences` applies to them exactly as it does to a Type 1. A code with no entry in
+   `/CharProcs` is a space or a code the font does not have, and is skipped as it is now.
+3. **Execute.** Decode the procedure with `decode_stream`, and **refuse rather than execute** if
+   `encoded` is set or the data is empty — the same rule `execute_form` uses, and for the same
+   reason: handing still-compressed bytes to the operator table draws a plausible wrong page.
+4. **Bound.** A depth counter on the recursion, and a note when it trips. The pdfjs files are
+   named for a **procedure that re-enters itself**, so this is not defensive padding — it is one of
+   the two corpus cases. It is a separate counter from `MAX_FORM_DEPTH` on purpose: a glyph inside
+   a form inside a glyph is three different things, and one shared budget would let a page spend
+   the form depth on glyphs.
+5. **`/FontBBox` clips** the procedure. Worth doing while the code is open; it is also the only
+   part of this that can make a page *worse* if got backwards, so it is the piece to test last.
+
+**The honest risk, stated before it is taken.** A glyph procedure is arbitrary content, so
+supporting it widens what the interpreter runs, and a bug in the depth bound is a stack overflow
+rather than a note. The mitigation is the bound being the *first* thing merged and tested, ahead of
+any rendering, because it is the only part of this that can crash.
