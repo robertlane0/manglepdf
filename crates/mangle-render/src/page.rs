@@ -1451,6 +1451,21 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
     let Object::Dict(font) = resolved else {
         return Err(format!("the font `/{name}` is not a dictionary"));
     };
+    // A Type 3 font's glyphs are **content streams**, not outlines, so it has no
+    // `/FontDescriptor` and no embedded program to read. It is refused here rather than
+    // further down, and the reason is why: further down the search ends at
+    // `substitute_for`, which asks only what the `/BaseFont` is called — and a Type 3 font
+    // is free to be called anything at all. The two pdfjs regression files in the corpus
+    // name theirs `/Helvetica`, which has a metric-compatible face bundled for it, so the
+    // substitution *succeeds*: the page draws Helvetica's glyphs in another face's outlines
+    // while the document defined each glyph as a stream. That is a plausible wrong answer,
+    // not a visible gap, and it is the one thing this project is built not to do.
+    if font.get("Subtype").and_then(Object::as_name) == Some(b"Type3") {
+        return Err(format!(
+            "the font `/{name}` is a Type 3 font, whose glyphs are content streams rather \
+             than outlines, so they are not drawn"
+        ));
+    }
     // A composite (Type 0) font holds no font program of its own. Its `/DescendantFonts`
     // array names the CIDFont, and *that* is the dictionary with the `/FontDescriptor` and
     // the `/FontFile2` in it — so a page in a composite font reads exactly the same
@@ -3369,5 +3384,56 @@ mod tests {
             .expect_err("a dictionary is not a cell");
         assert!(err.contains("/P0"), "the error names the pattern: {err}");
         assert!(err.contains("stream"), "and says what is missing: {err}");
+    }
+
+    /// A Type 3 font is refused by name, and the regression it pins is a **substitution**.
+    ///
+    /// This is not "we have no Type 3 support" being restated. The bug was that a Type 3 font
+    /// reached `substitute_for`, which asks only what the `/BaseFont` is called — and a Type 3
+    /// font may be called anything. Both pdfjs regression files in the corpus name theirs
+    /// `/Helvetica`, which has a bundled stand-in, so the substitution **succeeded** and the
+    /// page drew Helvetica's glyphs while the document defined each glyph as a content
+    /// stream. A plausible wrong answer is worse than a named gap, and that is what this
+    /// asserts is gone.
+    #[test]
+    fn a_type3_font_is_refused_rather_than_substituted() {
+        let doc =
+            Document::open(page_bytes(1), mangle_syntax::OpenOptions::default()).expect("opens");
+        let mut font = Dict::new();
+        font.set("Type", Object::name("Font"));
+        font.set("Subtype", Object::name("Type3"));
+        // The name that made the substitution succeed. Asserted deliberately: it is the whole
+        // point of the test, and a name with no stand-in would pass without this fix at all.
+        font.set("BaseFont", Object::name("Helvetica"));
+        font.set(
+            "FontMatrix",
+            Object::Array(vec![
+                Object::Real(0.01),
+                Object::Real(0.0),
+                Object::Real(0.0),
+                Object::Real(0.01),
+                Object::Real(0.0),
+                Object::Real(0.0),
+            ]),
+        );
+        let mut charprocs = Dict::new();
+        charprocs.set("square", Object::name("square"));
+        font.set("CharProcs", Object::Dict(charprocs));
+        let mut font_table = Dict::new();
+        font_table.set("T3", Object::Dict(font));
+        let mut resources_dict = Dict::new();
+        resources_dict.set("Font", Object::Dict(font_table));
+        let resources = Resources::from_dict(&resources_dict, &|o| Some(o.clone()));
+
+        let reason = font_for("T3", &resources, &doc).expect_err("a Type 3 font is refused");
+        assert!(
+            reason.contains("Type 3"),
+            "the reason must name the kind of font, so a reader does not go looking for an \
+             embedding that was never supposed to be there: {reason}"
+        );
+        assert!(
+            !reason.contains("metric-compatible"),
+            "and it must not have been answered with a substitution: {reason}"
+        );
     }
 }

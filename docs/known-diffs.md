@@ -3370,3 +3370,57 @@ came from counting *something present* rather than looking at *what the page did
 declarations read as pattern use, `mutool show … grep` read as content-stream evidence when it
 cannot see inside one, and a substring match for `sh` read as shading evidence when it matches
 `glyph`. A heatmap costs nothing and settles in one look what three greps got wrong.
+
+## D31 — a Type 3 font was silently answered with a substituted face, which is a wrong answer rather than a gap
+
+**Fixed by refusal, not by support.** A Type 3 font's glyphs are **content streams**, not
+outlines, so it has no `/FontDescriptor` and nothing to embed. That much is well known. The
+defect is in what the search did with it.
+
+The search for a font program ended at `substitute_for`, and that function asks exactly one
+question: *what is the `/BaseFont` called?* A Type 3 font is free to be called anything at all —
+`/BaseFont` is an advisory hint on a Type 3 font, not a claim about where its glyphs come from —
+so the question got answered. Both pdfjs regression files in the corpus name theirs **`/Helvetica`**,
+which has a metric-compatible face bundled for it. The substitution therefore **succeeded**.
+
+Measured, by reverting the fix and re-running the test that now guards it:
+
+```
+a Type 3 font is refused: FontProgram { bytes: 410820, units_per_em: 2048,
+                                       encoding: "StandardEncoding", substituted: true }
+```
+
+**410,820 bytes of Liberation Sans outlines**, and the document's own glyph procedures thrown
+away. The page came out looking like ordinary Helvetica text — near enough that nothing on the
+page would look wrong, and the substitution notice was the only trace. This is the failure mode
+this project exists to prevent, and it was reached by the most defensible-looking code in the
+font path: the substitution helper's own doc comment argues at length *why* substituting is
+right, and for a simple font it is. The missing half of that argument is that the substitution is
+keyed on a name, and **a name is only evidence when the file has no better one to give.**
+
+### The rule this adds
+
+**A substitution is only legitimate where the name is the whole of what the file said.** Where a
+font carries something better — an embedded program, or, as here, glyphs of its own — the name is
+a hint and answering from it discards the better evidence. So the refusal goes in *before* the
+substitution, and names the kind of font, so that a reader is not sent looking for an embedding
+that was never supposed to be there.
+
+### What this costs, honestly
+
+Three corpus files carry a `/Subtype /Type3` font, and they now draw **no text at all** where they
+previously drew the wrong text. `gov__arxiv-1206.5537.pdf` (23 pages, `/FontMatrix 1 0 0 -1 0 0`,
+`/BaseFont SDLSQD+CMMI12`) was drawing a substituted face for a Type 3 font all along and is now
+blank there. That is a lower SSIM and a **more honest document**: the scores will get worse before
+Type 3 fonts are supported, and a score that falls because a wrong answer stopped being given is
+the trade this project has made throughout.
+
+The two pdfjs files are about a **content stream that recurses into itself**, so the depth bound
+that case needs is a second question from the one this entry answers.
+
+### Test
+
+`a_type3_font_is_refused_rather_than_substituted` — the font is named `/Helvetica` on purpose.
+A name with no bundled stand-in would pass without this fix, so the substitution path is only
+reached at all if the name is one that *would* substitute. Verified by removing the guard: the
+test fails with the `substituted: true` value above.

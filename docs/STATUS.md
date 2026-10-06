@@ -459,7 +459,9 @@ parsing and the decision are unit-tested in `xtask/src/policy.rs` against record
    interpreter, compared against `mutool` at 0.962 and 0.987 SSIM respectively. What is still
    missing is Type 3, whose glyphs are content streams rather than outlines, and the two
    standard faces Liberation has no equivalent of. A page using one is reported rather than
-   drawn blank. Composite (Type 0) fonts draw too, and are counted as done below rather than
+   drawn blank — **which was false until [D31](known-diffs.md)**: a Type 3 font was reaching
+   the substitution helper, which asks only what the `/BaseFont` is called, and the corpus
+   files name theirs `/Helvetica`, so 410,820 bytes of the wrong face were drawn in its place. Composite (Type 0) fonts draw too, and are counted as done below rather than
    here. A Type 1 (`FontFile`) program is a CFF table holding Type 1 charstrings, which is a
    different language from the Type 2 this reads, so a font that says so is refused with a
    reason.
