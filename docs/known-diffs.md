@@ -10,13 +10,6 @@ cause and evidence."*
 files open; **four cannot**. This page records what the corpus found and the evidence for each
 claim.
 
-**Three files have since been made worse on purpose, so the figures below are a floor, not a
-current reading.** [D31](#d31--a-type3-font-was-silently-answered-with-a-substituted-face-which-is-a-wrong-answer-rather-than-a-gap)
-refused a Type 3 font that was being answered with a substituted face, which costs `gov__arxiv-1206.5537.pdf`
-and the two pdfjs regression files their text entirely. Those pages will score *lower* than
-recorded here, because they now draw nothing where they previously drew the wrong thing. The
-numbers were not re-measured rather than run a corpus pass and quote a figure nobody checked.
-
 **The page distribution improved a great deal and the per-file median did not move at all.**
 Against the previous full run: the pages below 0.95 went **254 → 167**, a **34% reduction**, and
 the per-page median went **0.95795 → 0.96010**. Both movements are real. **The per-file median
@@ -3413,14 +3406,33 @@ a hint and answering from it discards the better evidence. So the refusal goes i
 substitution, and names the kind of font, so that a reader is not sent looking for an embedding
 that was never supposed to be there.
 
-### What this costs, honestly
+### What it costs the corpus: **nothing**, measured rather than asserted
 
-Three corpus files carry a `/Subtype /Type3` font, and they now draw **no text at all** where they
-previously drew the wrong text. `gov__arxiv-1206.5537.pdf` (23 pages, `/FontMatrix 1 0 0 -1 0 0`,
-`/BaseFont SDLSQD+CMMI12`) was drawing a substituted face for a Type 3 font all along and is now
-blank there. That is a lower SSIM and a **more honest document**: the scores will get worse before
-Type 3 fonts are supported, and a score that falls because a wrong answer stopped being given is
-the trade this project has made throughout.
+**This section previously claimed the refusal costs three files their text, and that was wrong.**
+The claim came from reading the code path rather than the corpus, so it was measured: both
+arrangements were run over the three affected files and the reports compared.
+
+**All 25 pages are byte-identical.** `pages.tsv` — every per-page SSIM, RMS and ink count — is the
+same with the substitution in place and with the refusal in place. The only differences in either
+report are the elapsed-seconds columns (`659.7 → 656.4`, `24.4 → 24.3`), which is what
+established that the second run had really re-run rather than silently reusing the first.
+
+**Why the hazard is real but cost nothing here** is worth stating precisely, because the two facts
+sit oddly together:
+
+- `gov__arxiv-1206.5537.pdf`'s Type 3 font is `/BaseFont /SDLSQD+CMMI12`, and there is no bundled
+  stand-in for `CMMI12` — so it answered `None` and drew nothing even before the fix. The
+  `/Times-Roman` substitution the report *does* name is a different, ordinary font on the page.
+- `pdfjs__ContentStreamCycleType3insideType3.pdf`'s page has exactly one font resource,
+  `/FType3A`, and its dictionary carries **no `/BaseFont` at all**. `substitute_for` asks what the
+  `/BaseFont` is called and answers `None` when there is no `/BaseFont` — so nothing was ever
+  substituted for the font the page actually draws with. The file's single `/BaseFont /Helvetica`
+  sits in a font dictionary that is not on that page's resource path.
+
+So the guard removes a reachable hazard without moving a single measured pixel. That is a better
+outcome than the one this entry first claimed, and it is worth being explicit that **the claim was
+wrong before it was right**: the reasoning was sound and the evidence was absent, which is the
+failure mode this document exists to catch.
 
 The two pdfjs files are about a **content stream that recurses into itself**, so the depth bound
 that case needs is a second question from the one this entry answers.
