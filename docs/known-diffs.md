@@ -10,6 +10,13 @@ cause and evidence."*
 files open; **four cannot**. This page records what the corpus found and the evidence for each
 claim.
 
+**Three files have since been made worse on purpose, so the figures below are a floor, not a
+current reading.** [D31](#d31--a-type3-font-was-silently-answered-with-a-substituted-face-which-is-a-wrong-answer-rather-than-a-gap)
+refused a Type 3 font that was being answered with a substituted face, which costs `gov__arxiv-1206.5537.pdf`
+and the two pdfjs regression files their text entirely. Those pages will score *lower* than
+recorded here, because they now draw nothing where they previously drew the wrong thing. The
+numbers were not re-measured rather than run a corpus pass and quote a figure nobody checked.
+
 **The page distribution improved a great deal and the per-file median did not move at all.**
 Against the previous full run: the pages below 0.95 went **254 → 167**, a **34% reduction**, and
 the per-page median went **0.95795 → 0.96010**. Both movements are real. **The per-file median
