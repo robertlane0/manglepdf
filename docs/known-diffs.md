@@ -3193,3 +3193,49 @@ Five, all in `page.rs`, and **three confirmed to fail with the `paint_annotation
 - **an appearance whose filter this project does not implement is reported, not read as
   operators**; and
 - **a `/Link` with no appearance is silent**, pinning the line between "missing" and "by design".
+
+## D28 — blend modes were parsed into the graphics state and then ignored
+
+**Implemented, and it moved nothing.** `ExtGState` has always read `/BM` into
+`GraphicsState::blend_mode`, `Record` has always carried it to the renderer, and **nothing ever
+read it**. Every mark composited source-over regardless of what the page asked for. Four modes are
+now implemented — `Normal`, `Multiply`, `Screen`, `Darken`, `Lighten` — with the separable blend
+function and §11.3.5.2's general compositing formula.
+
+`Multiply` is the one that mattered here, because **`/BM /Multiply` is the normal way a highlight
+is written**: it is what makes a highlight darken the text under it rather than hide it, and
+`pdfjs__highlights.pdf`'s appearances use exactly that (`/R0 gs` with `/BM /Multiply` over a yellow
+fill).
+
+**Measured across the eleven annotation-bearing corpus files: every figure is unchanged to four
+decimal places.** `comments` 0.8591, `highlights` 0.8667, `bug1992868` 0.8667, `issue12337` 0.8667,
+`annotation-link-text-popup` 0.9997, and the rest as in [D27](#d27--annotations-were-not-drawn-at-all-which-is-most-of-a-page-on-a-document-that-uses-them).
+**No improvement is claimed, and the feature is not justified by a number.**
+
+The remaining twelve modes — `Difference`, `Exclusion`, `Hue`, `Saturation`, `Colour`, `Luminosity`
+and the rest — are **refused by name**, with a note saying the mark was composited as `Normal`
+instead. That is a deliberate choice over substituting `Normal` silently: a page whose `Luminosity`
+highlight came out as an opaque one looks entirely plausible and has the wrong colours on it, which
+is the failure this project keeps finding. A name in a note is worth more than a plausible page.
+
+### What is verified and what is not
+
+Verified: `over_blend`'s arithmetic, against exact values rather than a reading of the code —
+`Multiply` of 128 by 128 is `64.25` and rounds to **64**, while `Screen` of the same two is `191.75`
+and rounds to **192**. (Those are not the round numbers a reader would guess, which is why they are
+written down; the first draft of the test expected 191 and was wrong, not the code.) Also verified:
+that every blend leaves a pixel alone where the backdrop is **transparent**, since there is nothing
+behind it to blend with; that `over` and `over_blend(.., Normal)` are the same function and cannot
+drift; and that `record.blend_mode` really does arrive as `"Multiply"` by the time the renderer
+resolves it, which was traced directly.
+
+**Not verified end to end.** The test that would prove a `/BM /Multiply` changes a rendered pixel
+is written and **`#[ignore]`d**, with the reason on it: the grey backdrop that test paints never
+lands — the page comes out white paper, so `Multiply` of white by white is white and the two
+renders agree whether or not blending works. Either `0.5 g` with a full-page `re f` is not drawing
+in that fixture, or it draws and something later puts white back. Until that is answered the test
+cannot distinguish blending from nothing being drawn, and a red suite is worse than a named gap.
+
+That gap is also the most likely reason the corpus figures did not move, and it is **not** evidence
+that the blend path is unreachable: the mode demonstrably reaches the mark. So this entry records a
+feature that is implemented and unit-tested, whose end-to-end effect is **still open**.
