@@ -596,13 +596,17 @@ fn listed(names: &[String]) -> String {
 fn g0_6_panics(ws: &Workspace) -> Check {
     let mut findings = Vec::new();
     for m in &ws.members {
-        // Only library crates carry the panic-free contract; binaries and tests are
-        // allowed to fail loudly.
-        if m.name == "xtask"
-            || m.name == "fixturegen"
-            || m.name == "mangle-cli"
-            || m.name == "mangle-ui"
-        {
+        // Only library crates carry the panic-free contract; binaries and tests are allowed to
+        // fail loudly.
+        //
+        // **Derived from the targets, not from a list of names.** The list this replaces named
+        // four crates, and one of them — `mangle-ui` — has a `lib.rs` as well as a `main.rs`, so
+        // it was exempt from a rule about libraries on the stated ground that it was only a
+        // binary. It happened to carry all six denies anyway, so nothing was missed; the point is
+        // that the exemption was not doing what its comment claimed. A name list also stops
+        // matching the moment a crate is added or split, and fails *open* when it does.
+        let has_lib = m.targets.iter().any(|t| t.kind == "lib");
+        if !has_lib {
             continue;
         }
         let root = m.targets.iter().find(|t| t.kind == "lib").map_or_else(
