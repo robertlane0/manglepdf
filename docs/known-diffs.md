@@ -3202,6 +3202,14 @@ One corpus appearance is **genuinely damaged**: `pdfjs__highlights.pdf` object 6
 stream that Python's `zlib` also refuses with *incomplete or truncated stream*. We report it and
 draw the part that decoded; that is the right behaviour and is not a defect here.
 
+**One loose end, recorded rather than guessed at.** The same damaged stream also produces a
+trailing `a JPEG image could not be decoded: Illegal start bytes:A5DA`, and that note is **not**
+explained by the part of the stream that decodes: the recoverable 648 bytes are pure path drawing
+with **no `Do` operator in them at all**, so nothing in them reaches an image. Either a second
+nested form reaches one, or the note is attached to the wrong annotation. This was not chased to a
+conclusion — it affects one annotation on one page of one file, and the file is damaged in a way
+`mutool` also has to cope with. **It is an open question, not a finding.**
+
 ### A bug found on the way, in our own code
 
 `render_page` **returned early when `/Contents` was empty**, before drawing annotations. A page
