@@ -26,7 +26,7 @@ number when `C0` is zero, and every fixture in this repository that exercises on
 | **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw, a shading pattern used as a fill colour draws per pixel, and **a form XObject executes as a nested content stream with its own `/Matrix`, `/BBox` clip and `/Resources`**. Tiling patterns and `Symbol`/`ZapfDingbats` still draw nothing |
 | **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings, the device colour spaces and `PatternType 1` tiling patterns paint, and TrueType, composite, CFF and Type 1 outlines all draw. Twelve of the standard fourteen draw from bundled metric-compatible faces when a document names one without embedding it. Type 3, mesh shadings, `/PaintType 2`, JBIG2 and JPEG 2000 do not |
 | **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | not started |
-| **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started |
+| **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started — though **annotation appearances now render** ([D27](known-diffs.md)), since a page whose ink is annotations is otherwise blank. M5 proper, and every milestone after it, is untouched |
 
 ## What exists
 

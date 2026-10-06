@@ -3106,3 +3106,90 @@ are ones where `ceil` was adding a pixel. Both pages now render at exactly the o
 - A fractional-height page builder was added beside the integer one, since a producer writing a
   `/MediaBox` as a decimal does not round it and the integer helper could not express the case at
   all — which is why this defect could not have been written as a test before.
+
+## D27 — annotations were not drawn at all, which is most of a page on a document that uses them
+
+**Fixed.** `mangle-render` **never called `Page::annots`**. A page's annotations were parsed by
+the document layer, available, and ignored by the rasteriser. On a document whose ink is
+annotations, that is not a slightly worse picture: it is a blank page.
+
+The gap is wide. **Twenty-five of the 77 corpus files carry annotations**, `pdfjs__freeculture.pdf`
+alone has **168**, and `gov__irs-f1040.pdf` has appearance streams throughout. The pdfjs annotation
+regression files exist to test exactly this and were scoring well below what they should.
+
+### What is drawn, and the one thing that is not
+
+An annotation's ink is an **appearance stream**: a form XObject whose own `/BBox` maps onto the
+annotation's `/Rect`. ISO 32000-1 §12.5.5 gives the composition in a fixed order — the box onto
+the rectangle, then the form's `/Matrix`, then `/Transform` — and it is applied in that order,
+because every other order puts the annotation somewhere plausible and wrong. `/AP /N` is used and
+`/AP /R` is not, since `/R` is what a rubber stamp shows while it is being dragged.
+
+The appearance is drawn by `paint_records`, **the same marks-to-pixels loop the page's own content
+goes through**, with the annotation's own `/Resources`. A file whose annotations name their own
+fonts therefore gets those fonts, which is the rule forms already follow.
+
+**What is not synthesised is an appearance the annotation does not carry.** A `/Highlight` with no
+`/AP` is a coloured rectangle *by convention*, and inventing one would put colour on the page the
+file never asked for; it is reported by name instead. A `/Link` or `/Popup` has no appearance by
+design and is **silent** — a note per link on every page would be noise that teaches a reader to
+skip notes. `/F` bits 2 (Hidden) and 6 (NoView) are honoured, because both mean the file says that
+ink is not on the displayed page.
+
+### Measured, before and after
+
+| file | before | after |
+|---|---|---|
+| `pdfjs__annotation-link-text-popup.pdf` | — | **0.9997** |
+| `pdfjs__annotation-squiggly.pdf` | — | **0.9986** |
+| `pdfjs__annotation-underline.pdf` | — | **0.9985** |
+| `pdfjs__annotation-strikeout.pdf` | — | **0.9985** |
+| `pdfjs__annotation-highlight.pdf` | — | **0.9976** |
+| `pdfjs__annotation-text-widget.pdf` | 0.9517 | **0.9840** |
+| `pdfjs__annotation-square-circle.pdf` | — | **0.9760** |
+| `pdfjs__bug1992868.pdf` (14 pp) | 0.8667 | 0.8667 |
+| `pdfjs__issue12337.pdf` (14 pp) | 0.8667 | 0.8667 |
+| `pdfjs__highlights.pdf` (14 pp) | 0.8667 | 0.8667 |
+| `pdfjs__comments.pdf` (14 pp) | 0.8645 | **0.8591** |
+
+**The four 14-page papers did not move, and `comments` went down by 0.005.** That is reported
+rather than buried. Their worst pages are 0.859–0.867 and the diff images show every line of text
+as a doubled grey ghost, which is the [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect)
+font-substitution signature and nothing to do with annotations: those pages are text-bound. The
+`comments` page-1 movement is not explained; its ink above tolerance fell from 22.8% to 7.0%, so
+most of the page improved and something small got worse.
+
+### The residual, named
+
+**Blend modes are parsed into the graphics state and never consumed by the renderer.** `ExtGState`
+records `/BM` as `blend_mode` and nothing reads it, so a highlight paints opaque. This matters
+*here* specifically because **`/BM /Multiply` is the normal way a highlight is written** — it is
+what makes a highlight darken the text under it rather than hide it — and the corpus appearances in
+`pdfjs__highlights.pdf` use exactly that (`/R0 gs` with `/BM /Multiply` over a yellow fill). This is
+the next thing to fix on this path.
+
+One corpus appearance is **genuinely damaged**: `pdfjs__highlights.pdf` object 667 is a Flate
+stream that Python's `zlib` also refuses with *incomplete or truncated stream*. We report it and
+draw the part that decoded; that is the right behaviour and is not a defect here.
+
+### A bug found on the way, in our own code
+
+`render_page` **returned early when `/Contents` was empty**, before drawing annotations. A page
+whose only ink is its annotations has no content stream at all — which is legal, and is how a form
+made only of stamps is written — so every annotation on such a page was dropped, silently. The
+early return is gone: the content is drawn if there is any, and the annotations either way.
+
+### Tests
+
+Five, all in `page.rs`, and **three confirmed to fail with the `paint_annotations` call removed**:
+
+- **the appearance is drawn, and the `/BBox` maps onto the `/Rect`** — the appearance's box is the
+  unit square and the rectangle is 200 units wide, so a renderer that mapped the box onto the page
+  instead would put a one-pixel mark somewhere else or nowhere. The "outside it" assertion is part
+  of the test rather than an afterthought;
+- **Hidden and NoView draw nothing**, and draw nothing *without a note*, because that is the file
+  saying what it meant;
+- **an annotation with no `/AP` is reported by name and nothing is invented** for it;
+- **an appearance whose filter this project does not implement is reported, not read as
+  operators**; and
+- **a `/Link` with no appearance is silent**, pinning the line between "missing" and "by design".
