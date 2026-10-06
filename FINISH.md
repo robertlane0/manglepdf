@@ -46,7 +46,7 @@ This document defines what **done** means. ManglePDF is done when — and only w
 - **G0.6** Library crates deny `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable`; no `todo!()`/`unimplemented!()` reachable anywhere.
 - **G0.7** Every bundled asset (fonts, CMaps, icons, themes) has a permissive-licence entry in `THIRD_PARTY_LICENSES.md`.
 - **G0.8** Icons: every icon is an SVG in `assets/icons/`, lint-clean; no raster images used as icons; the verifier reviews the icon gallery sheet and confirms they are hand-authored (no traces of cropping or auto-tracing from the mockup).
-- **G0.9** Docs exist and are current: `AGENTS.md`, `README.md`, `ARCHITECTURE`, `STATUS`, `DEPENDENCIES`, `PDF-QUIRKS`, `TESTING`, `ICONS`.
+- **G0.9** Docs exist and are current: `README.md`, `ARCHITECTURE`, `STATUS`, `DEPENDENCIES`, `PDF-QUIRKS`, `TESTING`, `ICONS`.
 - **G0.10** `cargo xtask fixtures --seed N` regenerates every Tier-A fixture byte-identically; `tools/fixturegen` has no dependency on any `mangle-*` crate.
 
 ---

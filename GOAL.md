@@ -44,7 +44,7 @@ You are not "done" when the feature list looks complete. You are done when the G
 - No C/C++ libraries for application-domain logic. The only acceptable native code is what mainstream windowing/GPU/dialog/clipboard crates bring along.
 
 ### 2.4 Platforms and offline
-Windows, macOS, Linux. Develop on the host OS you are given; keep everything portable (paths, line endings, font directories, shortcuts: ⌘ on macOS, Ctrl elsewhere). Visual target: the modern macOS-like light theme in the mockup. The build MUST work offline after the first dependency fetch (document `cargo vendor` in `AGENTS.md`).
+Windows, macOS, Linux. Develop on the host OS you are given; keep everything portable (paths, line endings, font directories, shortcuts: ⌘ on macOS, Ctrl elsewhere). Visual target: the modern macOS-like light theme in the mockup. The build MUST work offline after the first dependency fetch (document `cargo vendor` in `docs/DEV.md`).
 
 ### 2.5 Assets and licences
 Bundle only OFL/Apache/MIT/BSD/CC0 assets, each listed in `THIRD_PARTY_LICENSES.md`. Expect to bundle: a UI font (Inter), metric-compatible substitutes for the standard 14 fonts (e.g. Liberation), a symbol/dingbat solution, Playfair Display (the mockup's font; used in tests), a fallback strategy for CJK/Arabic/Hebrew/symbols (system fonts + optional bundled subset), Adobe's open CMap resources if licence-compatible. No Adobe branding, icons, or proprietary data.
@@ -305,7 +305,7 @@ Top to bottom:
 
 ## 10. Working method
 
-**Memory lives in the repo.** Keep `AGENTS.md` (how to build/test/run, conventions, pitfalls; < 200 lines; always accurate), `docs/STATUS.md` (living dashboard: current milestone, what works, what's broken, next five tasks, known bugs), `docs/decisions/NNNN-*.md` (ADRs), `docs/PDF-QUIRKS.md` (every weird real-world thing you learn, with its fixture), `docs/TESTING.md`. A fresh context must be able to resume from these alone.
+**Memory lives in the repo.** Keep `docs/DEV.md` (how to build/test/run, conventions; always accurate), `docs/STATUS.md` (living dashboard: current milestone, what works, what's broken, next five tasks, known bugs), `docs/decisions/NNNN-*.md` (ADRs), `docs/PDF-QUIRKS.md` (every weird real-world thing you learn, with its fixture), `docs/TESTING.md`. A fresh context must be able to resume from these alone.
 
 **Discipline.** Small commits, each green on fmt/clippy/test; never leave main red; WIP behind feature flags. Vertical slices first (open → render → select → edit → save → reopen elsewhere), then breadth. Attack the hard problems early — surgical write-back and text editing shape the architecture, so design provenance into the parser in M1.
 
@@ -316,7 +316,7 @@ Top to bottom:
 **Ask the human only** for things only they can supply: held-out PDFs, certificates, machine access, licensing decisions. Otherwise decide, record an ADR, proceed. Don't gold-plate P2 before the Gauntlet passes.
 
 **Milestones (each ends with a screenshot session and a `STATUS.md` update):**
-- **M0 Skeleton & policy** — workspace, lints, `xtask policy`, `AGENTS.md`/`STATUS.md`, fixturegen skeleton, empty themed window at 1536×1024 with the layout regions and tokens, icon pipeline + gallery + lint. *Exit:* policy green; shell screenshot beside the mockup.
+- **M0 Skeleton & policy** — workspace, lints, `xtask policy`, `DEV`/`STATUS`, fixturegen skeleton, empty themed window at 1536×1024 with the layout regions and tokens, icon pipeline + gallery + lint. *Exit:* policy green; shell screenshot beside the mockup.
 - **M1 Syntax & document core** — parser/xref/repair/object streams/decryption; page tree; full + incremental writer; round-trip tests; Inspector object tree. *Exit:* open/save/reopen fixtures F01–F11 with no semantic change.
 - **M2 Renderer v1 + viewer** — interpreter, paths/clips/text (embedded TrueType/CFF, standard 14), Flate/DCT, Gray/RGB/CMYK; tiles; viewer with thumbnails/zoom/navigation. *Exit:* TravelGuide page 1 looks like the mockup composition.
 - **M3 Renderer v2** — all font types and CMaps, remaining colour spaces, patterns, shadings, transparency/blend/soft masks, CCITT/JBIG2/JPX, OCGs; oracle comparisons. *Exit:* render-fidelity thresholds on F12–F22.
@@ -380,7 +380,7 @@ Top to bottom:
 
 ## 12. Deliverables and references
 
-**Deliverables:** the repo per §7; binaries `manglepdf` (GUI) and `manglepdf-cli`; `AGENTS.md`, `README.md`, `docs/{ARCHITECTURE,STATUS,DEPENDENCIES,PDF-QUIRKS,TESTING,ICONS}.md`, `THIRD_PARTY_LICENSES.md`, ADRs, `docs/design/` (mockup + tokens); `cargo xtask {policy,fixtures,gauntlet,fuzz,perf,icons}`; assets with licences; and the acceptance Evidence Pack defined in the companion prompt.
+**Deliverables:** the repo per §7; binaries `manglepdf` (GUI) and `manglepdf-cli`; `README.md`, `docs/{ARCHITECTURE,STATUS,DEPENDENCIES,PDF-QUIRKS,TESTING,ICONS}.md`, `THIRD_PARTY_LICENSES.md`, ADRs, `docs/design/` (mockup + tokens); `cargo xtask {policy,fixtures,gauntlet,fuzz,perf,icons}`; assets with licences; and the acceptance Evidence Pack defined in the companion prompt.
 
 **References (cited from memory — obtain and read the real documents; never implement from memory):** ISO 32000-2 (PDF 2.0) and ISO 32000-1 (PDF 1.7) as the primary specification; Adobe's supplement covering AES-256 R5 ("Extension Level 3"); Adobe technical notes on CMap/CIDFont files, the Type 1 font format, CFF, and Type 2 charstrings; the Adobe Glyph List specification; PDF Association interoperability guidance (annotation appearances, QuadPoints, etc.); public test corpora (PDF.js test PDFs, qpdf and poppler test files, veraPDF corpus, Isartor suite, Ghent output suite, GovDocs1) if the network allows.
 

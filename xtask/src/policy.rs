@@ -758,8 +758,10 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
     // the failure mode this check exists to remove.
     markdown_under(&root.join("docs"), root, &mut out);
     // Everything at the root as well, because `FINISH.md` and `GOAL.md` are the two documents
-    // most worth keeping honest and neither is in `REQUIRED_DOCS`. Only the one file that is
-    // not part of the repository's documentation is left out.
+    // most worth keeping honest and neither is in `REQUIRED_DOCS`. The one local file that is
+    // left out is deliberately untracked, so a gate that required it would fail on a fresh
+    // clone; everything the contract asks for is in the repository, which is the property this
+    // check exists to confirm.
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
             let path = entry.path();
