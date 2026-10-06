@@ -3329,27 +3329,122 @@ fn a_tiling_patterns_bbox_clips_its_cell() {
 
 /// A `/PaintType 2` cell paints in the colour in force when the pattern is used, and a
 /// `Pattern` colour space has replaced that colour by then — so this refuses **by name**
-/// rather than painting the cell's own colour, which would be a plausible wrong answer.
+/// An uncoloured `/PaintType 2` cell paints in the colour the page had set.
+///
+/// This is the case the old refusal covered. The cell draws a shape and takes its colour from the
+/// graphics state **as it was when the pattern was selected**, so the test sets a colour *first*
+/// and selects the pattern *second*. That order is the whole point: `cs` replaces the colour
+/// *space* and leaves the components alone, and those components are what the cell paints in.
+///
+/// Asserting the **exact colour** is what makes this a test of `/PaintType 2` rather than of
+/// tiling: the cell's own content sets no colour, so the only thing that can put ink on the page
+/// is the operator's.
 #[test]
-fn an_uncoloured_tiling_pattern_is_refused_by_name() {
-    let tiling = b"<< /Type /Pattern /PatternType 1 /PaintType 2 /TilingType 1 \
-                  /BBox [0 0 20 20] /XStep 20 /YStep 20 /Resources << >> >> \
-                  stream\n0 0 100 100 re f\nendstream";
-    let page = pattern_page(
-        "/Pattern << /P0 5 0 R >>",
-        b"/Pattern cs /P0 scn 0 0 100 100 re f",
-        &[tiling.as_slice()],
+fn an_uncoloured_tiling_cell_paints_in_the_colour_the_page_had_set() {
+    let render = render(uncoloured_pattern_page(Some("1 0 0 rg")), 1.0);
+    assert_eq!(
+        render.image.get(150, 730),
+        Some([255, 0, 0, 255]),
+        "the cell paints in the colour set before the pattern was selected: {:?}",
+        render.notes
     );
-    let render = render(page, 1.0);
-    assert!(
-        render.notes.iter().any(|n| n.contains("PaintType 2")),
-        "the note says which kind of cell it would not guess at: {:?}",
+}
+
+/// A pattern named without ever selecting the `Pattern` colour space is reported.
+///
+/// `/PatternType 2` paints in the colour in force when the pattern was selected, and the colour's
+/// **space** is what makes its components readable. A stream that goes straight to `/P0 scn`
+/// without `/Pattern cs` never records one, so there is genuinely nothing to convert — and that
+/// is reported rather than guessed at.
+///
+/// The first draft of this test asserted the same thing for a page that set *no colour*, which is
+/// not a real case: the graphics state begins with black, so a colour is always in force. It was a
+/// plausible premise that happened to be false, which is the kind of thing a test is for.
+#[test]
+fn an_uncoloured_tiling_cell_with_no_space_behind_it_is_reported() {
+    // `/PatternType 2` paints in the colour in force when the pattern was selected, and the
+    // colour's **space** is what makes its components readable. A stream that goes straight to
+    // `/P0 scn` without `/Pattern cs` never records one, so there is genuinely nothing to
+    // convert — and that is reported rather than guessed at.
+    //
+    // The first draft of this test asserted the same for a page that set *no colour*, which is
+    // not a real case: the graphics state begins black, so a colour is always in force. That was
+    // a plausible premise that happened to be false, which is what a test is for.
+    let render = render(uncoloured_pattern_page_direct(), 1.0);
+    assert_eq!(
+        render.image.get(150, 730),
+        Some([255, 255, 255, 255]),
+        "and nothing is drawn in its place: {:?}",
         render.notes
     );
     assert!(
-        region_is_fraction(&render.image, 0.05, 0.05, 0.95, 0.95, [255, 255, 255]),
-        "and nothing is drawn in its place"
+        render
+            .notes
+            .iter()
+            .any(|n| n.contains("PaintType 2") && n.contains("had set none")),
+        "the note says the cell had no colour to paint in: {:?}",
+        render.notes
     );
+}
+
+/// The same page, but naming the pattern without ever selecting the `Pattern` colour space.
+fn uncoloured_pattern_page_direct() -> Vec<u8> {
+    uncoloured_pattern_page_with("q\n1 0 0 rg\n/P0 scn 0 0 612 792 re f\nQ\n")
+}
+
+/// A page whose `/PatternType 1` cell is uncoloured, optionally preceded by a colour.
+fn uncoloured_pattern_page(colour: Option<&str>) -> Vec<u8> {
+    let paint = colour.map_or(String::new(), |c| format!("{c}\n"));
+    uncoloured_pattern_page_with(&format!(
+        "q\n{paint}/Pattern cs /P0 scn 0 0 612 792 re f\nQ\n"
+    ))
+}
+
+/// The page both of the above are: one uncoloured tiling cell filling the page.
+fn uncoloured_pattern_page_with(content: &str) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut offsets: Vec<usize> = Vec::new();
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    offsets.push(out.len());
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    offsets.push(out.len());
+    out.extend_from_slice(
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>\nendobj\n",
+    );
+    offsets.push(out.len());
+    out.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Pattern << /P0 5 0 R >> >> \
+         /Contents 4 0 R >>\nendobj\n",
+    );
+    offsets.push(out.len());
+    out.extend_from_slice(
+        format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{content}endstream\nendobj\n",
+            content.len()
+        )
+        .as_bytes(),
+    );
+    offsets.push(out.len());
+    let cell = b"0 0 40 40 re f";
+    out.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /Pattern /PatternType 1 /PaintType 2 /TilingType 1 \
+             /BBox [0 0 40 40] /XStep 40 /YStep 40 /Resources << >> /Length {} >>\nstream\n",
+            cell.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(cell);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
 }
 
 /// A tiling pattern names a stream that is not there, and the page says so instead of drawing

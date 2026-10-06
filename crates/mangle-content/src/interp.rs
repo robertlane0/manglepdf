@@ -732,6 +732,24 @@ impl Context<'_> {
         } else {
             &mut self.state.fill
         };
+        // Selecting a **pattern** keeps the space that was in force, because `cs` replaces the
+        // space and leaves the components alone — and an uncoloured (`/PaintType 2`) cell paints
+        // in exactly that colour. Without this the components survive the `cs` with nothing
+        // saying what they mean, which is the state `set_colour` has just produced and no
+        // conversion can read.
+        // Is this the `Pattern` colour space? A content stream says `/Pattern cs`, naming a
+        // resource in `/ColorSpace`, and that resource is the name `/Pattern` — so the test is
+        // against the **colour-space table**, not the pattern table. Checking `patterns` here
+        // would look for a pattern called `Pattern`, find nothing, and quietly leave the
+        // previous space unrecorded.
+        let is_pattern_space = key == "Pattern"
+            || matches!(
+                self.resources.colour_spaces.get(&key),
+                Some(Object::Name(n)) if n.as_bytes() == b"Pattern"
+            );
+        if is_pattern_space {
+            target.under = Some(Box::new(target.space.clone()));
+        }
         target.space = space;
     }
 
@@ -742,6 +760,11 @@ impl Context<'_> {
             } else {
                 &mut self.state.fill
             };
+            // Only `target.space` is replaced. `target.under` — the space the components
+            // belonged to before the pattern was selected — is deliberately **left alone**,
+            // because an uncoloured (`/PaintType 2`) cell paints in that colour and `scn`
+            // naming the pattern does not change it. Clearing it here is what made the
+            // uncoloured path look like a page that had set no colour at all.
             target.space = ColourSpace {
                 name: "Pattern".into(),
                 colorant: Some(String::from_utf8_lossy(&n).into_owned()),

@@ -1051,7 +1051,7 @@ fn tiling_fill(
     resources: &Resources,
     doc: &Document,
     placement: &Matrix,
-    _uncoloured: Option<Rgba>,
+    uncoloured: Option<Rgba>,
 ) -> Result<FillColour, String> {
     let Some(object) = resources.patterns.get(name).cloned() else {
         return Err(format!(
@@ -1059,13 +1059,25 @@ fn tiling_fill(
         ));
     };
     let pattern = tiling_pattern(name, &object, &|o| doc.resolve_object(o))?;
-    if pattern.paint_type == PaintType::Uncoloured {
-        return Err(format!(
-            "a {op} in the uncoloured tiling pattern `/{name}` was found and not drawn: \
-             /PaintType 2 paints in the colour in force when the pattern is used, and a \
-             `Pattern` colour space has replaced that colour by then"
-        ));
-    }
+    // `/PaintType 2` is an **uncoloured** cell: it paints a shape and takes its colour from
+    // whatever the graphics state held when the pattern was selected. That colour survives the
+    // `cs` on the colour's own components, and `Colour::under` carries the space they belong to,
+    // so there is something to convert. A cell with no such colour — because the page selected a
+    // pattern before it ever set one, so the components are whatever the state started as — is
+    // **reported by name** rather than painted some arbitrary colour.
+    let uncoloured = match pattern.paint_type {
+        PaintType::Coloured => None,
+        PaintType::Uncoloured => match uncoloured {
+            Some(c) => Some(c),
+            None => {
+                return Err(format!(
+                    "a {op} in the uncoloured tiling pattern `/{name}` was found and not drawn: \
+                     a /PaintType 2 cell paints in the colour in force when the pattern is \
+                     selected, and the page had set none"
+                ));
+            }
+        },
+    };
     // The cell's own size on the device, which is its box scaled — and which is asked of the
     // dictionary before anything is allocated, so a hostile `/BBox` costs a few bytes of
     // parsing rather than a gigabyte of image.
@@ -1126,7 +1138,7 @@ fn tiling_fill(
             pattern.bbox.right,
             pattern.bbox.top,
         ),
-        uncoloured: None,
+        uncoloured,
     })
 }
 
@@ -1766,7 +1778,14 @@ fn draw_mark(
                             // is used, and a `Pattern` colour space has replaced that colour by
                             // now, so there is nothing here to give it. Refused by name in
                             // `tiling_fill` rather than guessed at.
-                            pattern_fill(Paint::Fill, name, resources, doc, placement, None),
+                            pattern_fill(
+                                Paint::Fill,
+                                name,
+                                resources,
+                                doc,
+                                placement,
+                                colour.to_rgba(None),
+                            ),
                     ) {
                         Ok(paint) => {
                             fill::polygon(device, &polygon, rule, &paint, record.fill_alpha, blend);

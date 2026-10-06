@@ -434,6 +434,15 @@ impl ColourSpace {
 pub struct Colour {
     pub space: ColourSpace,
     pub components: Vec<f64>,
+    /// **For a `Pattern` colour space only**: the space these `components` belong to.
+    ///
+    /// `cs` replaces the colour *space* and leaves the components alone, so after selecting a
+    /// pattern the components still hold the colour that was in force — which is exactly what a
+    /// `/PaintType 2` cell paints in, "the colour that shall be used with the pattern". Without
+    /// this the components are left describing a space nobody recorded and no conversion of them
+    /// is possible. It is carried **only** for a pattern: for every other space the current one
+    /// is the only thing that matters, and keeping the old one around would invite it to be used.
+    pub under: Option<Box<ColourSpace>>,
 }
 
 impl Colour {
@@ -443,6 +452,7 @@ impl Colour {
         Self {
             space: ColourSpace::device_gray(),
             components: vec![0.0],
+            under: None,
         }
     }
 
@@ -562,6 +572,19 @@ impl Colour {
         // kind of space behind it. Matching on the name is what kept this arm unreachable
         // for every real file, which is most of why a separation looked refused rather than
         // unconverted. The name is accepted too, for a space built without a table.
+        // A `Pattern` space's own components are a pattern *name* rather than a colour, so
+        // there is nothing to convert from it directly. An uncoloured pattern paints in the
+        // colour that was in force before the `cs`, and `under` is that colour's space — the
+        // components are untouched by `cs` and already hold its values.
+        if let Some(under) = self.under.as_deref() {
+            let mut resolved = self.clone();
+            resolved.space = under.clone();
+            // `under` is **cleared** on the resolved colour, or this arm fires on it again and
+            // recurses until the depth bound stops it — which returns `None` and makes an
+            // uncoloured pattern look exactly like a page that had set no colour at all.
+            resolved.under = None;
+            return resolved.to_rgba_at(ink, depth + 1);
+        }
         if self.space.tint.is_some() || matches!(self.space.name.as_str(), "Separation" | "DeviceN")
         {
             // Never black, which is what this used to fall back to and which is a colour the
@@ -661,6 +684,7 @@ impl Colour {
         let mut converted = Colour {
             space: alternate.clone(),
             components,
+            under: None,
         };
         // Clamped to the alternate's own range here, once, rather than in the device arms
         // below: a transform is entitled to return a value outside 0 to 1 and the space it
@@ -1907,6 +1931,7 @@ mod tests {
         let mut wanted = Colour {
             space: tint.alternate.clone().expect("the space names one"),
             components: out,
+            under: None,
         };
         for c in &mut wanted.components {
             *c = c.clamp(0.0, 1.0);
@@ -2392,6 +2417,7 @@ mod tests {
         let hand_built = Colour {
             space: ColourSpace::device_rgb(),
             components: vec![1.0],
+            under: None,
         };
         assert!(hand_built.to_rgba(None).is_none());
     }
@@ -2401,6 +2427,7 @@ mod tests {
         let c = Colour {
             space: ColourSpace::device_rgb(),
             components: vec![2.0, -1.0, 0.5],
+            under: None,
         };
         let rgba = c.to_rgba(None).expect("converts");
         assert_eq!((rgba.r, rgba.g, rgba.b), (1.0, 0.0, 0.5));
