@@ -54,6 +54,21 @@ pub enum Shading {
         function: Function,
         extend: [bool; 2],
     },
+    /// Type 7 (`Dr`): a radial gradient whose radius fraction is passed through a function
+    /// before it reaches the colour function.
+    ///
+    /// The geometry is a type 3 exactly — six coordinates, two circles. What type 7 adds is
+    /// `/D`, a function of the parameter alone, so the colour is `CF(D(t))` rather than `CF(t)`.
+    /// That is the whole of the difference, and it is why this is its own variant rather than a
+    /// flag on `Radial`: the parameter is transformed **before** the colour function sees it,
+    /// while the coverage a caller derives from the raw parameter must not be.
+    Drift {
+        coords: Vec<f64>,
+        function: Function,
+        /// `/D`, the drift applied to the radius fraction.
+        drift: Function,
+        extend: [bool; 2],
+    },
 }
 
 impl Shading {
@@ -104,8 +119,18 @@ impl Shading {
                 function,
                 extend,
             }),
-            // Types 1, 4, 5, 6 and 7 need either a pattern colour or a mesh this project
-            // does not build. Reporting them is better than painting them wrongly.
+            // Type 7 is a type 3 with `/D` applied to the parameter, so it is read here rather
+            // than refused with the mesh types. A `/D` that cannot be read is a **refusal** and
+            // not a plain radial: dropping the drift would paint a gradient the file did not ask
+            // for, and it would look entirely plausible.
+            7 if coords.len() >= 6 => Some(Self::Drift {
+                coords,
+                function,
+                drift: Function::parse(dict.get("D")?, resolve)?,
+                extend,
+            }),
+            // Types 1, 4, 5 and 6 are a mesh, or need a pattern colour this project does not
+            // build. Reporting them is better than painting them wrongly.
             _ => None,
         }
     }
@@ -131,6 +156,22 @@ impl Shading {
                 let t = ((x - p0.0) * d.0 + (y - p0.1) * d.1) / length_squared;
                 Some(t)
             }
+            Self::Drift { coords, drift, .. } => {
+                let (x0, y0, r0) = (
+                    coords.first().copied()?,
+                    coords.get(1).copied()?,
+                    coords.get(2).copied()?,
+                );
+                let (x1, y1, r1) = (
+                    coords.get(3).copied()?,
+                    coords.get(4).copied()?,
+                    coords.get(5).copied()?,
+                );
+                // `D` is applied to the radius fraction, not to the raw distance, which is what
+                // makes it a drift rather than a different circle.
+                let t = radial_parameter(x, y, x0, y0, r0, x1, y1, r1)?;
+                drift.apply1(t)?.first().copied()
+            }
             Self::Radial { coords, .. } => {
                 let (x0, y0, r0) = (
                     coords.first().copied()?,
@@ -151,7 +192,9 @@ impl Shading {
     #[must_use]
     pub fn extend(&self) -> [bool; 2] {
         match self {
-            Self::Axial { extend, .. } | Self::Radial { extend, .. } => *extend,
+            Self::Axial { extend, .. }
+            | Self::Radial { extend, .. }
+            | Self::Drift { extend, .. } => *extend,
         }
     }
 
@@ -163,7 +206,7 @@ impl Shading {
     /// comes out negative. An axial gradient has no such disc and never reports one.
     #[must_use]
     pub fn inner_fill(&self, x: f64, y: f64) -> bool {
-        let Self::Radial { coords, .. } = self else {
+        let (Self::Radial { coords, .. } | Self::Drift { coords, .. }) = self else {
             return false;
         };
         let cx = coords.first().copied().unwrap_or(0.0);
@@ -179,7 +222,9 @@ impl Shading {
         // point is *visible* is the coverage's business, decided from the raw parameter.
         let t = t.clamp(0.0, 1.0);
         let function = match self {
-            Self::Axial { function, .. } | Self::Radial { function, .. } => function,
+            Self::Axial { function, .. }
+            | Self::Radial { function, .. }
+            | Self::Drift { function, .. } => function,
         };
         let values = function.apply1(t)?;
         // A gradient's function produces colour components in the space its `/ColorSpace`
@@ -414,7 +459,7 @@ pub fn bounds(shading: &Shading) -> Option<Rect> {
                 y1: y0.max(y1),
             })
         }
-        Shading::Radial { coords, .. } => {
+        Shading::Radial { coords, .. } | Shading::Drift { coords, .. } => {
             let (x0, y0, r0) = (
                 coords.first().copied()?,
                 coords.get(1).copied()?,
@@ -1137,7 +1182,7 @@ mod tests {
                 function,
                 extend: [true, true],
             },
-            other @ Shading::Radial { .. } => other,
+            other => other,
         };
         paint(
             &mut device,
@@ -1237,6 +1282,87 @@ mod tests {
         const {
             assert!(MAX_STACK > 16);
             assert!(MAX_PROGRAM > 16);
+        }
+    }
+
+    /// `/Coords` as the array of numbers a shading carries.
+    fn coords6(v: &[f64]) -> Object {
+        Object::Array(v.iter().copied().map(Object::Real).collect())
+    }
+
+    /// A type-2 exponential function dictionary, `C0 -> C1` over `N`.
+    fn ramp6(c0: f64, c1: f64, n: f64) -> Object {
+        let mut f = Dict::new();
+        f.set("FunctionType", Object::Int(2));
+        f.set("Domain", coords6(&[0.0, 1.0]));
+        f.set("C0", coords6(&[c0]));
+        f.set("C1", coords6(&[c1]));
+        f.set("N", Object::Real(n));
+        Object::Dict(f)
+    }
+
+    /// A `/ShadingType 7` dictionary, with or without the `/D` it needs.
+    fn drift_dict(with_d: bool) -> Dict {
+        let mut dict = Dict::new();
+        dict.set("ShadingType", Object::Int(7));
+        dict.set("ColorSpace", Object::name("DeviceGray"));
+        dict.set("Coords", coords6(&[0.0, 0.0, 0.0, 0.0, 0.0, 1.0]));
+        dict.set("Function", ramp6(0.0, 1.0, 1.0));
+        if with_d {
+            dict.set("D", ramp6(0.0, 2.0, 1.0));
+        }
+        dict
+    }
+
+    /// A `/ShadingType 7` drift shading is read, and the drift reaches the colour.
+    ///
+    /// Both halves are asserted, because they are separate facts. That type 7 is **read at all**
+    /// matters: it used to be refused by name alongside the mesh types. That `/D` reaches the
+    /// colour matters because a type 7 painted as a plain type 3 is a gradient the file did not
+    /// ask for, and it looks entirely plausible.
+    ///
+    /// `/D` doubles the parameter, which is *not* the identity, so the **midpoint** is the probe:
+    /// at half the radius the drift has already carried the parameter past 1, and the colour is
+    /// white where a type 7 painted without its drift would be mid-grey.
+    #[test]
+    fn a_drift_shading_applies_its_d_function_to_the_parameter() {
+        let shading = Shading::parse(&Object::Dict(drift_dict(true)), &|o| Some(o.clone()))
+            .expect("a type 7 shading is read");
+        assert!(
+            matches!(shading, Shading::Drift { .. }),
+            "it is a drift rather than a plain radial"
+        );
+        let mid = shading.parameter_at(0.5, 0.0).expect("a parameter");
+        let colour = shading.colour_at(mid).expect("a colour");
+        assert!(
+            (colour[0] - 1.0).abs() < 0.01,
+            "at half the radius the drift has reached the end of the colour function, so it is \
+             white; painted without its drift it would be mid-grey here: {colour:?}"
+        );
+    }
+
+    /// A type 7 whose `/D` cannot be read is **refused**, not painted as a plain radial.
+    ///
+    /// This is why type 7 is its own variant rather than a flag on `Radial`: dropping the drift
+    /// would produce a gradient, and a plausible one, from a file that asked for something else.
+    #[test]
+    fn a_drift_shading_with_no_d_function_is_refused() {
+        assert!(
+            Shading::parse(&Object::Dict(drift_dict(false)), &|o| Some(o.clone())).is_none(),
+            "with no /D there is nothing to drift by, so it is not a type 7 this can paint"
+        );
+    }
+
+    /// The mesh types are still refused. Adding type 7 must not have widened what is accepted.
+    #[test]
+    fn the_mesh_types_are_still_refused() {
+        for kind in [1, 4, 5, 6] {
+            let mut dict = drift_dict(true);
+            dict.set("ShadingType", Object::Int(kind));
+            assert!(
+                Shading::parse(&Object::Dict(dict), &|o| Some(o.clone())).is_none(),
+                "type {kind} is a mesh and is still not painted"
+            );
         }
     }
 }
