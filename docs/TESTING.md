@@ -73,6 +73,34 @@ passed, so they are worth having in the default suite. The long one needs the co
 (`cargo xtask corpus fetch`) and `mutool` and `pdftotext` installed for the halves that
 compare against them.
 
+**Run the long one under a memory ceiling and in the background.** It renders every page
+twice and holds several pages of raw pixels at a time, and three runs have been killed partway
+through — the last of them after 36 of 77 files, which left a report describing a third of the
+corpus. The harness now writes each file's report and its rows in `results.tsv` as that file
+finishes, so a killed run leaves most of its work behind, but the run still has to survive to be
+worth anything. A cgroup bound is the way to give it the chance:
+
+```sh
+setsid nohup systemd-run --user --scope --quiet \
+  -p MemoryMax=8G -p MemorySwapMax=0 \
+  env CARGO_INCREMENTAL=0 cargo test -j 1 -p mangle-render --test wild_corpus \
+  -- --ignored --nocapture > /tmp/corpus-run.log 2>&1 < /dev/null & disown
+```
+
+`MemorySwapMax=0` matters as much as `MemoryMax`: with swap available the kernel will happily
+push a runaway page out to disk and the run slows to a crawl instead of failing, which is worse
+than either outcome. Confirm the ceiling took rather than assuming it:
+
+```sh
+systemctl --user show run-p<cargo-pid>-i<n>.scope -p MemoryMax -p MemorySwapMax -p MemoryPeak
+```
+
+The bound is headroom rather than a constraint — a full 77-file run peaked at 1.6 GiB, so 8 GiB
+leaves room for a machine that is doing something else at the time. Raise it for a machine with
+more headroom; do not lower it below what the largest single page needs. Build the test binary
+before starting (`cargo test -p mangle-render --test wild_corpus --no-run`) so that
+compilation does not compete with the run for the same ceiling.
+
 **It asserts nothing about any individual file**, on purpose. A corpus test's job is to
 find things; a threshold on a document nobody has read yet turns the first unexpected result
 into a permanent red build, and the response to a permanent red build is to raise the

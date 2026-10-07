@@ -671,8 +671,14 @@ because a corpus's job is to find things and a threshold on a document nobody ha
 turns the first surprise into a permanent red build.
 
 The measurements and their evidence are in `docs/known-diffs.md`, which records the latest full
-77-file run (**738 pages compared, page median SSIM 0.96010, 167 pages below 0.95**, 73 files
-opened, 4 closed, 16326.09s, 0 panicked) and, entry by entry, what each fix since has moved.
+77-file run (**740 pages compared, page median SSIM 0.96015, 165 pages below 0.95**, 73 files
+opened, 4 closed, 16646.23s, 0 panicked) and, entry by entry, what each fix since has moved.
+That run is the first after D26, so it is the first to compare all **352** pages of
+`pdfjs__freeculture.pdf`; the two that previously produced no SSIM at all now do, which is where
+the move from 738 pages to 740 comes from. It was run under a hard 8 GiB cgroup ceiling
+(`systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0`) and peaked at 1.6 GiB, so the
+bound is headroom rather than a constraint — the run is CPU-bound in an unoptimized build. The
+same bound is what makes a run survivable: three earlier ones were lost partway through.
 Four findings dominated the run that started all this, and three of them are fixed:
 
 1. **`render_page` renders a blank page for any Flate-compressed content stream.** All 542
