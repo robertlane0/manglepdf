@@ -279,9 +279,14 @@ fn read_space(
                 .and_then(resolve)
                 .or_else(|| array.get(1).cloned());
             let declared = IccBased::from_profile(profile.as_ref());
+            // `/Alternate` first, then the space the profile's own header names: the same
+            // order the fill path uses, so an `ICCBased` image and an `ICCBased` colour in one
+            // file are read through one space rather than two. See
+            // `mangle_content::ColourSpace::through_alternate`.
             if let Some(space) = declared
                 .alternate
                 .as_deref()
+                .or(declared.declared.as_deref())
                 .and_then(|name| simple_space(name.as_bytes()))
             {
                 return Some(space);
@@ -1739,6 +1744,49 @@ mod tests {
         let (raster, _) = decode_ok(&icc_image(1, Some("DeviceGray"), vec![128]));
         let got = raster.at(0, 0);
         assert_eq!(got[0..3], [got[0], got[0], got[0]], "grey is grey: {got:?}");
+
+        // A profile that names no `/Alternate` still states its space in its own header, and
+        // the image path reads it exactly as the fill path does. Without this the two paths
+        // disagree inside one file: a three-component `GRAY` profile would be read as
+        // subtractively by nothing and as RGB by the image, which is the reading the header
+        // exists to correct.
+        let header_image = |signature: &[u8; 4], components: i64, data: Vec<u8>| {
+            let mut raw = vec![0u8; 128];
+            raw[36..40].copy_from_slice(b"acsp");
+            raw[16..20].copy_from_slice(signature);
+            let mut pd = Dict::new();
+            pd.set("N", Object::Int(components));
+            let mut d = Dict::new();
+            d.set("Width", Object::Int(1));
+            d.set("Height", Object::Int(1));
+            d.set("BitsPerComponent", Object::Int(8));
+            d.set(
+                "ColorSpace",
+                Object::Array(vec![
+                    Object::name("ICCBased"),
+                    Object::Stream(Stream::new(pd, raw)),
+                ]),
+            );
+            Stream::new(d, data)
+        };
+        // 255 0 0 is red read as RGB and magenta read as CMYK, so the two readings differ.
+        let (raster, notes) = decode_ok(&header_image(b"RGB ", 3, vec![255, 0, 0]));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(
+            raster.at(0, 0)[..3],
+            [255, 0, 0],
+            "the header says RGB, so the components are RGB"
+        );
+        // A `/N` of 4 with a header saying `CMYK` is the case `/N` alone also gets right, so
+        // it does not discriminate. This one does: `/N` reads 4, which alone would be CMYK,
+        // while the header says three-component RGB, and the header is the profile's own
+        // statement of what its samples are.
+        let (raster, _) = decode_ok(&header_image(b"RGB ", 4, vec![255, 0, 0, 0]));
+        assert_eq!(
+            raster.at(0, 0)[..3],
+            [255, 0, 0],
+            "the header says RGB where /N alone would say CMYK, so the header is read"
+        );
 
         // With no alternate the count is still enough to read the samples, which is what
         // an image does where a colour cannot.
