@@ -10,6 +10,7 @@ use std::sync::Arc;
 use mangle_font::metrics::DeclaredWidths;
 
 use mangle_syntax::object::{Dict, Object};
+use mangle_syntax::stream::decode_stream;
 
 use crate::function::Function;
 use crate::matrix::Matrix;
@@ -125,20 +126,29 @@ impl RenderMode {
 /// profile that satisfies it converts to exactly what its `/Alternate` says. One that does
 /// not is reported rather than guessed at, which is what keeps a damaged profile from
 /// turning into a wrong colour instead of a missing one.
+///
+/// A third fact is read from the profile's own bytes rather than its dictionary: the ICC
+/// header names the space its components are in, at offset 16. That is not a fallback for
+/// `/Alternate` but the same statement made twice, and where they agree there is nothing to
+/// decide. It is read because a file may omit `/Alternate` and still say perfectly plainly
+/// what its components are — see [`IccBased::declared_space`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IccBased {
     /// `/Alternate`, absent where the profile names no space to convert through.
     pub alternate: Option<String>,
     /// `/N`, absent where the profile could not be read.
     pub components: Option<usize>,
+    /// The space the profile's own header names, absent where it could not be read.
+    pub declared: Option<String>,
 }
 
 impl IccBased {
-    /// Read what an ICC stream's dictionary declares.
+    /// Read what an ICC stream's dictionary declares, and what its header says.
     ///
     /// `profile` is the stream the colour space array names, resolved: `/N` and
     /// `/Alternate` are keys of that stream's dictionary and are usually an indirect
-    /// object away from the space that names them.
+    /// object away from the space that names them. The header is read from the same
+    /// stream's bytes.
     #[must_use]
     pub fn from_profile(profile: Option<&Object>) -> Self {
         let dict = profile.and_then(Object::as_dict);
@@ -151,7 +161,51 @@ impl IccBased {
                 .and_then(|d| d.get("N"))
                 .and_then(Object::as_i64)
                 .and_then(|n| usize::try_from(n).ok()),
+            declared: profile.and_then(Self::declared_space),
         }
+    }
+
+    /// The device space an ICC profile says its components are in, read from its header.
+    ///
+    /// Bytes 12 to 16 of an ICC profile are the *data colour space* — `GRAY `, `RGB `,
+    /// `CMYK`, `Lab ` — and it is a fixed field of the format, present in every profile
+    /// whatever produced it. The device class sits in the four bytes before it and is a
+    /// different fact (`mntr` for a display profile, which is not a colour space), so the
+    /// offset is 16 and not 12; reading the wrong one gives a four-letter string that is not
+    /// a space at all, which is how this field gets read wrong.
+    ///
+    /// `None` where the stream has no header to read or the header does not name a device
+    /// space this code knows. Both refusals are deliberate: a profile whose header is absent
+    /// or is not an ICC profile has said nothing, and a space name outside the six below is
+    /// not one that can be read as components without a transform this code does not apply.
+    ///
+    /// The stream is decoded to reach the header, because a profile may be compressed —
+    /// `gov__nist-fips197.pdf`, the file this exists for, stores both of its profiles behind a
+    /// `/FlateDecode`, and the stored bytes of a compressed stream are not a header at all.
+    /// Only the first twenty bytes are ever wanted, but a filter chain runs over the whole
+    /// stream because that is what a filter is; a profile is a few kilobytes.
+    #[must_use]
+    pub fn declared_space(profile: &Object) -> Option<String> {
+        let Object::Stream(stream) = profile else {
+            return None;
+        };
+        // The data colour space field starts at 16.
+        let decoded = decode_stream(stream);
+        let raw = decoded.data.get(16..20)?;
+        let name = match raw {
+            b"GRAY" => "DeviceGray",
+            b"RGB " => "DeviceRGB",
+            b"CMYK" => "DeviceCMYK",
+            b"Lab " => "DeviceLab",
+            b"XYZ " => "DeviceXYZ",
+            b"2CLR" => "DeviceCMYK",
+            b"3CLR" => "DeviceRGB",
+            b"4CLR" => "DeviceCMYK",
+            b"5CLR" => "DeviceRGB",
+            b"6CLR" => "DeviceCMYK",
+            _ => return None,
+        };
+        Some(name.to_string())
     }
 }
 
@@ -357,13 +411,22 @@ impl ColourSpace {
     /// The space the components are finally read in, following `/Alternate`.
     ///
     /// `None` when there is no ICC profile behind the name, or when the profile names no
-    /// alternate — and in that second case `None` is the answer rather than a fallback:
-    /// the profile is the only thing that could convert the components, no profile is
-    /// applied, and a colour invented out of them would be a wrong answer wearing a
-    /// plausible hat.
+    /// space to read through at all — and in that second case `None` is the answer rather
+    /// than an invention: the profile is the only thing that could convert the components,
+    /// no profile is applied, and a colour made up out of them would be a wrong answer
+    /// wearing a plausible hat.
+    ///
+    /// `/Alternate` is what the file asks for and is used when it is there. A profile that
+    /// omits it has still declared what its components are in its own header, and a file
+    /// that does that is not damaged — it is a producer writing the modern, shorter
+    /// declaration. Reading the header is a second opinion on a fact `/Alternate` also
+    /// states, not a substitute for a transform: no profile is applied either way, so a
+    /// colour read through this is the file's own raw components, exactly as it would be
+    /// through an `/Alternate` that named the same space.
     #[must_use]
     pub fn through_alternate(&self) -> Option<Self> {
-        let alternate = self.icc.as_ref()?.alternate.as_ref()?;
+        let icc = self.icc.as_ref()?;
+        let alternate = icc.alternate.as_ref().or(icc.declared.as_ref())?;
         Some(Self {
             name: alternate.clone(),
             colorant: None,
@@ -418,11 +481,18 @@ impl ColourSpace {
                      does not convert",
                     self.name
                 ),
-                None => format!(
-                    "the `ICCBased` space `{}`, whose profile names no `/Alternate` to read it \
-                     through",
-                    self.name
-                ),
+                None => match &icc.declared {
+                    Some(declared) => format!(
+                        "the `ICCBased` space `{}`, whose profile names no `/Alternate` and \
+                         whose header declares the `/{declared}` this does not convert",
+                        self.name
+                    ),
+                    None => format!(
+                        "the `ICCBased` space `{}`, whose profile names no `/Alternate` to read \
+                         it through",
+                        self.name
+                    ),
+                },
             },
             None => self.name.clone(),
         }
@@ -1684,6 +1754,7 @@ mod tests {
             icc: Some(IccBased {
                 alternate: alternate.map(str::to_string),
                 components: Some(components),
+                declared: None,
             }),
             tint: None,
         }
@@ -1779,6 +1850,180 @@ mod tests {
     #[test]
     fn an_icc_space_still_reports_the_name_the_stream_used() {
         assert!(icc_space(Some("DeviceRGB"), 3).describe().contains("CS0"));
+    }
+
+    // ── The header's own declaration of the space ───────────────────────────
+
+    /// An ICC profile whose bytes declare a data colour space.
+    fn profile_declaring(signature: &[u8; 4]) -> Object {
+        let mut raw = vec![0u8; 128];
+        raw[36..40].copy_from_slice(b"acsp");
+        raw[16..20].copy_from_slice(signature);
+        Object::Stream(Stream::new(Dict::new(), raw))
+    }
+
+    /// An `ICCBased` space whose profile names no `/Alternate` but whose header does.
+    fn icc_space_declaring(signature: &[u8; 4]) -> ColourSpace {
+        let icc = IccBased::from_profile(Some(&profile_declaring(signature)));
+        assert_eq!(icc.alternate, None, "the fixture names no `/Alternate`");
+        ColourSpace {
+            name: "CS0".into(),
+            colorant: None,
+            icc: Some(icc),
+            tint: None,
+        }
+    }
+
+    #[test]
+    fn a_profile_header_names_the_space_its_components_are_in() {
+        assert_eq!(
+            IccBased::declared_space(&profile_declaring(b"GRAY")).as_deref(),
+            Some("DeviceGray")
+        );
+        assert_eq!(
+            IccBased::declared_space(&profile_declaring(b"RGB ")).as_deref(),
+            Some("DeviceRGB")
+        );
+        assert_eq!(
+            IccBased::declared_space(&profile_declaring(b"CMYK")).as_deref(),
+            Some("DeviceCMYK")
+        );
+    }
+
+    /// A profile may be compressed, and the stored bytes of a compressed stream are not a
+    /// header. `gov__nist-fips197.pdf` stores both of its profiles behind a `/FlateDecode`
+    /// and this is the case that reads them: reading `Stream::raw` directly returns four
+    /// bytes of zlib and nothing at all, which is a refusal that looks like a missing
+    /// feature rather than a missing decode.
+    #[test]
+    fn a_compressed_profile_is_decoded_before_its_header_is_read() {
+        let mut raw = vec![0u8; 128];
+        raw[36..40].copy_from_slice(b"acsp");
+        raw[16..20].copy_from_slice(b"GRAY");
+        // Stored as a `/FlateDecode` stream, which is what the corpus file actually holds.
+        let compressed = mangle_filters::deflate(&raw, mangle_filters::DeflateLevel::Default);
+        let mut dict = Dict::new();
+        dict.insert("Filter".into(), Object::name("FlateDecode"));
+        let stream = Object::Stream(Stream::new(dict, compressed));
+        assert_eq!(
+            IccBased::declared_space(&stream).as_deref(),
+            Some("DeviceGray"),
+            "the header is behind the filter, so the filter has to run first"
+        );
+    }
+
+    /// The device class sits in the four bytes *before* the data colour space and is a
+    /// different fact — `mntr` for a display profile, which is not a space at all. Reading
+    /// offset 12 instead of 16 is the mistake this pins down, because it yields a plausible
+    /// four characters that name nothing.
+    #[test]
+    fn the_device_class_is_not_mistaken_for_the_data_colour_space() {
+        let mut raw = vec![0u8; 128];
+        raw[12..16].copy_from_slice(b"mntr");
+        raw[16..20].copy_from_slice(b"GRAY");
+        raw[36..40].copy_from_slice(b"acsp");
+        assert_eq!(
+            IccBased::declared_space(&Object::Stream(Stream::new(Dict::new(), raw))).as_deref(),
+            Some("DeviceGray"),
+            "the class is not the space, and the space is four bytes later"
+        );
+    }
+
+    #[test]
+    fn a_space_this_code_cannot_read_as_components_names_nothing() {
+        assert_eq!(
+            IccBased::declared_space(&profile_declaring(b"8CLR")),
+            None,
+            "an unknown signature is a refusal rather than a guess"
+        );
+    }
+
+    #[test]
+    fn a_stream_too_short_to_have_a_header_declares_nothing() {
+        assert_eq!(
+            IccBased::declared_space(&Object::Stream(Stream::new(Dict::new(), vec![0u8; 8]))),
+            None
+        );
+    }
+
+    #[test]
+    fn something_that_is_not_a_stream_declares_nothing() {
+        assert_eq!(IccBased::declared_space(&Object::Null), None);
+    }
+
+    /// The case this change exists for: `gov__nist-fips197.pdf` page 1 in the wild corpus
+    /// paints its title in `[/ICCBased …]` whose profile has `/N 1` and no `/Alternate`. The
+    /// profile is a `GRAY` one, so the file has said what its single component is and the
+    /// page is no longer refused for it.
+    #[test]
+    fn an_iccbased_space_with_no_alternate_converts_through_its_declared_space() {
+        let mut c = Colour::black();
+        c.set(icc_space_declaring(b"GRAY"), &[0.5]);
+        let rgba = c
+            .to_rgba(None)
+            .expect("a profile that declares GRAY gives a colour");
+        assert_eq!(
+            (rgba.r, rgba.g, rgba.b),
+            (0.5, 0.5, 0.5),
+            "the component is the gray level itself, with no transform applied"
+        );
+        assert_eq!(rgba.a, 1.0);
+    }
+
+    /// `/Alternate` is what the file asks for. Where a file states a space twice and the two
+    /// statements agree nothing is decided, and where they disagree the file is answered
+    /// according to the one it wrote for this purpose.
+    #[test]
+    fn an_alternate_wins_over_the_header() {
+        let Object::Stream(header) = profile_declaring(b"GRAY") else {
+            return;
+        };
+        let mut dict = header.dict.clone();
+        dict.insert("Alternate".into(), Object::name("DeviceRGB"));
+        let icc = IccBased::from_profile(Some(&Object::Stream(Stream::new(dict, header.raw))));
+        // The two statements genuinely disagree here, which is the only case worth testing:
+        // a GRAY profile told to be read as RGB.
+        assert_eq!(icc.declared.as_deref(), Some("DeviceGray"));
+        assert_eq!(icc.alternate.as_deref(), Some("DeviceRGB"));
+        let space = ColourSpace {
+            name: "CS0".into(),
+            colorant: None,
+            icc: Some(icc),
+            tint: None,
+        };
+        assert_eq!(
+            space.through_alternate().map(|s| s.name).as_deref(),
+            Some("DeviceRGB"),
+            "the file's own `/Alternate` is the one that is read"
+        );
+    }
+
+    /// A profile that says nothing at all is still refused, because there is then no second
+    /// opinion either and a colour invented out of the components would be wrong.
+    #[test]
+    fn a_profile_that_declares_nothing_at_all_is_still_refused() {
+        let object = Object::Stream(Stream::new(Dict::new(), vec![0u8; 128]));
+        let icc = IccBased::from_profile(Some(&object));
+        assert_eq!(icc.declared, None);
+        let space = ColourSpace {
+            name: "CS0".into(),
+            colorant: None,
+            icc: Some(icc),
+            tint: None,
+        };
+        assert!(space.through_alternate().is_none());
+    }
+
+    /// A report that refuses a colour has to say why, and where a header did say something
+    /// the report is wrong to claim the file declared nothing.
+    #[test]
+    fn a_report_names_the_space_the_header_declared() {
+        let said = icc_space_declaring(b"GRAY").describe();
+        assert!(said.contains("ICCBased") && said.contains("CS0"), "{said}");
+        assert!(
+            !said.contains("names no `/Alternate` to read it through"),
+            "and it must not claim the file said nothing when its header said GRAY: {said}"
+        );
     }
 
     #[test]
@@ -2173,6 +2418,7 @@ mod tests {
             icc: Some(IccBased {
                 alternate: Some("DeviceRGB".into()),
                 components: Some(3),
+                declared: None,
             }),
             tint: None,
         };

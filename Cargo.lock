@@ -2032,6 +2032,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "mangle-doc",
+ "mangle-filters",
  "mangle-font",
  "mangle-syntax",
  "thiserror 2.0.21",
