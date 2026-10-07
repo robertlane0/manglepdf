@@ -1001,7 +1001,7 @@ concentrated in a handful of files too:
 | pages | file | what it is |
 |---|---|---|
 | 61 | `gov__nist-nistir7255.pdf` | JPEG 2000 — **formally out of scope** (D22) |
-| 25 | `gov__nist-fips197.pdf` | **diagnosed** (D24): 24 pages are the font-substitution policy, **1 page is a real gap** — an `ICCBased` profile with no `/Alternate` |
+| 24 | `gov__nist-fips197.pdf` | **all font substitution** (D24). The 25th page, the one real gap, is **fixed** — [D30](known-diffs.md) reads the space the profile's own header declares; page 1 went 0.7564 → 0.9932 |
 | 22 | `pdfjs__TAMReview.pdf` | the same font-substitution policy |
 | 14 | `gov__nist-nistir7657.pdf` | **diagnosed** (D24): entirely the font-substitution policy |
 | 12 | `issue12337` 3, `highlights` 3, `bug1992868` 2, `comments` 2, `ZapfDingbats` 2 | **font substitution**, like [D24](known-diffs.md) — the diff images show every line doubled and misregistered. *Not* tiling: these files declare patterns and never select one ([D25](known-diffs.md)) |
@@ -1011,12 +1011,13 @@ concentrated in a handful of files too:
 | 11 | 11 other files, 1 page each | long-tail noise |
 
 **62 of the 165 are the two JPEG 2000 files, so the addressable remainder is about 103 pages, and
-four files hold 71 of those** — `fips197` 25, `TAMReview` 22, `nistir7657` 14, `freeculture` 10. It
+four files hold 70 of those** — `fips197` 24, `TAMReview` 22, `nistir7657` 14, `freeculture` 10. It
 is concentrated in a handful of files rather than spread evenly. The two clusters nobody had
 looked at are now diagnosed (D24) and they turn out to be **38 pages of this project's own
-font-substitution policy, plus exactly one page of a genuinely missing feature** — which is the most
-useful thing this run produced about where the work should go next. **The largest remaining cause
-of a page below 0.95 is not a missing feature; it is a documented policy, measured.**
+font-substitution policy**, plus the one page that was a genuinely missing feature — which has since
+been fixed ([D30](known-diffs.md), page 1 of `fips197` at 0.9932 where it was 0.7564), so
+`fips197` is now policy all the way down. **The largest remaining cause of a page below 0.95 is not
+a missing feature; it is a documented policy, measured.**
 
 **One caution about the median.** A page rendered as bare paper scores about 0.79 against the real
 page, so **a median over pages overstates fidelity while any cluster is missing whole pages of
@@ -1121,7 +1122,9 @@ most heavily: our ink is within **0.2%** of the oracle's on `nistir7657`'s worst
 its pixels are above tolerance, because the ink is all in the right places and the glyphs are
 someone else's. **Roughly 38 of the corpus's 165 pages below 0.95 are this policy rather than a
 defect**, which makes it the largest remaining addressable cause — a policy question, not a
-missing feature.
+missing feature. It is now the largest cause of *every* page below 0.95 that is not a codec:
+the one remaining page that was a real feature gap was fixed in
+[D30](known-diffs.md).
 
 The corpus test asserts nothing and the report is the output — the reasoning is at the top
 of `crates/mangle-render/tests/wild_corpus.rs`. A threshold on a document nobody has read
