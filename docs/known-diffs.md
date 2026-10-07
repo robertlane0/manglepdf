@@ -3555,3 +3555,74 @@ page 1 was 0.9886, from the same refusal in the same shape. The only way to tell
 fix one and measure, and the number that comes back is the only one worth having. The second row is
 left as *not re-measured* rather than guessed, because a page's dominant cause is a separate
 question from this one and answering it with an assumption is how the two get confused.
+
+---
+
+## D31 — tried and reverted: charging the image bound in bytes drew the corpus's worst page *worse*
+
+**Not fixed, and deliberately so. This entry records a change that was measured, found wanting, and
+reverted.** It is here because the reasoning that produced it looks correct, and the only thing
+that says otherwise is the number.
+
+### The change, and why it looked right
+
+`MAX_IMAGE_PIXELS` bounds what an image may cost to hold, and it was asked of the **pixel count**
+alone — `width * height > 64 Mi` — which charges every image as though each of its pixels were a
+full byte. That is wrong for any image that is not 8-bit grey, and `pdfjs__freeculture.pdf` page
+255 is the corpus's proof: its `/Im0` is a **9258 by 12259 `CCITTFaxDecode` `/ImageMask` at
+`/BitsPerComponent 1`**, which is 113 M pixels but only **14 MB of samples**. The bound refused it,
+so the page drew nothing and scored **0.5716** — the worst page in the whole corpus.
+
+So the bound was changed to be asked of the **bytes the samples occupy**, counting
+`/BitsPerComponent` × the number of components the `/ColorSpace` holds, with a stencil charged one
+bit per pixel whatever its key says. A 14 MB image is inside a 64 MB bound. **On the argument alone
+this is obviously right**, and the arithmetic in the test is unambiguous: 113 493 822 pixels is over
+the bound and 14 186 728 bytes is under it.
+
+### What the measurement said
+
+Both pages of the corpus holding this image got **worse**:
+
+| page | before | after |
+|---|---|---|
+| `freeculture` 255 | **0.5716** | 0.4718 |
+| `freeculture` 171 | **0.8688** | 0.7347 |
+
+The image was no longer refused. It was drawn, and drawing it was worse than not drawing it.
+
+### Why, which is the part worth keeping
+
+The decode itself, read directly off the corpus file's bytes: **all 12259 rows decoded, 232 of them
+damaged**, `complete = false`. The rows are not slightly wrong. Sampling twelve of them:
+
+| row | 0 | 1021 | 2042 | 3063 | 4084 | 5105 | 6126 | 7147 | 8168 | 9189 | 10210 | 11231 | 12252 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ink px | 9258 | 9248 | 9253 | **66** | 9253 | **113** | 9254 | **9** | 7704 | 1100 | **189** | 9063 | 9258 |
+
+Most rows are **entirely black** (9258 of 9258) and the rest are nearly empty. A page photo is
+neither. Our ink fraction is **0.553** against the oracle's **0.471**, and the per-row pattern is
+alternating rather than photographic. **The 232 damaged rows desynchronised the decoder, every
+later row is garbage, and the decoder reports success as long as the row count comes out.**
+
+So the change replaced *one wrong page* with *a different wrong page*, and the wrong page it
+produced covers the whole page rather than leaving it bare. **The bound was right about the bytes
+and wrong about the consequences**, and nothing about the bound could have told it so.
+
+### The rule this ends on
+
+**A bound that refuses is a safe failure; drawing is a claim that the decode succeeded.** Where the
+decode *has* failed, drawing is not a better attempt at the page, it is a worse one — and the
+project's own rule already says which: *a note about it beats a picture of noise*
+(`sample_at`, `crates/mangle-render/src/image.rs`). The filter chain already carries the signal, as
+`Decoded::complete`, and the image path does not consult it.
+
+**The real fix is therefore not the bound. It is that an image whose filter chain reported an
+incomplete decode is refused, or drawn only up to the last good row** — with
+`/DamagedRowsBeforeError` honoured when the file states a tolerance, which this one does not and so
+gets the PDF default of never giving up, which is what let a desynchronised decode run to the end
+of the page. That work is **not done**, and this entry is the reason to do it: the bound looks like
+the obvious defect on this page and is not.
+
+`freeculture` page 255 is therefore still refused, and still scores 0.5716 — which is the honest
+number for a page whose only content is an image this project cannot decode correctly. **A bad
+number that is true beats a better one that was bought by drawing noise.**
