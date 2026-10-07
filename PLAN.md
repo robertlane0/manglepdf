@@ -739,19 +739,31 @@ The last full run measured 738 pages with an SSIM and **167 below 0.95**. Of tho
   ([D30](docs/known-diffs.md)). So they belong with the ~70 font pages, not in their own bucket.
 * The rest is `TAMReview`'s same font cause (22), `freeculture` (9), `sp800-88` (7) and a long tail
   of one or two pages across a dozen files.
-* **And one page is a genuine missing feature** (`fips197` p1: an `ICCBased` profile carrying no
-  `/Alternate`, which D19's route cannot read and this project has no ICC transform to fall back
-  on).
+* **And one page was a genuine missing feature** (`fips197` p1: an `ICCBased` profile carrying no
+  `/Alternate`, which D19's route cannot read). **That page is now fixed**
+  ([D30](docs/known-diffs.md)): a profile names the space its components are in at bytes 16–20 of
+  its own header, so a file that omits `/Alternate` has not declined to say — it has said it
+  somewhere else. `fips197` page 1 went **0.7564 → 0.9932** and carries no note, and
+  `pdfjs__issue10529.pdf` page 1 went **0.9886 → 0.9973** from the same fix. The compressed case is
+  the one to remember: `fips197` stores both profiles behind a `/FlateDecode`, so the header is
+  behind the filter.
 
-**So the addressable remainder is about 105 pages, four files hold 70 of them, and the largest
-genuinely missing feature left is one page of one file.** The re-runs this section asked for have been
-done: the page median went 0.95795 → 0.96010 and the pages below 0.95 went 254 (34.4%) → 167 (22.6%),
-a **34% reduction** — **concentrated in a few files rather than spread evenly**, with
-`gov__nist-sp800-88.pdf` alone accounting for 34 of the 87 pages that came back over the 0.95 line.
-**The per-file median did not move at all — 0.9698 before, 0.9698 after** — because a file is scored
-on its worst page and the gains landed inside files that were already counted as good. All three
-parts of Gate 3.1 remain missed, and none is met: per-page ≥ 0.95 (**167 of 738**), median ≥ 0.985
-(**0.96010**, 0.025 short), and ≤ 3% below 0.95 (**22.6%** against a 3% bound, a factor of 7.6).
+**So the addressable remainder is about 105 pages, four files hold 70 of them, and — after D30 —
+the largest genuinely missing feature left is no longer a colour space.** The re-runs this section
+asked for have been done: the page median went 0.95795 → 0.96015 and the pages below 0.95 went
+254 (34.4%) → 165 (22.3%), a **35% reduction** — **concentrated in a few files rather than spread
+evenly**, with `gov__nist-sp800-88.pdf` alone accounting for 34 of the 89 pages that came back over
+the 0.95 line. **The per-file median moved only 0.9698 → 0.97375**, because a file is scored on its
+worst page and most of the gains landed inside files that were already counted as good. All three
+parts of Gate 3.1 remain missed, and none is met: per-page ≥ 0.95 (**165 of 740**), median ≥ 0.985
+(**0.96015**, 0.025 short), and ≤ 3% below 0.95 (**22.3%** against a 3% bound, a factor of 7.5).
+
+**What is left is dominated by things this project has decided, and by codecs it has declined.**
+62 of the 165 are the two JPEG 2000 files ([D22](docs/known-diffs.md)), and ~38 are the
+font-substitution policy ([D24](docs/known-diffs.md)). **Both are decisions with evidence behind
+them, so neither is a bug to fix — and that is the finding this queue has to report rather than
+route around.** Moving the gate number now means changing one of those decisions on its merits, and
+that is a question for the human rather than for another corpus run.
 
 **The corpus's largest non-feature gap is closed** — the `TJ` truncation that cost W076 two thirds
 of its text on every page was a collection bound written for nesting depth being used as a bound on
@@ -760,12 +772,21 @@ current run measures it at **0.9240**, and what that file's 22 pages are now lim
 unembedded font: D6's subject, and this project's stated policy ([D21](docs/known-diffs.md), and
 [D24](docs/known-diffs.md) for what that policy costs on the two files that carry it most heavily).
 
-**One genuine missing feature is left in the corpus that anyone has looked for, and it is one page.**
-`gov__nist-fips197.pdf` page 1 is drawn entirely in `[/ICCBased …]` spaces whose profiles carry **no
-`/Alternate`** — `/Alternate` occurs zero times in the file — so D19's route has nothing to read and
-387 of the page's 397 marks were refused. Closing it means evaluating a matrix/TRC profile for the
-`/N 1` and `/N 3` cases. It is one page of the 167, and it is the largest addressable *feature* the
-corpus has left ([D24](docs/known-diffs.md)).
+**The one genuine missing feature anyone looked for in the corpus is closed.**
+`gov__nist-fips197.pdf` page 1 was drawn entirely in `[/ICCBased …]` spaces whose profiles carry
+**no `/Alternate`** — `/Alternate` occurs zero times in the file — so D19's route had nothing to
+read and 387 of the page's 397 marks were refused. **D30 closed it without writing an ICC
+transform at all**, which is the useful part: the premise was wrong. A profile states the space its
+components are in at bytes 16–20 of its own header, so this file had said what its components are
+and the code was looking in the one place a producer may omit. Page 1 went **0.7564 → 0.9932**, the
+file's worst page moved 0.7564 → 0.8432, and the file's count below 0.95 fell 25 → 24 — a small
+number for a whole page, because 24 of the 25 were font substitution and stay
+([D30](docs/known-diffs.md), [D24](docs/known-diffs.md)).
+
+**What this changes about the queue is worth stating plainly: no ICC transform is needed, and
+nothing in the corpus is now waiting on one.** The remaining shortfall is the JPX codec
+([D22](docs/known-diffs.md)) and the font-substitution policy ([D24](docs/known-diffs.md)), one
+decline and one policy, both with evidence recorded.
 
 **A `Separation` or `DeviceN` tint transform is settled** and was the third of those three gaps
 before D20: the transform is evaluated, its output is read in the space the file names, and a
