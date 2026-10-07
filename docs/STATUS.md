@@ -967,30 +967,35 @@ incorrect password`. That was one dominant bug, and it was not the one first wri
 
 ### Where the corpus stands now
 
-The latest full run: **77 files, 16326.09s, 0 panicked, 73 opened, 4 closed**, 745 pages of which
-**738 carry an SSIM**. Against the previous run:
+The latest full run: **77 files, 16646.23s, 0 panicked, 73 opened, 4 closed**, 745 pages of which
+**740 carry an SSIM**. Against the run before it:
 
 | | previous run | **current run** |
 |---|---|---|
-| page median SSIM | 0.95795 | **0.96010** |
-| page mean SSIM | — | **0.94251** |
-| pages below 0.95 | 254 (34.4%) | **167 (22.6%)** — a 34% reduction |
-| pages below 0.90 | 174 (23.6%) | **88 (11.9%)** |
-| pages below 0.80 | 94 (12.7%) | **50 (6.8%)** |
+| page median SSIM | 0.96010 | **0.96015** |
+| page mean SSIM | 0.94251 | **0.94274** |
+| pages below 0.95 | 167 (22.6%) | **165 (22.3%)** — 254 → 165 across two runs, a 35% reduction |
+| pages below 0.90 | 88 (11.9%) | **87 (11.8%)** |
+| pages below 0.80 | 50 (6.8%) | **50 (6.8%)** |
 | pages below 0.50 | 0 | **0** |
-| per-file median (worst page) | 0.9698 | **0.9698 — unchanged** |
+| per-file median (worst page) | 0.9698 | **0.97375** |
 
-**All three parts of Gate 3.1 are missed. None of them is close.** Per-page ≥ 0.95: 167 of 738
-pages, 22.6%, are below it. Median ≥ 0.985: Tier B's own median is 0.96010, 0.025 short.
-≤ 3% of pages below 0.95: 22.6% against 3% — at 738 pages the gate allows **22** and there are
-**167**, a factor of 7.6. The full statement, with what is left in it, is at the top of
+This is the first run after D26, so it is also the first to measure all **352** pages of
+`pdfjs__freeculture.pdf`; the two pages that previously produced no SSIM at all now do, which is
+where 738 → 740 comes from and why the page count with an SSIM rose without the median moving.
+
+**All three parts of Gate 3.1 are missed. None of them is close.** Per-page ≥ 0.95: 165 of 740
+pages, 22.3%, are below it. Median ≥ 0.985: Tier B's own median is 0.96015, 0.025 short.
+≤ 3% of pages below 0.95: 22.3% against 3% — at 740 pages the gate allows **22** and there are
+**165**, a factor of 7.5. The full statement, with what is left in it, is at the top of
 `docs/known-diffs.md`.
 
-**The gain is concentrated, and the per-file median did not move.** A file is scored on its worst
-page, and the pages that came back over the line were inside files whose worst page was already
-above 0.95 — so the per-file median stayed at **0.9698** exactly, while the page distribution
-improved a great deal. `gov__nist-sp800-88.pdf` alone accounts for 34 of the 87 pages that came
-back over the 0.95 line — 41 below 0.95 before the ICCBased fix, 7 now. The remaining shortfall is
+**The gain is concentrated, and the per-file median barely moved.** A file is scored on its worst
+page, and most of the pages that came back over the line were inside files whose worst page was
+already above 0.95 — so the per-file median went **0.9698 → 0.97375**, an order of magnitude less
+than the page count suggests, while the page distribution improved a great deal.
+`gov__nist-sp800-88.pdf` alone accounts for 34 of the 89 pages that came back over the 0.95 line
+across the two runs — 41 below 0.95 before the ICCBased fix, 7 now. The remaining shortfall is
 concentrated in a handful of files too:
 
 | pages | file | what it is |
@@ -999,14 +1004,14 @@ concentrated in a handful of files too:
 | 25 | `gov__nist-fips197.pdf` | **diagnosed** (D24): 24 pages are the font-substitution policy, **1 page is a real gap** — an `ICCBased` profile with no `/Alternate` |
 | 22 | `pdfjs__TAMReview.pdf` | the same font-substitution policy |
 | 14 | `gov__nist-nistir7657.pdf` | **diagnosed** (D24): entirely the font-substitution policy |
-| 12 | `comments` 4, `issue12337` 3, `highlights` 3, `bug1992868` 2 | **font substitution**, like [D24](known-diffs.md) — the diff images show every line doubled and misregistered. *Not* tiling: these files declare patterns and never select one ([D25](known-diffs.md)) |
-| 9 | `pdfjs__freeculture.pdf` | |
+| 12 | `issue12337` 3, `highlights` 3, `bug1992868` 2, `comments` 2, `ZapfDingbats` 2 | **font substitution**, like [D24](known-diffs.md) — the diff images show every line doubled and misregistered. *Not* tiling: these files declare patterns and never select one ([D25](known-diffs.md)) |
+| 10 | `pdfjs__freeculture.pdf` | 9 in the previous run; its worst page is the corpus's at 0.5716 |
 | 7 | `gov__nist-sp800-88.pdf` | |
 | 3 | `gov__arxiv-1512.03385.pdf` | |
-| 14 | 13 other files, 1–2 pages each | long-tail noise |
+| 11 | 11 other files, 1 page each | long-tail noise |
 
-**62 of the 167 are the two JPEG 2000 files, so the addressable remainder is about 105 pages, and
-four files hold 70 of those** — `fips197` 25, `TAMReview` 22, `nistir7657` 14, `freeculture` 9. It
+**62 of the 165 are the two JPEG 2000 files, so the addressable remainder is about 103 pages, and
+four files hold 71 of those** — `fips197` 25, `TAMReview` 22, `nistir7657` 14, `freeculture` 10. It
 is concentrated in a handful of files rather than spread evenly. The two clusters nobody had
 looked at are now diagnosed (D24) and they turn out to be **38 pages of this project's own
 font-substitution policy, plus exactly one page of a genuinely missing feature** — which is the most
@@ -1114,7 +1119,7 @@ substituted face**, which scores 0.93 where it should score 0.99 and sits just u
 without looking wrong. D24 measures that on the 38 pages of `fips197` and `nistir7657` that carry it
 most heavily: our ink is within **0.2%** of the oracle's on `nistir7657`'s worst page while 7.9% of
 its pixels are above tolerance, because the ink is all in the right places and the glyphs are
-someone else's. **Roughly 38 of the corpus's 167 pages below 0.95 are this policy rather than a
+someone else's. **Roughly 38 of the corpus's 165 pages below 0.95 are this policy rather than a
 defect**, which makes it the largest remaining addressable cause — a policy question, not a
 missing feature.
 

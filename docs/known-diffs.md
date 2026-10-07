@@ -5,19 +5,19 @@ and Tier B; ≤ 3% of pages below 0.95, each documented in `docs/known-diffs.md`
 cause and evidence."*
 
 **The Tier-B target is not met, and not narrowly.** Against `mutool draw` at 150 DPI over the
-77-file wild corpus: **738 of 745 pages produced an SSIM** and the page-level median is
-**0.96010**, and **167 of those 738 pages (22.6%) are below 0.95**. Seventy-three of the 77
+77-file wild corpus: **740 of 745 pages produced an SSIM** and the page-level median is
+**0.96015**, and **165 of those 740 pages (22.3%) are below 0.95**. Seventy-three of the 77
 files open; **four cannot**. This page records what the corpus found and the evidence for each
 claim.
 
-**The page distribution improved a great deal and the per-file median did not move at all.**
-Against the previous full run: the pages below 0.95 went **254 → 167**, a **34% reduction**, and
-the per-page median went **0.95795 → 0.96010**. Both movements are real. **The per-file median
-stayed at 0.9698, exactly where it was**, and that is not a rounding artefact: the gains landed
-in files that were already being counted as good, and a file's own worst page did not come back
-over the line. Neither movement is spread evenly, and saying so is the point of the rest of this
-page: **the gain is concentrated in a handful of files**, and four files still account for most of
-what is left.
+**The page distribution improved a great deal and the per-file median moved only a little.**
+Against the previous full run: the pages below 0.95 went **254 → 165**, a **35% reduction**, and
+the per-page median went **0.95795 → 0.96015**. Both movements are real. **The per-file median
+went 0.9698 → 0.97375**, which is a much smaller move than the page count implies: the gains
+landed in files that were already being counted as good, and a file's own worst page rarely came
+back over the line. Neither movement is spread evenly, and saying so is the point of the rest of
+this page: **the gain is concentrated in a handful of files**, and four files still account for
+most of what is left.
 
 The corpus is `corpus/wild/`, pinned by SHA-256 in `corpus/wild/MANIFEST.toml`, fetched with
 `cargo xtask corpus fetch`, and measured by `crates/mangle-render/tests/wild_corpus.rs`.
@@ -26,11 +26,13 @@ the per-file reports beside it, which are git-ignored and regenerated on every r
 versions: `mutool 1.28.5`, `pdftotext` (poppler), `qpdf` (system).
 
 > **These figures are a re-run, not an estimate.** The block above is the whole 77-file corpus
-> measured end to end: 77 files, **16326.09s**, **0 panicked**, **73 opened and 4 closed**,
-> `test result: ok`. It replaces the previous run (16195.80s, 73 opened), which in turn replaced
-> one made when 34 of the 77 files could not be opened at all — and every figure in that run, the
-> 460-of-542 comparison count, the 0.6929 median and the 94.8%-below-0.95 figure an earlier version
-> of this file carried, described a corpus with a third of it missing. **Of the 73 that open, 67
+> measured end to end: 77 files, **16646.23s**, **0 panicked**, **73 opened and 4 closed**,
+> `test result: ok`. It replaces the previous run (16326.09s, 73 opened, 738 of 745 pages with an
+> SSIM), which in turn replaced one made when 34 of the 77 files could not be opened at all — and
+> every figure in that run, the 460-of-542 comparison count, the 0.6929 median and the
+> 94.8%-below-0.95 figure an earlier version of this file carried, described a corpus with a third
+> of it missing. **Two more pages were compared this time and the two size disagreements are
+> gone**, which is where the difference between 738 and 740 comes from. **Of the 73 that open, 67
 > read their structure as written; 6 needed recovery** (`bug1795263`, `bug1980958`,
 > `GHOSTSCRIPT-698804-1-fuzzed`, `issue15590`, `issue15893_reduced`, `PDFBOX-3148-2-fuzzed`), and the
 > run's own summary counts 9 of the 77 as having needed recovery once three of the four that did
@@ -57,18 +59,18 @@ cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture
 | | |
 |---|---|
 | files | **77**, of which **73 opened** and **4 did not** |
-| wall clock | **16326.09s** |
+| wall clock | **16646.23s** |
 | panicked | **0** |
 | pages measured | **745** |
-| pages with an SSIM | **738** |
-| page-level median SSIM | **0.96010** |
-| page-level mean SSIM | **0.94251** |
-| size disagreements | **2** |
+| pages with an SSIM | **740** |
+| page-level median SSIM | **0.96015** |
+| page-level mean SSIM | **0.94274** |
+| size disagreements | **0** |
 | pages left uncompared on purpose | 2 |
 | pages the oracle could not render | 3 |
 
 The page-level median and mean are not stated in the run's summary — they are computed from
-`corpus/wild/report/pages.tsv` over the **738** rows that carry an SSIM. Nothing else in this
+`corpus/wild/report/pages.tsv` over the **740** rows that carry an SSIM. Nothing else in this
 section is derived; the rest is quoted from the run.
 
 ### Per file, by its worst page
@@ -76,38 +78,37 @@ section is derived; the rest is quoted from the run.
 Over the **68** files that have at least one page with an SSIM. 73 files open and 745 pages are
 measured; five of the opened files produced no SSIM at all (`usgs-topo-cnmi-1`, `usgs-topo-cnmi-3`,
 `GHOSTSCRIPT-698804-1-fuzzed`, `issue15590`, `issue15893_reduced` — the reasons are itemised
-[below](#the-seven-pages-with-no-ssim-and-why-each-is-missing)), and `freeculture`'s two skipped
-pages sit among its 350 measured ones, so 73 − 5 = **68**:
+[below](#the-five-pages-with-no-ssim-and-why-each-is-missing)), so 73 − 5 = **68**:
 
 | worst-page SSIM | files |
 |---|---|
-| ≥ 0.99 | 21 |
+| ≥ 0.99 | 22 |
 | ≥ 0.95 | 23 |
-| ≥ 0.90 | 7 |
+| ≥ 0.90 | 6 |
 | ≥ 0.80 | 13 |
 | < 0.80 | **4** |
 
-**Median 0.96980, mean 0.93537.** The mean is 0.034 below the median because those four files are
+**Median 0.97375, mean 0.93588.** The mean is 0.038 below the median because those four files are
 not a little way under 0.80 — the best of the four is 0.7564 and the worst is 0.5716, and one of
-them is a single page. **The median here did not move from the previous run**, which is worth
-reading alongside the 34% reduction in the pages below 0.95: the files that improved were files
+them is a single page. **The median here moved only from 0.96980**, which is worth reading
+alongside the 35% reduction in the pages below 0.95: most of the files that improved were files
 whose worst page was already at or above 0.95, and a file is scored on its worst page, so a run of
-good pages inside it changes nothing this table can see.
+good pages inside it changes little this table can see.
 
 ### Per page
 
-Over the **738** pages that carry an SSIM:
+Over the **740** pages that carry an SSIM:
 
 | | pages | share |
 |---|---|---|
-| below 0.95 | **167** | **22.6%** |
-| below 0.90 | 88 | 11.9% |
+| below 0.95 | **165** | **22.3%** |
+| below 0.90 | 87 | 11.8% |
 | below 0.80 | 50 | 6.8% |
 | below 0.50 | **0** | 0% |
 
 **Zero pages below 0.50** is the one unambiguous good number in the run, and it is worth saying
 what it means: no page is blank where the oracle has a page, and none is grossly wrong. Every
-one of the 167 is a page that draws *something* and draws it incompletely, in the wrong place, or
+one of the 165 is a page that draws *something* and draws it incompletely, in the wrong place, or
 in the wrong colour.
 
 ### A median overstates fidelity while a cluster is missing whole pages of content
@@ -116,28 +117,26 @@ This is the caveat that decides whether the numbers above should be believed, so
 to them rather than in a footnote. **A page rendered as bare paper scores about 0.79 against the
 real page**, which is high enough to sit near the median of a corpus and low enough to be
 invisible in it. A page where a whole cluster is missing — every figure, every shaded box —
-therefore moves the median far less than the fix that restores it does. The 0.95795 → 0.96010
-movement is a real 34% reduction in the pages below 0.95, and it is also the kind of number that
+therefore moves the median far less than the fix that restores it does. The 0.95795 → 0.96015
+movement is a real 35% reduction in the pages below 0.95, and it is also the kind of number that
 would barely register if a single file had gone from 30 wrong pages to 1.
 
 **The count of pages below 0.95 is the number the gate is written against**, and it is the number
 to watch. The median is the number that flatters.
 
-### The seven pages with no SSIM, and why each is missing
+### The five pages with no SSIM, and why each is missing
 
-**The two `freeculture` rows below are now fixed** ([D26](#d26--a-cropbox-written-to-eight-decimals-made-the-buffer-a-pixel-taller-and-the-tolerance-meant-to-prevent-that-was-a-thousand-times-too-tight));
-they were a size disagreement and produced no measurement at all. The figures elsewhere in this
-section are from the run **before** that fix and so still count those two pages as unmeasured.
+**This run is the first to measure the whole corpus after D26**, so the two `freeculture` size
+disagreements are gone and those pages now carry a number — `freeculture` is **352 of 352** pages
+compared, where the previous run could only compare 350.
 
-The 745/738 split matters as much as the SSIM does, because a page that produced no number is a
+The 745/740 split matters as much as the SSIM does, because a page that produced no number is a
 page that was never measured and must never read as one that passed.
 
 | page | why there is no SSIM |
 |---|---|
 | `gov__usgs-topo-cnmi-1.pdf` 1 | 25119300 oracle pixels, above the 16777216 this harness will compare. Rendered at 150 DPI and **left uncompared on purpose** — the bound is the harness's own memory ceiling, not a property of the file. |
 | `gov__usgs-topo-cnmi-3.pdf` 1 | 25127777 oracle pixels, same bound. |
-| `pdfjs__freeculture.pdf` 1 | **size disagreement**: we rendered 1020x1531, mutool rendered 1020x1530 |
-| `pdfjs__freeculture.pdf` 2 | **size disagreement**: we rendered 915x901, mutool rendered 915x900 |
 | `pdfjs__issue15590.pdf` 1 | mutool produced no page 1; **it could not render it** |
 | `pdfjs__GHOSTSCRIPT-698804-1-fuzzed.pdf` 1 | mutool produced no page 1; **it could not render it** |
 | `pdfjs__issue15893_reduced.pdf` 1 | mutool produced no page 1; **it could not render it** |
@@ -155,7 +154,7 @@ epsilon is now `1e-6` relative, measured against `mutool` rather than guessed. S
 The three pages `mutool` cannot render are not differences at all: there is no second opinion to
 have. They are recorded because a page the *oracle* refuses is a page nobody has checked.
 
-### Where the 167 are
+### Where the 165 are
 
 **They are not scattered, and that is the most useful thing in this section**, because it says
 what is still worth doing and what is not:
@@ -166,19 +165,19 @@ what is still worth doing and what is not:
 | **25** | `gov__nist-fips197.pdf` | **24 font substitution, 1 `ICCBased` with no `/Alternate`** — worst page **0.7564**, and both diagnosed in [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) |
 | **22** | `pdfjs__TAMReview.pdf` | median 0.9240; an unembedded font, see D21 and D24 |
 | **14** | `gov__nist-nistir7657.pdf` | **all font substitution** — [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) |
-| 12 | `comments` 4, `issue12337` 3, `highlights` 3, `bug1992868` 2 | tiling patterns — see `PLAN.md` |
-| 9 | `pdfjs__freeculture.pdf` | |
+| 12 | `issue12337` 3, `highlights` 3, `bug1992868` 2, `comments` 2, `ZapfDingbats` 2 | font substitution, as in [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) — *not* tiling, see [D25](#d25--a-tiling-pattern-was-refused-rather-than-tiled) |
+| **10** | `pdfjs__freeculture.pdf` | 9 in the previous run; its worst page is the corpus's at 0.5716 |
 | 7 | `gov__nist-sp800-88.pdf` | was **41** before the ICCBased fix |
 | 3 | `gov__arxiv-1512.03385.pdf` | |
-| 14 | 13 other files, 1–2 pages each | |
+| 11 | 11 other files, 1 page each | |
 
-**62 of the 167 are the two JPEG 2000 files** — `nistir7255` 61 and `S2` 1 — which are now
-formally out of scope, so the **addressable remainder is about 105 pages**. And those 105 are not
-spread across the corpus either: **four files account for 70 of them**, `fips197` 25,
-`TAMReview` 22, `nistir7657` 14 and `freeculture` 9. Everything else is one or two pages each
+**62 of the 165 are the two JPEG 2000 files** — `nistir7255` 61 and `S2` 1 — which are now
+formally out of scope, so the **addressable remainder is about 103 pages**. And those 103 are not
+spread across the corpus either: **four files account for 71 of them**, `fips197` 25,
+`TAMReview` 22, `nistir7657` 14 and `freeculture` 10. Everything else is one or two pages each
 across a dozen files, which is the shape of long-tail noise rather than a defect with a name.
 
-**And of the 105, about 38 are this project's own font-substitution policy** — `fips197` 24 and
+**And of the 103, about 38 are this project's own font-substitution policy** — `fips197` 24 and
 `nistir7657` 14 — which is a decision rather than a defect and is measured in
 [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect).
 **So the largest remaining cause of a page below 0.95 is not a missing feature.**
@@ -215,38 +214,38 @@ of them is close.**
 
 Each of the three, in the gate's own order, with the figure it is measured against:
 
-- **per-page ≥ 0.95 — NOT MET.** **167 of the 738 pages are below it**, 22.6%, so 77.4% clear the
+- **per-page ≥ 0.95 — NOT MET.** **165 of the 740 pages are below it**, 22.3%, so 77.7% clear the
   floor. It is a corpus-wide average rather than a per-page promise, and this is the figure it
   produces.
-- **median ≥ 0.985 — NOT MET on Tier B.** The Tier-B page median is **0.96010**, which is **0.025
+- **median ≥ 0.985 — NOT MET on Tier B.** The Tier-B page median is **0.96015**, which is **0.025
   short**. The gate's median is taken across F12–F22, F31 *and* Tier B together, and this run
-  measures only the last of those, so 0.96010 is not by itself the gate's number — but 738 of the
+  measures only the last of those, so 0.96015 is not by itself the gate's number — but 740 of the
   pages in that median are Tier-B pages, and Tier B's own median is 0.960.
-- **≤ 3% of pages below 0.95 — NOT MET.** **22.6% against a 3% bound**: at 738 pages the gate
-  allows **22** pages below 0.95 and there are **167**, a factor of **7.6**.
+- **≤ 3% of pages below 0.95 — NOT MET.** **22.3% against a 3% bound**: at 740 pages the gate
+  allows **22** pages below 0.95 and there are **165**, a factor of **7.5**.
 
 **What a reader needs in order to judge how far away that is.** The third is the one that decides
-the gate, and **62 of the 167 are the two JPEG 2000 files that are now formally out of scope**
+the gate, and **62 of the 165 are the two JPEG 2000 files that are now formally out of scope**
 ([D22](#d22--jpeg-2000-is-not-decoded-and-the-decision-to-leave-it-that-way-was-measured-rather-than-assumed)).
-That leaves an **addressable remainder of about 105 pages**, and those 105 are **concentrated in a
-handful of files rather than spread evenly across the corpus** — four files hold 70 of them
-(`fips197` 25, `TAMReview` 22, `nistir7657` 14, `freeculture` 9), and everything else is one or two
+That leaves an **addressable remainder of about 103 pages**, and those 103 are **concentrated in a
+handful of files rather than spread evenly across the corpus** — four files hold 71 of them
+(`fips197` 25, `TAMReview` 22, `nistir7657` 14, `freeculture` 10), and everything else is one or two
 pages across a dozen files. So the honest reading of where this stands is not "a fifth of the
 corpus is wrong" and not "two thirds of a bad number has been fixed"; it is **four files decide the
 gate, and two of them ([D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect))
 are now diagnosed and turn out not to need a codec or a colour space at all.**
 
-**The comparison with the previous run, stated as plainly as it can be stated.** Pages below 0.95
-**254 → 167**, a **34% reduction** — 87 pages came back over the line. Per-page median
-**0.95795 → 0.96010**. **Per-file median 0.9698 → 0.9698: unchanged, to every digit it is quoted
-at.** The first two are real improvements. **The per-file median did not move at all**, and that
-is the honest reading rather than a rounding convenience: a file is scored on its worst page, and
-the gains landed in files whose worst page was already above 0.95, so pages got better inside
-files this measure cannot see. The gain is also not spread evenly — `gov__nist-sp800-88.pdf`
-alone accounts for 34 of the 87 pages that came back over the line (41 below 0.95 before the
-ICCBased fix, 7 now). A reader who takes "34% fewer bad pages" as a general improvement in
-fidelity across the corpus would be reading it wrong: it is one file's worth of improvement plus a
-second one's, and the long tail is unmoved.
+**The comparison with the run before this one, stated as plainly as it can be stated.** Pages below
+0.95 **167 → 165**, and against the run before that **254 → 165**, a **35% reduction** — 89 pages
+came back over the line. Per-page median **0.96010 → 0.96015**. **Per-file median (worst page)
+0.9698 → 0.97375**: it did move, but by an order of magnitude less than the page count did, and
+the reason is the shape of the measure rather than anything about the fixes — a file is scored on
+its worst page, and the gains landed in files whose worst page was already above 0.95, so pages
+got better *inside* files this measure cannot see. The gain is also not spread evenly —
+`gov__nist-sp800-88.pdf` alone accounts for 34 of the 89 pages that came back over the line
+(41 below 0.95 before the ICCBased fix, 7 now). A reader who takes "35% fewer bad pages" as a
+general improvement in fidelity across the corpus would be reading it wrong: it is one file's worth
+of improvement plus a second one's, and the long tail is unmoved.
 
 **And the median is the number that flatters.** A page rendered as bare paper scores about 0.79
 against the real page, so while any cluster is missing whole pages of content the median moves far
@@ -1036,7 +1035,7 @@ figures in this file should be read as a fidelity claim until D7 is fixed, becau
 that cannot draw a single glyph cannot say anything about fidelity.
 
 **That 0.6929 is no longer the Tier-B median.** It is kept here as the measurement it was, of
-the code as it stood, and the current figure — **0.96010 over 738 pages** — is at the
+the code as it stood, and the current figure — **0.96015 over 740 pages** — is at the
 [top of this file](#the-result-against-gate-31). The 422 of 542 in this entry's severity line
 counts the same way: it is what the corpus looked like then, not what it looks like now.
 
@@ -2216,7 +2215,7 @@ above tolerance (5.573%), 225 656 ink against the oracle's 275 874. Its whole re
 difference is unembedded-font substitution, which is D6's subject and the project's stated
 policy — and which [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect)
 measures precisely. **The current run puts this file's median at 0.9648 with 7 of its 44 pages
-below 0.95, against a corpus-wide page median of 0.96010** — so the file is now above the corpus
+below 0.95, against a corpus-wide page median of 0.96015** — so the file is now above the corpus
 median, and the pages it still loses are the ones it loses on glyph shapes.
 
 Page 1 was the one page still below 0.81, and it was **not** the ICC gap:
