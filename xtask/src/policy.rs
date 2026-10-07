@@ -787,11 +787,81 @@ fn g0_9_docs(ws: &Workspace) -> Check {
         .map(|d| format!("{d} is missing or empty"))
         .collect();
     findings.extend(dangling_anchors(&ws.root));
+    findings.extend(missing_alias(&ws.root));
     if findings.is_empty() {
         Check::pass("G0.9", TITLE)
     } else {
         Check::fail("G0.9", TITLE, findings)
     }
+}
+
+/// The `cargo xtask` alias the documentation tells every reader to type.
+///
+/// `docs/DEV.md` opens its loop with `cargo xtask policy`, and `docs/known-diffs.md` gives
+/// `cargo xtask corpus fetch` as how to reproduce the corpus. An alias is configuration rather
+/// than code, so nothing else here would notice it going missing: the crate builds, every test
+/// passes, and the gate is green, while every command the documentation quotes is a
+/// "no such command" error. That happened, and the only symptom was that a full corpus
+/// re-baseline had to be run as `cargo run --package xtask --` instead.
+///
+/// The alias lives in a file Cargo reads for *every* invocation, so it is kept to the one line
+/// that defines it and nothing else. This asks for the name and nothing about how it expands —
+/// what the alias runs is the xtask crate's own business, and a rule that inspected the
+/// expansion would fail the next time that binary is renamed for an unrelated reason.
+fn missing_alias(root: &Path) -> Vec<String> {
+    const WANTED: &str = "xtask";
+    let absent = || {
+        vec![format!(
+            ".cargo/config.toml defines no `alias.{WANTED}`, so the `cargo {WANTED}` command \
+             every doc quotes does not resolve"
+        )]
+    };
+    let Ok(text) = std::fs::read_to_string(root.join(".cargo/config.toml")) else {
+        return vec![format!(
+            ".cargo/config.toml is missing or unreadable, so `cargo {WANTED}` does not resolve"
+        )];
+    };
+    // Read as a table rather than as text, so a commented-out or quoted key cannot pass: this
+    // file is small and fixed in shape, so the few lines that matter are read directly rather
+    // than through a parser that would be a new dependency to answer one yes-or-no question.
+    let mut in_alias = false;
+    for line in text.lines() {
+        let line = strip_comment(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(table) = line.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+            in_alias = table.trim() == "alias";
+            continue;
+        }
+        if !in_alias {
+            continue;
+        }
+        if let Some((key, _)) = line.split_once('=') {
+            if key.trim().trim_matches('"') == WANTED {
+                return Vec::new();
+            }
+        }
+    }
+    absent()
+}
+
+/// A TOML line with any comment removed, respecting quoted text.
+///
+/// A `#` inside a quoted string is data, not a comment — an alias value could legitimately
+/// contain one — so quoting is tracked rather than cutting at the first `#`.
+fn strip_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    for (at, ch) in line.char_indices() {
+        match quote {
+            Some(open) if ch == open => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == '#' => return &line[..at],
+            None => {}
+        }
+    }
+    line
 }
 
 /// Every Markdown file the documentation set is built from, as paths relative to the root.
@@ -1034,7 +1104,7 @@ fn tail(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TestCounts, judge_test_run, parse_test_counts, test_lines};
+    use super::{TestCounts, judge_test_run, missing_alias, parse_test_counts, test_lines};
 
     /// A `cargo test` run over one workspace, trimmed to what the gate reads.
     const ALL_PASSED: &str = "\
@@ -1260,6 +1330,104 @@ tests::an_unbalanced_tree_is_rejected: test
         assert_eq!(test_lines(out, "ignored"), vec!["a_deliberate_deferral"]);
         assert_eq!(test_lines(out, "ok"), Vec::<String>::new());
         assert_eq!(test_lines(out, "FAILED"), Vec::<String>::new());
+    }
+
+    // ── The `cargo xtask` alias ────────────────────────────────────────────
+
+    /// A workspace holding one `.cargo/config.toml`, which is all `missing_alias` looks at.
+    ///
+    /// A test that cannot lay the file down proves nothing, so the unwraps here are the right
+    /// answer: a failure means the test itself is broken, not the code under test.
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+    fn with_config(body: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cargo_dir = dir.path().join(".cargo");
+        std::fs::create_dir_all(&cargo_dir).expect("a .cargo dir");
+        std::fs::write(cargo_dir.join("config.toml"), body).expect("a config");
+        dir
+    }
+
+    /// The one finding `missing_alias` returns, as the text the gate would print.
+    ///
+    /// An empty result is a legitimate answer — it is what a working alias produces — so this
+    /// returns the finding when there is one and the empty string when there is not, which is
+    /// what every assertion below wants to read.
+    fn only_finding(findings: &[String]) -> String {
+        findings.first().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn the_alias_this_repository_defines_is_found() {
+        // The one case that cannot be faked with a fixture: this repository's own alias. If it
+        // goes missing, every command `docs/DEV.md` quotes stops resolving, and the gate is
+        // what stands between that and a clean-looking red build.
+        let root = crate::workspace::repo_root().unwrap_or_default();
+        assert!(
+            missing_alias(&root).is_empty(),
+            "this repository must define the `cargo xtask` alias it documents"
+        );
+    }
+
+    #[test]
+    fn an_alias_table_without_the_name_is_reported() {
+        let dir = with_config("[alias]\ngauntlet = \"run --package xtask --\"\n");
+        let finding = only_finding(&missing_alias(dir.path()));
+        assert!(finding.contains("alias.xtask"), "{finding}");
+    }
+
+    #[test]
+    fn a_commented_out_alias_does_not_pass() {
+        // The whole point of reading the table rather than searching the text: a key that is
+        // still there but no longer live is the failure this gate exists to catch, and
+        // `text.contains("xtask")` would sail straight past it.
+        let dir = with_config("[alias]\n# xtask = \"run --package xtask --\"\n");
+        let finding = only_finding(&missing_alias(dir.path()));
+        assert!(finding.contains("alias.xtask"), "{finding}");
+    }
+
+    #[test]
+    fn an_alias_named_in_the_wrong_table_does_not_pass() {
+        // `xtask` appearing under `[profile]`, or inside a value, is not an alias.
+        let dir = with_config("[profile.release]\nname = \"xtask\"\n");
+        let finding = only_finding(&missing_alias(dir.path()));
+        assert!(finding.contains("alias.xtask"), "{finding}");
+    }
+
+    #[test]
+    fn a_missing_config_file_is_reported() {
+        let Ok(dir) = tempfile::tempdir() else {
+            // A temp dir is the only thing that could fail here, and if it does the test has
+            // nothing to assert against rather than a wrong answer.
+            return;
+        };
+        let finding = only_finding(&missing_alias(dir.path()));
+        assert!(finding.contains(".cargo/config.toml"), "{finding}");
+    }
+
+    #[test]
+    fn a_quoted_key_is_the_same_key() {
+        let dir = with_config("[alias]\n\"xtask\" = \"run --package xtask --\"\n");
+        assert!(missing_alias(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_hash_inside_a_quoted_value_is_not_a_comment() {
+        // The value here is nonsense for cargo, and that is the point: what matters is that
+        // the comment stripper does not truncate the line and lose the key it was reading.
+        let dir = with_config("[alias]\nxtask = \"run # not a comment\" # a real one\n");
+        assert!(missing_alias(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_later_alias_table_is_read_after_an_earlier_one() {
+        let dir =
+            with_config("[net]\noffline = true\n[alias]\nxtask = \"run --package xtask --\"\n");
+        assert!(missing_alias(dir.path()).is_empty());
     }
 
     #[test]

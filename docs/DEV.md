@@ -10,8 +10,10 @@ cargo fetch                 # once
 cargo vendor                # optional: to vendor for an air-gapped machine
 ```
 
-`cargo xtask` is an alias for the `xtask` binary, so `cargo xtask policy` works from a
-clean checkout.
+`cargo xtask` is an alias for the `xtask` binary, defined in `.cargo/config.toml` at the
+repository root, so `cargo xtask policy` works from a clean checkout. G0.9 checks that the alias
+is still there: an alias is configuration rather than code, so nothing else would notice it going
+missing while every command on this page stopped resolving.
 
 ## The loop
 
