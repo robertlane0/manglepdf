@@ -3530,3 +3530,21 @@ and will stay there, so one real gap closing shows up as `25 → 24` in a count 
 from unreadable to 0.9932 in fact. **A cluster that is mostly policy makes its own progress
 invisible**, which is the strongest argument in this file for reading a named page rather than a
 count.
+
+### The same refusal in two other files, both already close to the line
+
+Three corpus files carried this refusal rather than one. The other two were already high, which
+is why the cluster analysis never surfaced them as work, and measuring them separately says how
+much of this was ever a *page* problem:
+
+| file | page 1 before | after | what it was |
+|---|---|---|---|
+| `pdfjs__issue10529.pdf` | 0.9886 | **0.9973** | the refusal removed; the page is otherwise text |
+| `pdfjs__issue19360.pdf` | 0.9691 | not re-measured | an unembedded-font note is the dominant cause there, so the ICC space is not what holds the page down |
+
+**A refusal that names itself is not automatically a page's problem, and it is not automatically
+nothing either.** Both answers are wrong in general: `fips197` page 1 was 0.7564 and `issue10529`
+page 1 was 0.9886, from the same refusal in the same shape. The only way to tell them apart is to
+fix one and measure, and the number that comes back is the only one worth having. The second row is
+left as *not re-measured* rather than guessed, because a page's dominant cause is a separate
+question from this one and answering it with an assumption is how the two get confused.
