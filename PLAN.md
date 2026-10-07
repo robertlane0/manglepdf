@@ -671,11 +671,13 @@ because a corpus's job is to find things and a threshold on a document nobody ha
 turns the first surprise into a permanent red build.
 
 The measurements and their evidence are in `docs/known-diffs.md`, which records the latest full
-77-file run (**740 pages compared, page median SSIM 0.96015, 165 pages below 0.95**, 73 files
-opened, 4 closed, 16646.23s, 0 panicked) and, entry by entry, what each fix since has moved.
-That run is the first after D26, so it is the first to compare all **352** pages of
-`pdfjs__freeculture.pdf`; the two that previously produced no SSIM at all now do, which is where
-the move from 738 pages to 740 comes from. It was run under a hard 8 GiB cgroup ceiling
+77-file run (**740 pages compared, page median SSIM 0.96020, 164 pages below 0.95**, 73 files
+opened, 4 closed, 16642.40s, 0 panicked) and, entry by entry, what each fix since has moved.
+That run is the first after D30, so it is the first to measure the ICC-header fix against the
+oracle across the whole corpus rather than one file at a time; the corpus-wide figures barely
+moved for it, because it closed one page that was not its file's worst. It was also the first to
+compare all **352** pages of `pdfjs__freeculture.pdf`, which is where the move from 738 pages to
+740 comes from. It was run under a hard 8 GiB cgroup ceiling
 (`systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0`) and peaked at 1.6 GiB, so the
 bound is headroom rather than a constraint — the run is CPU-bound in an unoptimized build. The
 same bound is what makes a run survivable: three earlier ones were lost partway through.
@@ -748,15 +750,15 @@ The last full run measured 738 pages with an SSIM and **167 below 0.95**. Of tho
   the one to remember: `fips197` stores both profiles behind a `/FlateDecode`, so the header is
   behind the filter.
 
-**So the addressable remainder is about 105 pages, four files hold 70 of them, and — after D30 —
+**So the addressable remainder is about 102 pages, four files hold 70 of them, and — after D30 —
 the largest genuinely missing feature left is no longer a colour space.** The re-runs this section
-asked for have been done: the page median went 0.95795 → 0.96015 and the pages below 0.95 went
-254 (34.4%) → 165 (22.3%), a **35% reduction** — **concentrated in a few files rather than spread
-evenly**, with `gov__nist-sp800-88.pdf` alone accounting for 34 of the 89 pages that came back over
-the 0.95 line. **The per-file median moved only 0.9698 → 0.97375**, because a file is scored on its
-worst page and most of the gains landed inside files that were already counted as good. All three
-parts of Gate 3.1 remain missed, and none is met: per-page ≥ 0.95 (**165 of 740**), median ≥ 0.985
-(**0.96015**, 0.025 short), and ≤ 3% below 0.95 (**22.3%** against a 3% bound, a factor of 7.5).
+asked for have been done: the page median went 0.95795 → 0.96020 and the pages below 0.95 went
+254 (34.4%) → 164 (22.2%), a **35% reduction** — **concentrated in a few files rather than spread
+evenly**, with `gov__nist-sp800-88.pdf` alone accounting for 34 of the 90 pages that came back over
+the 0.95 line. **The per-file median moved only 0.9698 → 0.97375** and then stopped moving, because
+a file is scored on its worst page and D30 closed a page that was not one. All three parts of
+Gate 3.1 remain missed, and none is met: per-page ≥ 0.95 (**164 of 740**), median ≥ 0.985
+(**0.96020**, 0.025 short), and ≤ 3% below 0.95 (**22.2%** against a 3% bound, a factor of 7.5).
 
 **What is left is dominated by things this project has decided, and by codecs it has declined.**
 62 of the 165 are the two JPEG 2000 files ([D22](docs/known-diffs.md)), and ~38 are the

@@ -967,36 +967,43 @@ incorrect password`. That was one dominant bug, and it was not the one first wri
 
 ### Where the corpus stands now
 
-The latest full run: **77 files, 16646.23s, 0 panicked, 73 opened, 4 closed**, 745 pages of which
+The latest full run: **77 files, 16642.40s, 0 panicked, 73 opened, 4 closed**, 745 pages of which
 **740 carry an SSIM**. Against the run before it:
 
 | | previous run | **current run** |
 |---|---|---|
-| page median SSIM | 0.96010 | **0.96015** |
-| page mean SSIM | 0.94251 | **0.94274** |
-| pages below 0.95 | 167 (22.6%) | **165 (22.3%)** — 254 → 165 across two runs, a 35% reduction |
-| pages below 0.90 | 88 (11.9%) | **87 (11.8%)** |
-| pages below 0.80 | 50 (6.8%) | **50 (6.8%)** |
+| page median SSIM | 0.96015 | **0.96020** |
+| page mean SSIM | 0.94274 | **0.94307** |
+| pages below 0.95 | 165 (22.3%) | **164 (22.2%)** — 254 → 164 across three runs, a 35% reduction |
+| pages below 0.90 | 87 (11.8%) | **86 (11.6%)** |
+| pages below 0.80 | 50 (6.8%) | **49 (6.6%)** |
 | pages below 0.50 | 0 | **0** |
-| per-file median (worst page) | 0.9698 | **0.97375** |
+| per-file median (worst page) | 0.97375 | **0.97375 — unchanged** |
 
-This is the first run after D26, so it is also the first to measure all **352** pages of
+**These figures barely moved, and the reason is worth more than the movement.** The only change
+between the two runs is [D30](known-diffs.md), which closed one page — `fips197` page 1, the
+`ICCBased` space whose profile names no `/Alternate` — and that page was not its file's worst, so
+the per-file median cannot see it and the corpus-wide count moves by one. The page itself went
+**0.7564 → 0.9932**. **A corpus summary is built to be insensitive to exactly this kind of fix**,
+which is the strongest argument in these docs for reading a named page rather than a count.
+
+This is also the run after D26, and the first to measure all **352** pages of
 `pdfjs__freeculture.pdf`; the two pages that previously produced no SSIM at all now do, which is
-where 738 → 740 comes from and why the page count with an SSIM rose without the median moving.
+where 738 → 740 comes from.
 
-**All three parts of Gate 3.1 are missed. None of them is close.** Per-page ≥ 0.95: 165 of 740
-pages, 22.3%, are below it. Median ≥ 0.985: Tier B's own median is 0.96015, 0.025 short.
-≤ 3% of pages below 0.95: 22.3% against 3% — at 740 pages the gate allows **22** and there are
-**165**, a factor of 7.5. The full statement, with what is left in it, is at the top of
+**All three parts of Gate 3.1 are missed. None of them is close.** Per-page ≥ 0.95: 164 of 740
+pages, 22.2%, are below it. Median ≥ 0.985: Tier B's own median is 0.96020, 0.025 short.
+≤ 3% of pages below 0.95: 22.2% against 3% — at 740 pages the gate allows **22** and there are
+**164**, a factor of 7.5. The full statement, with what is left in it, is at the top of
 `docs/known-diffs.md`.
 
-**The gain is concentrated, and the per-file median barely moved.** A file is scored on its worst
-page, and most of the pages that came back over the line were inside files whose worst page was
-already above 0.95 — so the per-file median went **0.9698 → 0.97375**, an order of magnitude less
-than the page count suggests, while the page distribution improved a great deal.
-`gov__nist-sp800-88.pdf` alone accounts for 34 of the 89 pages that came back over the 0.95 line
-across the two runs — 41 below 0.95 before the ICCBased fix, 7 now. The remaining shortfall is
-concentrated in a handful of files too:
+**The gain is concentrated, and the per-file median cannot see most of it.** A file is scored on
+its worst page, and most of the pages that came back over the line were inside files whose worst
+page was already above 0.95 — so the per-file median went **0.9698 → 0.97375** over the last three
+runs, an order of magnitude less than the page count suggests, while the page distribution improved
+a great deal. `gov__nist-sp800-88.pdf` alone accounts for 34 of the 90 pages that came back over
+the 0.95 line across those runs — 41 below 0.95 before the ICCBased fix, 7 now. The remaining
+shortfall is concentrated in a handful of files too:
 
 | pages | file | what it is |
 |---|---|---|
@@ -1010,7 +1017,7 @@ concentrated in a handful of files too:
 | 3 | `gov__arxiv-1512.03385.pdf` | |
 | 11 | 11 other files, 1 page each | long-tail noise |
 
-**62 of the 165 are the two JPEG 2000 files, so the addressable remainder is about 103 pages, and
+**62 of the 164 are the two JPEG 2000 files, so the addressable remainder is about 102 pages, and
 four files hold 70 of those** — `fips197` 24, `TAMReview` 22, `nistir7657` 14, `freeculture` 10. It
 is concentrated in a handful of files rather than spread evenly. The two clusters nobody had
 looked at are now diagnosed (D24) and they turn out to be **38 pages of this project's own
@@ -1120,7 +1127,7 @@ substituted face**, which scores 0.93 where it should score 0.99 and sits just u
 without looking wrong. D24 measures that on the 38 pages of `fips197` and `nistir7657` that carry it
 most heavily: our ink is within **0.2%** of the oracle's on `nistir7657`'s worst page while 7.9% of
 its pixels are above tolerance, because the ink is all in the right places and the glyphs are
-someone else's. **Roughly 38 of the corpus's 165 pages below 0.95 are this policy rather than a
+someone else's. **Roughly 38 of the corpus's 164 pages below 0.95 are this policy rather than a
 defect**, which makes it the largest remaining addressable cause — a policy question, not a
 missing feature. It is now the largest cause of *every* page below 0.95 that is not a codec:
 the one remaining page that was a real feature gap was fixed in
