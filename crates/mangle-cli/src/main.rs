@@ -57,6 +57,7 @@ manglepdf-cli <command> <file.pdf> [options]
   save     [-o FILE] [--incremental] [--full] [--reset-prefs]
   edit     [options]     select and change a page object; save the result
                             --list                 what is on the page, one line each
+                            --provenance [I]      which bytes drew it (the object named, or all)
                             --page N               which page (default 1)
                             --object I             which object (see --list)
                             --move dx dy           move it by dx, dy points
@@ -127,6 +128,34 @@ fn edit(args: &[String]) -> Result<(), String> {
     let model = mangle_edit::PageModel::build(&run.records);
 
     let mut out = std::io::stdout().lock();
+    if flag(args, "--provenance") {
+        // The object named, or every one of them when no index is given.
+        let chosen: Vec<usize> = match value(args, "--provenance").and_then(|v| v.parse().ok()) {
+            Some(i) => vec![i],
+            None => (0..model.objects().len()).collect(),
+        };
+        for i in chosen {
+            let Some(object) = model.objects().get(i) else {
+                eprintln!(
+                    "object {i} is not one of the page's {} objects",
+                    model.objects().len()
+                );
+                continue;
+            };
+            let _ = writeln!(
+                out,
+                "object {i}, a {:?}, at {x0:.2} {y0:.2}",
+                object.kind,
+                x0 = object.bounds.x0,
+                y0 = object.bounds.y0
+            );
+            let provenance = mangle_edit::provenance_of(object, &stream);
+            for line in &provenance.lines {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+        return Ok(());
+    }
     if flag(args, "--list") {
         for (i, o) in model.objects().iter().enumerate() {
             let _ = writeln!(
