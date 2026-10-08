@@ -68,9 +68,17 @@ prefix that never terminates). libtiff emits `100010011100` for that row; the fi
 
 ## What is left
 
-The image bound itself (`MAX_IMAGE_PIXELS` charged per pixel rather than per byte) is still
-unchanged and still over-refuses 1-bit stencils by 8×. That is **correct as it stands** — raising
-it is only safe now that the decode verdict exists, and it would need a corpus re-run to measure.
+**The image bound thread is closed.** `MAX_IMAGE_PIXELS` is still charged per pixel, over-refusing
+1-bit stencils by 8×. Measured against the corpus *before* writing the change: every image a
+byte-based bound would admit is either a `freeculture` stencil that the decode verdict then refuses,
+or the `/SMask` of a 2×2 image in `issue16263`, which is asked the pixel bound anyway. It would
+change **no page**, so it was not written. Recorded at the end of D31.
+
+**Next candidates, none of them a corpus number:**
+- `pdfjs__TAMReview.pdf` — 22 pages below 0.95, all unembedded-font (D24 policy).
+- `pdfjs__freeculture.pdf` — 10 pages, dominated by 2 pages whose stencil decodes damaged.
+- M4+ (page objects, select/move/scale, undo/redo) — entirely unstarted, and the real bulk of the
+  remaining project. Gates 4–9 need it.
 
 ## Things that will waste time if forgotten
 
