@@ -177,6 +177,13 @@ pub struct Record {
 impl Record {
     /// The bounds of the mark in device space, from its geometry rather than from a
     /// glyph metric, which is all the renderer has not yet computed.
+    ///
+    /// For a **glyph run** the height is an approximation from the type size — three quarters of
+    /// an em above the baseline and a quarter below — rather than the font's real ascent and
+    /// descent, which are not read here. That is the right approximation for the two facts a
+    /// caller usually wants from it: where the baseline is, and how big the type is. It is *not*
+    /// a hit-test boundary to the pixel, and a caller that needs exact glyph extents has to get
+    /// them from the font. The horizontal extent is exact, because glyph placements carry it.
     #[must_use]
     pub fn bounds(&self) -> Option<ClipBounds> {
         bounds_of(&self.mark)
@@ -217,22 +224,55 @@ pub fn bounds_of(mark: &Mark) -> Option<ClipBounds> {
                 }
                 b
             }
-            Mark::Glyphs { placements, .. } => {
+            Mark::Glyphs {
+                placements, size, ..
+            } => {
+                // A glyph's placement is a *point*: the origin of a glyph whose outline
+                // reaches up and to the right of it. Taking the union of the origins alone
+                // therefore gives a box one glyph tall — usually **no height at all**, since
+                // every glyph on a line shares a baseline. That is wrong for rendering, where
+                // it costs nothing visible, and actively harmful for anything that groups by
+                // geometry: a line of text would have zero height, so two lines could not be
+                // told apart and a heading could not be told from body copy.
+                //
+                // The ascent and descent come from the type size rather than from the font's
+                // real metrics, which are not read here. They are an approximation and the
+                // doc comment on `Record::bounds` says so; it is the approximation the
+                // specification itself defines, and it is exact for the two metrics that
+                // matter for a *baseline* test — the origin and the size that scaled it.
                 let mut b: Option<ClipBounds> = None;
                 for m in placements {
                     let (x, y) = m.apply(0.0, 0.0);
+                    // The vertical extent of one em at this placement, in the page's own
+                    // direction: `Ts`-less text places at the baseline, and a glyph occupies
+                    // the ascent above it and the descent below. Reading it from the
+                    // placement's second basis vector keeps it right under a rotated CTM,
+                    // where a constant signed amount would be wrong.
+                    let (_, up_y) = m.apply(0.0, 1.0);
+                    let unit = (up_y - y).abs();
+                    // 0.75em above the baseline and 0.25em below is what a Type 1 font's
+                    // `/FontBBox` is very nearly for a text face, and it is the pair the
+                    // specification names for a descent-free approximation.
+                    let ascent = unit * 0.75;
+                    let descent = unit * 0.25;
+                    let _ = size;
+                    let (top, bottom) = if up_y >= y {
+                        (y + ascent, y - descent)
+                    } else {
+                        (y - descent, y + ascent)
+                    };
                     b = Some(match b {
                         None => ClipBounds {
                             x0: x,
-                            y0: y,
+                            y0: bottom,
                             x1: x,
-                            y1: y,
+                            y1: top,
                         },
                         Some(r) => ClipBounds {
                             x0: r.x0.min(x),
-                            y0: r.y0.min(y),
+                            y0: r.y0.min(bottom),
                             x1: r.x1.max(x),
-                            y1: r.y1.max(y),
+                            y1: r.y1.max(top),
                         },
                     });
                 }

@@ -26,10 +26,11 @@
 //! * **The structure tree.** Where a tagged PDF carries `/MCIDs`, grouping should follow it — that
 //!   is the file telling us where its paragraphs are, and it beats any geometry heuristic.
 //!   Nothing here reads it.
-//! * **Glyph metrics.** `Record::bounds` for a glyph run is derived from placements, not from
-//!   real outlines, so a line's box can be slightly wrong for a font whose ascenders differ
-//!   from its placement matrix. It is close enough to group by and not accurate enough to be
-//!   a hit-test boundary a user notices.
+//! * **Glyph metrics.** A line's box comes from the type size — three quarters of an em above
+//!   the baseline, a quarter below — and not from real outlines. That is exact for *where the
+//!   baseline is* and *how big the type is*, which is what grouping needs, and it is not a
+//!   pixel-accurate hit-test boundary. Reading `/FontBBox` or `hhea` is what would fix that,
+//!   and neither is read.
 //! * **Editable contents.** A block knows which byte ranges it covers and how many objects it
 //!   holds; it cannot yet change them. That is the write-back in M4's remaining scope, and this
 //!   module's job is to hand it ranges it can trust.
@@ -559,7 +560,15 @@ mod tests {
         ];
         let m = PageModel::build(&records);
         let hit = m.hit(30.0, 705.0).expect("inside the upper line");
-        assert_eq!(hit.bounds.y0, 700.0);
+        // The box's bottom is the line's *descent*, which sits below the baseline the run was
+        // placed at, so it is slightly under 700 rather than exactly on it. Asserting the
+        // baseline is within the box is the property that matters; asserting it equals the box
+        // edge would pin an implementation detail of the ascent/descent approximation.
+        assert!(
+            hit.bounds.y0 <= 700.0 && hit.bounds.y1 > 700.0,
+            "the line's baseline is inside its own box: {:?}",
+            (hit.bounds.y0, hit.bounds.y1)
+        );
         assert!(
             m.hit(30.0, 650.0).is_none(),
             "between the lines is nothing: {:?}",
@@ -618,5 +627,37 @@ mod tests {
             40,
             "each baseline is its own line here"
         );
+    }
+
+    /// A run whose bounds come from glyph *origins* has no height at all, because every glyph on a
+    /// line shares a baseline.
+    ///
+    /// This is what the interpreter's own bounds used to return for a glyph run, and it is why the
+    /// grouping here could not work: a zero-height box cannot be told from another zero-height box,
+    /// so two lines of text merged and a heading was indistinguishable from body copy. The bound now
+    /// comes from the placement's em, so a run has the ascent and descent its size implies. Found by
+    /// running this over `corpus/wild` rather than by a test, which is the argument for doing that.
+    #[test]
+    fn a_glyph_run_has_a_baseline_and_a_height_not_just_its_origins() {
+        let records = vec![run(10.0, 700.0, 50.0, 712.0, 0)];
+        let m = PageModel::build(&records);
+        let line = &m.objects()[0];
+        assert!(
+            line.bounds.y1 > line.bounds.y0,
+            "a line of text has a height, got {:?}",
+            (line.bounds.y0, line.bounds.y1)
+        );
+    }
+
+    /// Two lines at the same size, different baselines, must not merge — and neither must a run
+    /// with a genuinely different size on the same baseline, which is the heading case.
+    #[test]
+    fn lines_are_separated_by_baseline_and_by_size() {
+        let records = vec![
+            run(10.0, 700.0, 90.0, 712.0, 0),
+            run(10.0, 680.0, 90.0, 692.0, 4),
+        ];
+        let m = PageModel::build(&records);
+        assert_eq!(m.objects().len(), 2, "two baselines, two lines");
     }
 }
