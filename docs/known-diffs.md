@@ -3623,6 +3623,33 @@ gets the PDF default of never giving up, which is what let a desynchronised deco
 of the page. That work is **not done**, and this entry is the reason to do it: the bound looks like
 the obvious defect on this page and is not.
 
+### A wrong hypothesis, recorded because it was expensive
+
+The next attempt blamed the CCITT **code table**. The evidence for it was real: a valid one-row
+Group 3 fixture was reporting `1 damaged row` despite decoding to exactly the right samples, and
+tracing `read_run` showed the third code of `white 3, black 3, white 2` returning `None` and
+consuming ten bits for a three-bit code. **`WHITE_TERMINATING[2]` is `"0111"` and the table is
+read by index, so `011` — the code that *should* be there — looked like an omission of the
+run-length-2 entry.** Two existing tests then failed, and rather than trust that, the fixtures were
+corrected to the code the table expected and the decoder re-run.
+
+**`crates/mangle-filters/tests/ccitt_libtiff.rs` decided it, and it decided against me.** That file
+compares fourteen fixtures **byte for byte against libtiff**. Before the table change: *14 of 14
+match*. After it: **4 fail**, and the decoded rows are shorter than libtiff's by whole runs. The
+table was never wrong. ITU-T T.4's white terminating table has **no entry at index 2 at all** —
+run length 2 is reached through a makeup code plus a shorter terminating code, so the array is
+genuinely as this project has it, and `011` is a *prefix* of `0111` rather than a complete code.
+The fixture that looked like evidence was encoding white 2 with the code for white 7, which the
+right table declines for the best of reasons.
+
+**Both edits were reverted and the suite is green.** What makes this worth writing down is not the
+mistake but its shape: the reasoning was sound at every step, the arithmetic in the test was
+unambiguous, and the change was still wrong — because an index-aligned transcription of a table
+can be read correctly enough to pass every hand-written test while being wrong against the format.
+**The oracle is what told me, and it was in the repository the whole time.** Had I taken the two
+failing tests as the thing to fix, the project's real-world numbers would have improved and its
+correctness would have been destroyed.
+
 `freeculture` page 255 is therefore still refused, and still scores 0.5716 — which is the honest
 number for a page whose only content is an image this project cannot decode correctly. **A bad
 number that is true beats a better one that was bought by drawing noise.**
