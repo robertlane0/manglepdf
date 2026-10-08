@@ -3702,3 +3702,23 @@ What this adds to the retraction above: an index-aligned transcription of T.4 ca
 way that every hand-written test agrees with, because the hand-written tests were written from the
 same misreading. **Only a comparison against the thing itself settles it**, and here that meant
 both the frozen fixtures and a direct question to libtiff.
+
+### The byte bound was measured on the corpus before it was written, and it is worth nothing here
+
+`MAX_IMAGE_PIXELS` charged per pixel over-refuses 1-bit stencils by 8×, and raising it was blocked
+because doing so drew a damaged decode. Now that the decode verdict exists, that block is gone — so
+the question is whether the bound is *worth* changing, and the corpus answers it. **Every image in
+the 77 files that a byte-based bound would admit:**
+
+| image | pixels | as bytes | what it is | admitted by a byte bound? |
+|---|---|---|---|---|
+| `pdfjs__freeculture.pdf` `/Im0` (2 pages) | 8992×10384, 9258×12259 | 12.5 MB, 14.2 MB | 1-bit `CCITTFaxDecode` **stencil** | yes — and then **refused for decoding damaged**, which is the verdict above |
+| `pdfjs__issue16263.pdf` | 34862×4332 | 18.9 MB | 1-bit `/DeviceGray`, and it is the **`/SMask` of a 2×2 image** | no — a mask is asked the pixel bound and refused by the mask's own checks, which is right |
+
+So a byte-based picture bound would change **no page in the corpus**. Not one: the two stencils it
+admits are the two the decode verdict refuses, and the third is a mask. That is the whole finding,
+and it is a reason **not** to make the change — a bound is a guard, and loosening one to admit
+images that every other check then turns away buys nothing and gives up the cheap refusal that
+fires before a single byte is decoded.
+
+The bound stays as it is: conservative, cheap, and asked before allocation.
