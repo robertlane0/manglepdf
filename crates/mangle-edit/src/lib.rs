@@ -18,5 +18,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod history;
+pub mod page_objects;
 
 pub use history::{Edit, History, HistoryError, Snapshot};
+pub use page_objects::{Kind, LineBreak, PageModel, PageObject};
