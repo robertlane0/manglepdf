@@ -952,16 +952,44 @@ right words in the wrong order is still a string of the right words.
 Both are the shape of mistake STATUS.md's preamble describes — a fixture written to be simple is a
 fixture that cannot express them.
 
-**A third thing the corpus test pins down rather than a bug:** an edit's matrix is in the stream's
+**3. An inline image's span was one byte long.** `mangle-content`'s tokeniser gave an inline image
+the span `start..start + 1` — the `B` of `BI` — instead of the whole `BI … EI` region. Every content
+test passed, because a span that is too short does not change what is *read*. It changed what was
+*written*: the first edit on `pdfjs__TAMReview.pdf` inserted its wrapper at that byte and split the
+keyword into `B` + `I`, so the image vanished from the reopened page with nothing reporting it.
+Found by the write-back round trip, and it is a defect in GOAL.md §4.1's **seventh law** — an object
+that claims a byte it does not occupy is a provenance lie, and provenance is what makes surgical
+editing possible at all. The regression test is in `mangle-content`, because that is where the bug
+was; the round trip that found it is in `mangle-edit`.
+
+**A fourth thing the corpus test pins down rather than a bug:** an edit's matrix is in the stream's
 **user space**, while an object's bounds are in **device space** with the CTM already applied. They
 are the same only under the identity CTM. `map_point` converts, and the test asserts the conversion
-on a page that really does scale, because a drag that lands somewhere the pointer never was is
-worse than one that does not move.
+on a page that really does scale — `TAMReview`'s first object is drawn inside a `cm` scaled by 106,
+so twelve points of user space are over a thousand on the page — because a drag that lands somewhere
+the pointer never was is worse than one that does not move. Writing the assertion as "+12" is how an
+edit gets "fixed" into being wrong.
 
-Next in M4, in order: the edits themselves are now built (move/scale/delete/recolour over a
-`PageModel` object's spans, each producing patches rather than a rewritten stream, `Channel::Both`
-for a path filled and stroked in one colour), and what remains is the **save→reopen loop** that
-gives FINISH.md its exit criterion — an edit, a save, a reopen, and an untouched JPEG stream whose
-SHA-256 has not moved. `mangle-syntax::writer` already has `IncrementalUpdate` and
-`Writer::copying_from` for the save half. Arrange (§4.7) — moving an operator range past the next
-*overlapping* object and re-materialising the state at the destination — is the edit after that.
+## The save, and what it must not do
+
+`writeback::save_page` is the other half of the loop, and it is built around what must *not* happen.
+FINISH.md S2 wants an edit, a save, a reopen, and an untouched JPEG stream still bit-identical; the
+only way to be sure of that is for a save to add a revision rather than rewrite the file, and to
+touch nothing it did not have to.
+
+- **Only the parts that changed are written.** A page whose `/Contents` is an array of four streams
+  gets one new object and three untouched ones. Their bytes are not re-encoded, because
+  re-encoding is re-compressing and a re-compressed image is a different image.
+- **The filter is the file's own.** `encode_stream` re-encodes with the filter the stream declared.
+  A filter *chain* is refused by name rather than guessed at — content streams are almost never
+  filtered twice, and a chain re-encoded wrongly is a page that does not open.
+- **A patch that straddles a boundary is refused.** The offsets a `PageObject` carries are offsets
+  into the *concatenation* of the page's content streams, because that is what the interpreter ran.
+  A patch covering the end of one stream and the start of the next is two patches about two
+  different objects, and writing it as one would put one object's bytes inside another.
+- **An encrypted document is refused.** A new revision of an encrypted file has to be encrypted,
+  and this does not do that; the alternative is a file that opens with a repair prompt.
+
+Next in M4: the UI wiring, then Arrange (§4.7) — move an operator range past the next **overlapping**
+object and re-materialise the state at the destination, which is the first edit here that cannot be
+a wrapper because it changes the *order* of operators rather than the space they draw in.

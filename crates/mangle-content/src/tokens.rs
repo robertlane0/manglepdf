@@ -585,11 +585,11 @@ fn inline_image(
                     // No `EI`: the image runs to the end of the stream, which is what
                     // the file says and the only honest reading.
                     let body = data.get(body_start..).unwrap_or_default().to_vec();
-                    push_image(out, start, dict, body);
+                    push_image(out, start, dict, body, data.len());
                     return data.len();
                 };
                 let body = data.get(body_start..body_end).unwrap_or_default().to_vec();
-                push_image(out, start, dict, body);
+                push_image(out, start, dict, body, body_end + 2);
                 lex.seek(body_end + 2);
                 return body_end + 2;
             }
@@ -621,10 +621,17 @@ fn inline_image(
     }
 }
 
-fn push_image(out: &mut Vec<ContentToken>, start: usize, dict: Dict, data: Vec<u8>) {
+/// An inline image's own token: its dictionary, its data, and **every byte it occupies**.
+///
+/// The span is the whole `BI … EI` region and not only its first byte. GOAL.md §4.1's seventh
+/// law is that a selectable object knows exactly which bytes produced it, and a one-byte span is
+/// a lie that only shows up when something writes back: an edit that inserted a wrapper at that
+/// byte split the `BI` keyword in half, and the image vanished from the page with nothing
+/// anywhere reporting it. Found by a corpus round trip.
+fn push_image(out: &mut Vec<ContentToken>, start: usize, dict: Dict, data: Vec<u8>, end: usize) {
     out.push(ContentToken {
         kind: ContentKind::InlineImage { dict, data },
-        span: start..start + 1,
+        span: start..end,
         value: Object::Null,
     });
 }
@@ -867,6 +874,47 @@ mod tests {
         // whitespace before `EI` is data, and a decoder that silently drops it is
         // making a choice the format did not give it.
         assert_eq!(body.as_slice(), b"\x00\x01\x02\x03\xff ");
+    }
+
+    /// **The span of an inline image is every byte it occupies, not its first one.**
+    ///
+    /// GOAL.md §4.1's seventh law is that a selectable object knows exactly which bytes produced
+    /// it, and write-back is what that law is *for*. A one-byte span passed every content test
+    /// and then split a `BI` keyword in half the first time an edit inserted a wrapper in front
+    /// of the image: the page lost the image and nothing reported it. Found by a corpus round
+    /// trip through `mangle-edit`, not by anything here.
+    #[test]
+    fn an_inline_image_spans_every_byte_it_occupies() {
+        let data = b"q BI /W 4 /H 4 ID \x00\x01\x02\x03\xff EI Q";
+        let c = ContentStream::parse(data);
+        let image = c
+            .tokens()
+            .iter()
+            .find(|t| matches!(t.kind, ContentKind::InlineImage { .. }))
+            .expect("the image");
+        assert_eq!(
+            image.span.start,
+            data.iter().position(|b| *b == b'B').expect("BI"),
+            "the span starts at the `BI`, not inside it"
+        );
+        // `BI` through `EI`: both the keyword and the data between them.
+        let covered = data.get(image.span.clone()).unwrap_or_default();
+        assert!(
+            covered.starts_with(b"BI") && covered.ends_with(b"EI"),
+            "the span covers the whole image, not one byte of it: {covered:?}"
+        );
+        assert!(
+            covered.len() > 8,
+            "and it is more than the keyword: {covered:?}"
+        );
+        // And the operation the interpreter runs carries the same span.
+        let op = c
+            .operation_at(image.span.start)
+            .expect("an operation there");
+        assert_eq!(
+            op.span, image.span,
+            "so an edit can address the whole image"
+        );
     }
 
     #[test]

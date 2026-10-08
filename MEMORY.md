@@ -88,6 +88,10 @@ change **no page**, so it was not written. Recorded at the end of D31.
   `PageModel` object's spans, each a `q … Q` wrapper around the object's own operators so those
   bytes come out untouched, plus `tests/edits_corpus.rs` which runs move, delete and recolour over
   three real pages and checks the effect *through the interpreter*, not the patch text.
+- `writeback.rs` — the save. `save_page` appends an incremental update, rewriting only the content
+  streams that changed and re-encoding them with the file's own filter, plus
+  `tests/writeback_corpus.rs`: edit → save → reopen, with the untouched image's SHA-256 asserted
+  unchanged. That is FINISH.md S2's exit criterion and it passes.
 
 **Running a model over real corpus pages found a bug no unit test could.** `Record::bounds` for a
 glyph run took the union of glyph *origins*, and every glyph on a line shares a baseline — so the
@@ -105,11 +109,12 @@ Conventions worth reusing:
 - `clippy::single_range_in_vec_init` fires on one-element range lists; allow it in test mods
   rather than writing `vec![x][..].to_vec()`.
 
-**Next in M4:** the edits are built too — `edits.rs` turns a `Change` into patches over a
-`PageModel` object's spans, each a `q … Q` wrapper around the object's own operators. What remains
-is the **save→reopen loop** that gives FINISH.md S2 its exit criterion — edit → save → reopen with
-the JPEG stream's SHA-256 unchanged. `mangle-syntax::writer` already has `IncrementalUpdate` and
-`Writer::copying_from`.
+**Next in M4:** the edits are built (`edits.rs` — a `Change` becomes patches over a
+`PageModel` object's spans, each a `q … Q` wrapper around the object's own operators), and so is the
+save (`writeback.rs` — `save_page` appends an incremental update, rewriting only the content
+streams that changed and re-encoding them with the file's own filter). FINISH.md S2's exit
+criterion — edit → save → reopen with the untouched JPEG stream's SHA-256 unchanged — is asserted in
+`tests/writeback_corpus.rs` and passes. What is left is the UI wiring and Arrange.
 
 Two conventions the surgery and edits tests rely on, both worth reusing: a byte offset in a test is
 **computed from the fixture** (`windows(5).position(…)`) rather than hand-counted, because a
@@ -118,19 +123,22 @@ is **the operation that drew it** (`/PxARRO Do`), not the `cm` that positioned i
 picture means editing the `cm` before it, which is the first thing to get wrong when writing an
 edit from a record's span.
 
-**Two bugs the corpus test found that every unit test passed, both recorded in `PLAN.md`: an
-insertion that carries no whitespace of its own glues onto the token it lands in** (a real page
+**Three bugs the corpus tests found that every unit test passed, all recorded in `PLAN.md`:**
+**an insertion that carries no whitespace of its own glues onto the token it lands in** (a real page
 writes `0.000 Tc(Working Papers)Tj`; inserting `q …` there produced `Tcq`, one keyword, so the
-wrapper was never an operator and the stream was unbalanced), **and a colour written
-operands-after-operator** (`rg 0.784 0.063 0.18` rather than `0.784 0.063 0.18 rg` is an `rg` with
-no operands, so the colour never changed and the page rendered perfectly with the old one). The
-second is the one to remember: my unit test asserted the patch *text* and passed, the corpus test
-asserted the *colour the interpreter reports* and failed. **Assert the effect, not the string.**
+wrapper was never an operator and the stream was unbalanced), **a colour written
+operands-after-operator** (`rg 0.784 0.063 0.18` rather than `0.784 0.063 0.18 rg` is an `rg` with no
+operands, so the colour never changed and the page rendered perfectly with the old one), and **an
+inline image's span was one byte** (`mangle-content` gave it `start..start+1`, the `B` of `BI`, so
+the first edit split the keyword and the image vanished from the reopened page). The second is the
+one to remember: my unit test asserted the patch *text* and passed, the corpus test asserted the
+*colour the interpreter reports* and failed. **Assert the effect, not the string.** And a span that
+is too short passes every read test and breaks the first write — provenance is what the write-back
+rests on.
 
-**The edits to write next, in order:** the save half (incremental update through
-`IncrementalUpdate`), then Arrange (§4.7) — move an operator range past the next *overlapping*
-object and re-materialise the state at the destination. Each must land as a `Vec<Patch>` over the
-object's own spans, and each must satisfy U1: every byte outside those ranges identical.
+**Next after that, in order:** the UI wiring, then Arrange (§4.7) — move an operator range past the
+next *overlapping* object and re-materialise the state at the destination. That one cannot be a
+wrapper, because it changes the *order* of operators rather than the space they draw in.
 
 Two conventions the surgery tests rely on, both worth reusing: a byte offset in a test is
 **computed from the fixture** (`windows(5).position(…)`) rather than hand-counted, because a

@@ -21,8 +21,10 @@ pub mod edits;
 pub mod history;
 pub mod page_objects;
 pub mod surgery;
+pub mod writeback;
 
 pub use edits::{Change, ChangeError, Channel, Refusal, apply_change, map_point, verify};
 pub use history::{Edit, History, HistoryError, Snapshot};
 pub use page_objects::{Kind, LineBreak, PageModel, PageObject};
 pub use surgery::{Applied, EditError, Patch};
+pub use writeback::{Save, SaveError, save_page, stream_digest};
