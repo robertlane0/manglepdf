@@ -1008,11 +1008,16 @@ Two things about it are worth writing down:
 - **What the record does not carry is where this stops.** A clip cannot be re-established (a record
   carries the *region* the clip resolved to, not the path operators that built it); an alpha or a
   blend mode cannot be re-established (they live in a named `/ExtGState`, and inventing a name
-  would either collide with the file's or draw attention to a resource nobody defined); and **text
-  cannot be re-established** (a run depends on the font, size, `Tc`, `Tw`, `Tz`, `TL`, `Ts` in
-  force where it sat, and none of that is on the record). Each is refused with a name, and on a real
-  page that is 201 objects refused next to 582 arranged — the refusals are the finding, not a
-  failure: most of a page is text, and the Text Properties panel is what would make it arrangeable.
+  would either collide with the file's or draw attention to a resource nobody defined). Each is
+  refused with a name.
+- **Text was in that list and no longer is.** A run's appearance depends on the text state in force
+  — the font, the size, `Tc`, `Tw`, `Tz`, `TL`, `Ts` — and `Record` used to carry the font and the
+  size and nothing else, so a moved run was refused. It now carries `text` and `text_matrix`, and
+  arrange writes them back: `BT /F1 12 Tf 0.5 Tc 0 Tw 90 Tz 14 TL 3 Ts`, then the matrix, then the
+  moved bytes inside the `BT … ET` the wrapper closes. Across three corpus pages that took **201
+  refusals down to 168** and 582 arrangements up to 615, which is what "most of a page is text"
+  actually costs. What is still refused is a clip, an alpha, a blend mode and a shading — and the
+  numbers on a real page are what say which of those matter.
 
 ## The session, and the shape a save takes
 
