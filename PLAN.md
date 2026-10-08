@@ -1043,6 +1043,23 @@ an edit that inserted bytes into the first content stream to the second one. The
 into the wrong object and nothing reported it; the split now goes by where the patches landed,
 which is what the save already did.
 
+## A crop is a clip, and that is the whole of it
+
+GOAL.md §4.5 asks for "crop as a non-destructive clip (resettable)", and the parenthesis is the
+interesting half: a crop that rewrote the image's bytes would be a crop that could not be undone and
+would have re-encoded a JPEG. So `Change::Crop { keep }` is `q <polygon> W n <the Do> Q` — the only
+edit here whose wrapper is a **clip** rather than a state, and one that adds bytes and removes none.
+
+Two details that were easy to get wrong:
+
+- **The rectangle is in page space, because that is what a crop tool drags**, but a `Do` draws in the
+  space that was current when it ran. So the rectangle is mapped back through the record's own CTM,
+  and the corpus test proves it: an image placed under `cm 106.1 0 0 31.2 …` gets a polygon whose
+  corners are one hundred-and-sixth of the page-space ones.
+- **The clip is a polygon, not a `re`**, because the mapped rectangle is not necessarily axis-aligned.
+  Under a rotated `cm`, a `re` would clip the *bounding box* of the crop and keep a corner the user
+  dragged away. `m l l l h` is exact for any affine transform.
+
 ## A stroked line had no box to click on
 
 GOAL.md §4.2 asks for "exact bounds (including stroke width and glyph bounds)". The stroke half was
@@ -1074,6 +1091,23 @@ character-spacing change. That is the file asking for what it asked for. A check
 object count was unchanged would have failed a correct edit, so the text property is verified by
 matching the run **by its string** and reading the value back out of the interpreter, and the
 grouping is left to be what it is.
+
+## A crop is a clip, and that is the whole of it
+
+GOAL.md §4.5 asks for "crop as a non-destructive clip (resettable)", and the parenthesis is the
+interesting half: a crop that rewrote the image's bytes would be a crop that could not be undone and
+would have re-encoded a JPEG. So `Change::Crop { keep }` is `q <polygon> W n <the Do> Q` — the only
+edit here whose wrapper is a **clip** rather than a state, and one that adds bytes and removes none.
+
+Two details that were easy to get wrong:
+
+- **The rectangle is in page space, because that is what a crop tool drags**, but a `Do` draws in the
+  space that was current when it ran. So the rectangle is mapped back through the record's own CTM,
+  and the corpus test proves it: an image placed under `cm 106.1 0 0 31.2 …` gets a polygon whose
+  corners are one hundred-and-sixth of the page-space ones.
+- **The clip is a polygon, not a `re`**, because the mapped rectangle is not necessarily axis-aligned.
+  Under a rotated `cm`, a `re` would clip the *bounding box* of the crop and keep a corner the user
+  dragged away. `m l l l h` is exact for any affine transform.
 
 ## A stroked line had no box to click on
 

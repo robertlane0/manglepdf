@@ -51,6 +51,7 @@
 //! nobody asked for wearing a plausible hat.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::ops::Range;
 
 use mangle_content::interp::{Mark, PageContent};
@@ -107,6 +108,21 @@ pub enum Change {
         colour: Rgba,
         /// Which of the two colours.
         channel: Channel,
+    },
+    /// Crop an image to a rectangle, non-destructively.
+    ///
+    /// The one edit whose wrapper is a **clip** rather than a state: `q <polygon> W n <the Do> Q`
+    /// keeps the part of the picture inside the rectangle and drops the rest. It is non-destructive
+    /// in the only sense that matters — the image's own bytes are untouched, and undoing the edit
+    /// takes the clip away and restores the whole picture — which is what GOAL.md §4.5 means by
+    /// "crop as a non-destructive clip (resettable)".
+    ///
+    /// The rectangle is in **page space**, because that is what a crop tool drags. A `Do` draws in
+    /// the space that was current when it ran, so the rectangle has to be read back through the
+    /// record's own CTM before it can be written.
+    Crop {
+        /// The part to keep, in page space.
+        keep: ClipBounds,
     },
     /// Change one text property of a run of glyphs.
     ///
@@ -369,6 +385,10 @@ pub fn patches_for(
             let body = text_body(object, property)?;
             Ok(wrap_each(stream, object, "", &body))
         }
+        Change::Crop { keep } => {
+            let body = crop_body(object, *keep)?;
+            Ok(wrap_each(stream, object, "", &body))
+        }
         Change::Delete => delete_patches(stream, object),
     }
 }
@@ -396,6 +416,48 @@ fn render_mode_number(mode: mangle_content::state::RenderMode) -> u8 {
         RenderMode::Clip => 7,
         RenderMode::ClipStroke => 8,
     }
+}
+
+/// The polygon that keeps the asked-for part of an image, in the space its `Do` draws in.
+///
+/// Four corners, mapped back through the record's CTM, written as `m l l l h`. A polygon rather
+/// than a `re` because the mapped rectangle is not necessarily axis-aligned: under a rotated `cm` a
+/// `re` would clip the *bounding box* of the crop and keep a corner the user dragged away.
+fn crop_body(object: &PageObject, keep: ClipBounds) -> Result<String, Refusal> {
+    let Some(record) = object.records.first() else {
+        return Err(Refusal::NoSpans);
+    };
+    if !matches!(record.mark, Mark::Image { .. }) {
+        return Err(Refusal::NoSuchColour {
+            kind: object.kind,
+            channel: Channel::Fill,
+        });
+    }
+    let Some(inverse) = record.ctm.inverse() else {
+        return Err(Refusal::ColourSpaceNotWritable {
+            space: "a degenerate transform".to_string(),
+            channel: Channel::Fill,
+            why: "the image's placement has no inverse, so a page-space crop cannot be mapped \
+                 into the space it draws in",
+        });
+    };
+    let corners = [
+        (keep.x0, keep.y0),
+        (keep.x1, keep.y0),
+        (keep.x1, keep.y1),
+        (keep.x0, keep.y1),
+    ];
+    let mut out = String::new();
+    for (i, (x, y)) in corners.iter().enumerate() {
+        let (ux, uy) = inverse.apply(*x, *y);
+        if i == 0 {
+            let _ = write!(out, "{} {} m", num(ux), num(uy));
+        } else {
+            let _ = write!(out, " {} {} l", num(ux), num(uy));
+        }
+    }
+    out.push_str(" h W n\n");
+    Ok(out)
 }
 
 fn text_body(object: &PageObject, property: &TextProperty) -> Result<String, Refusal> {
@@ -889,6 +951,9 @@ pub fn verify(
     match change {
         // Dispatched above: the one edit that changes the grouping.
         Change::Text(_) => Ok(()),
+        // A crop changes where the image **is not**: it still sits exactly where it was, because
+        // a clip cuts what is drawn rather than moving it. So the ordinary checks apply.
+        Change::Crop { .. } => Ok(()),
         Change::Transform(m) => {
             let ctm = target
                 .records
@@ -1376,6 +1441,53 @@ mod tests {
         )
         .expect_err("an image has no text state");
         assert!(matches!(err, Refusal::NoSuchColour { .. }), "{err}");
+    }
+
+    /// A crop is a **clip** wrapped around the image's own `Do`, and the clip is written as a
+    /// polygon in the space the `Do` draws in — which is the record's CTM read backwards.
+    #[test]
+    fn a_crop_is_a_clip_written_in_the_space_the_do_draws_in() {
+        let mut r = image(4, 4);
+        r.ctm = Matrix::scale(10.0, 10.0);
+        let o = object(Kind::Image, vec![r]);
+        // A rectangle in page space that covers half of a 100x100 image.
+        let keep = ClipBounds {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 500.0,
+            y1: 500.0,
+        };
+        let patches = patches_for(b"01 2 0 0 20 0 0 cm /Im0 Do", &o, &Change::Crop { keep })
+            .expect("a crop is writable");
+        let text = insert_at(&patches, 4).expect("inserted before the image");
+        // The record's CTM is `scale(10, 10)`, so 500 page units is 50 in the image's own space.
+        assert!(
+            text.contains("0 0 m 50 0 l 50 50 l 0 50 l h W n"),
+            "the polygon is the crop mapped back through the CTM: {text}"
+        );
+    }
+
+    /// A crop on something that is not an image is refused: there is nothing to clip.
+    #[test]
+    fn a_crop_on_an_object_that_is_not_an_image_is_refused() {
+        let mark = path(2, 4, ColourSpace::device_rgb(), vec![1.0, 0.0, 0.0]);
+        let o = object(Kind::Path, vec![mark]);
+        let err = patches_for(
+            b"01 0 0 0 1 k f  ",
+            &o,
+            &Change::Crop { keep: bounds_box() },
+        )
+        .expect_err("a path has no picture to crop");
+        assert!(matches!(err, Refusal::NoSuchColour { .. }), "{err}");
+    }
+
+    fn bounds_box() -> ClipBounds {
+        ClipBounds {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0,
+            y1: 10.0,
+        }
     }
 
     #[test]

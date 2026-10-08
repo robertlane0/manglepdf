@@ -501,3 +501,83 @@ fn with_wrappers_removed(after: &[u8], inserted: &[Vec<u8>]) -> Vec<u8> {
     out.extend_from_slice(&after[cursor..]);
     out
 }
+
+/// A crop on a real image, and the two properties that make it a crop rather than a rewrite.
+///
+/// GOAL.md §4.5 asks for "crop as a non-destructive clip (resettable)". Both halves are
+/// checkable, and the second is the one that matters:
+///
+/// 1. **The clip lands** — the interpreter reports a clip in force for the image's record, and the
+///    image itself is still the same picture;
+/// 2. **Nothing else changed** — the image's own operators come out byte-for-byte and the only
+///    bytes added are the clip, so undoing the edit (or simply taking the wrapper out) restores the
+///    whole picture.
+#[test]
+fn a_crop_on_a_real_image_is_a_clip_and_nothing_else() {
+    let Some(name) = PAGES.first() else {
+        return;
+    };
+    let Some((contents, resources)) = page_one(name) else {
+        eprintln!("skipped: {name} is not fetched");
+        return;
+    };
+    let before = run_with(&ContentStream::parse(&contents), &resources);
+    let model = PageModel::build(&before.records);
+    let Some(index) = model
+        .objects()
+        .iter()
+        .position(|o| o.kind == mangle_edit::Kind::Image)
+    else {
+        eprintln!("skipped: no image on this page");
+        return;
+    };
+    let object = &model.objects()[index];
+    let was = object.bounds;
+    // Half the image, in page space.
+    let keep = mangle_content::state::ClipBounds {
+        x0: was.x0,
+        y0: was.y0,
+        x1: f64::midpoint(was.x0, was.x1),
+        y1: f64::midpoint(was.y0, was.y1),
+    };
+    let change = Change::Crop { keep };
+    let applied = apply_change(&contents, object, &change).expect("a crop is writable");
+    let after = run_with(&ContentStream::parse(&applied.bytes), &resources);
+
+    // 1. The image is still there, in the same place, with a clip in force.
+    let cropped = after
+        .records
+        .iter()
+        .find(|r| matches!(r.mark, mangle_content::Mark::Image { .. }))
+        .expect("the image is still on the page");
+    assert!(
+        cropped.clip.is_some(),
+        "and it is now drawn inside a clip, which is what a crop is"
+    );
+    let bounds = cropped.bounds().expect("a box");
+    assert!(
+        (bounds.x0 - was.x0).abs() < 1e-6 && (bounds.y0 - was.y0).abs() < 1e-6,
+        "a crop does not move the image, it cuts it: {:?}",
+        (bounds.x0, bounds.y0)
+    );
+
+    // 2. Nothing else changed: taking the wrapper back out gives the original exactly.
+    let inserted = applied
+        .applied
+        .iter()
+        .map(|p| p.bytes.clone())
+        .collect::<Vec<_>>();
+    let stripped = with_wrappers_removed(&applied.bytes, &inserted);
+    assert_eq!(
+        stripped, contents,
+        "every byte the crop did not insert is a byte the author wrote"
+    );
+
+    // And the picture itself is untouched: the image XObject's bytes are the file's own, which is
+    // what "non-destructive" means against the stream the crop was applied to.
+    assert!(
+        !applied.applied.iter().any(|p| !p.range.is_empty()),
+        "a crop adds bytes and removes none: {patches:?}",
+        patches = applied.applied
+    );
+}

@@ -69,6 +69,7 @@ manglepdf-cli <command> <file.pdf> [options]
                             --tl N                 leading, points
                             --ts N                 baseline shift, points
                             --size N               the font size, points
+                            --crop x0,y0,x1,y1      keep that part of an image, in page space
                             --forward|--backward   arrange it past the object it overlaps
                             --to-front|--to-back   arrange it to the ends of the page
                             -o FILE                where to write (default beside the input)
@@ -316,6 +317,22 @@ fn change_from_args(
             s,
         ));
     }
+    if let Some(crop) = value(args, "--crop") {
+        let parts: Vec<f64> = crop.split(',').filter_map(|p| p.parse().ok()).collect();
+        match (
+            parts.first().copied(),
+            parts.get(1).copied(),
+            parts.get(2).copied(),
+            parts.get(3).copied(),
+        ) {
+            (Some(x0), Some(y0), Some(x1), Some(y1)) => {
+                return Ok(mangle_edit::Change::Crop {
+                    keep: mangle_content::state::ClipBounds { x0, y0, x1, y1 },
+                });
+            }
+            _ => return Err("--crop needs x0,y0,x1,y1".to_string()),
+        }
+    }
     for (flag, build) in [
         ("--tc", 0usize),
         ("--tw", 1),
@@ -357,7 +374,7 @@ fn change_from_args(
     }
     Err(
         "say what to do: --move dx,dy, --scale s, --delete, --colour r,g,b, a text property \
-         (--tc/--tw/--tz/--tl/--ts/--size), or an arrange flag"
+         (--tc/--tw/--tz/--tl/--ts/--size), --crop x0,y0,x1,y1, or an arrange flag"
             .to_string(),
     )
 }

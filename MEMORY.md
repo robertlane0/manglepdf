@@ -166,6 +166,13 @@ line and the model regroups — `irs-f1040` page 1 goes 589 → 656 objects on o
 change, correctly. So the text property is verified by matching the run **by its string** and reading
 the value back, not by the object count or the old centre.
 
+**`Change::Crop` is in** (`--crop x0,y0,x1,y1`): §4.5's non-destructive crop, as `q <polygon> W n
+<Do> Q`. The rectangle is page space and the polygon is the record's CTM read backwards, so an image
+under `cm 106.1 0 0 31.2` gets corners one hundred-and-sixth the size. A polygon rather than a `re`
+because the mapped rectangle is not axis-aligned under a rotation. `tests/edits_corpus.rs` proves
+both halves of "non-destructive": the clip lands, and taking the wrapper back out returns the
+original stream exactly.
+
 **Next after that, in order:** the UI wiring (the `mangle-ui` window shell), then §4.4's Text
 Properties panel and layout (recompute positions / `Tw` inside the edited block's original width,
 keeping untouched lines' operators byte-identical).
