@@ -353,11 +353,20 @@ fn scope_of(stream: &[u8], from: &Range<usize>, arrange: Arrange) -> usize {
 /// with nothing anywhere saying so.
 fn state_of(object: &PageObject) -> Result<String, ArrangeRefusal> {
     let Some(record) = object.records.first() else {
+        // The model never builds an object with no records; this is the honest answer to a model
+        // that one day might, rather than a panic in a library.
         return Err(ArrangeRefusal::Scattered { spans: 0 });
     };
     match &record.mark {
-        Mark::Glyphs { .. } | Mark::Shading { .. } => Err(ArrangeRefusal::NeedsTextState),
+        // A run of text depends on the text state in force where it sat, and none of that is on
+        // the record.
+        Mark::Glyphs { .. } => Err(ArrangeRefusal::NeedsTextState),
+        // A shading is painted into the clip in force, and a clip cannot be re-established from
+        // the region a record carries.
+        Mark::Shading { .. } => Err(ArrangeRefusal::NeedsClip),
         Mark::Image { .. } | Mark::Path { .. } => Ok(state_of_record(record)?),
+        // A clip marker is not an object and the model never makes one; if it ever does, this is
+        // the answer that tells the truth about what is missing.
         Mark::ClipChanged(_) => Err(ArrangeRefusal::NeedsClip),
     }
 }
@@ -651,6 +660,23 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("ExtGState"), "{err}");
+    }
+
+    /// A shading is refused for the right reason: it paints into the clip in force, so a clip is
+    /// what would have to be re-established — not a text state.
+    #[test]
+    fn a_shading_is_refused_because_a_clip_cannot_be_re_established() {
+        let r = record(
+            mangle_content::Mark::Shading {
+                name: "Sh0".into(),
+                matrix: Matrix::IDENTITY,
+            },
+            0..4,
+        );
+        let o = object(Kind::Shading, vec![r], box_of(0.0, 0.0, 10.0, 10.0));
+        let err = state_of(&o).expect_err("a shading paints into a clip");
+        assert!(matches!(err, ArrangeRefusal::NeedsClip), "{err}");
+        assert!(err.to_string().contains("clip"), "{err}");
     }
 
     #[test]

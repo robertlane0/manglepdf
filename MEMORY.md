@@ -1,7 +1,6 @@
 # MEMORY.md
 
-Session continuity notes. Not part of the project spec — see `PLAN.md` for planning and
-`AGENTS.md` for the working rules.
+Session continuity notes. Not part of the project spec — see `PLAN.md` for planning.
 
 ## Where the project stands
 
