@@ -23,7 +23,7 @@
 
 use mangle_content::{ContentStream, Resources};
 use mangle_doc::PageTree;
-use mangle_edit::{Kind, PageModel};
+use mangle_edit::{Kind, PageModel, provenance_of};
 use mangle_syntax::object::Object;
 use mangle_syntax::{Document, OpenOptions};
 
@@ -166,4 +166,91 @@ fn no_two_objects_claim_the_same_span() {
             }
         }
     }
+}
+
+/// The provenance law, read out on a real page.
+///
+/// GOAL.md §4.1's seventh law is that a selectable object knows **exactly which bytes of which
+/// content stream** produced it, and that this "lets the Inspector show what changed". The byte
+/// ranges have been on the model from the start; what this asserts is that reading them back gives
+/// the operations that really are at those offsets in the page's own stream — because a span that
+/// is one byte short (B3) prints an operator with a byte missing out of the middle of it and looks
+/// entirely plausible.
+#[test]
+fn the_bytes_an_object_claims_are_the_bytes_the_page_drew() {
+    let mut checked = 0usize;
+    for name in PAGES {
+        let Some((model, len)) = model_for(name) else {
+            eprintln!("skipped: {name} is not fetched");
+            continue;
+        };
+        let bytes = std::fs::read(format!("../../corpus/wild/{name}"))
+            .expect("the page came from this file");
+        let doc = Document::open(bytes, OpenOptions::default()).expect("it opens");
+        let cat = doc.catalog().expect("a catalogue");
+        let root = cat
+            .get("Pages")
+            .and_then(Object::as_ref_id)
+            .expect("a tree");
+        let pages = PageTree::build(&doc, root).expect("the walk");
+        let page = pages.pages().first().expect("page one");
+        let stream = page.decoded_contents(&doc);
+        let _ = len;
+        for object in model.objects() {
+            for line in &provenance_of(object, &stream).lines {
+                let span = line
+                    .split('\t')
+                    .nth(2)
+                    .map(|s| s.trim().to_owned())
+                    .and_then(|s| parse_span(&s))
+                    .expect("the line carries its span");
+                assert!(
+                    span.end <= stream.len(),
+                    "{name}: the object claims bytes {span:?} of a stream that is {} bytes long",
+                    stream.len()
+                );
+                // **A span never splits a token.** The range an object claims must start where a
+                // token starts and end where one ends, or it is a range covering bytes that are not
+                // the operation's — and an edit written over such a range replaces a number that
+                // belonged to somebody else.
+                //
+                // This is the exact shape of both span defects the corpus found. B3's
+                // inline-image span was `start..start + 1`, the `B` of `BI`: it *ends* mid-token.
+                // And the `BI` fallback ran to the end of the token *after* it, so it *starts* on
+                // bytes that are not its own. Both pass a check that merely says "in range".
+                let (starts, ends) = token_edges(&stream);
+                assert!(
+                    starts.contains(&span.start),
+                    "{name}: the span {span:?} starts inside a token, so it is not the operation's \
+                     own bytes"
+                );
+                assert!(
+                    ends.contains(&span.end),
+                    "{name}: the span {span:?} ends inside a token, so it is not the operation's \
+                     own bytes"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(
+        checked > 0,
+        "no object named any bytes, so nothing was checked"
+    );
+    eprintln!("{checked} provenance line(s), every one inside its page's stream");
+}
+
+/// Where the page's own tokens start and end, so a span can be checked against them.
+fn token_edges(stream: &[u8]) -> (Vec<usize>, Vec<usize>) {
+    let parsed = ContentStream::parse(stream);
+    (
+        parsed.tokens().iter().map(|t| t.span.start).collect(),
+        parsed.tokens().iter().map(|t| t.span.end).collect(),
+    )
+}
+
+/// A span out of a provenance line: `12..20`.
+fn parse_span(text: &str) -> Option<std::ops::Range<usize>> {
+    let (start, end) = text.trim().split_once("..")?;
+    Some(start.parse::<usize>().ok()?..end.parse::<usize>().ok()?)
 }

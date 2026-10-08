@@ -42,6 +42,7 @@
 //! same order every time, which is what makes the result testable at all.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::ops::Range;
 
 use mangle_content::interp::{Mark, Record};
@@ -249,6 +250,73 @@ impl PageModel {
             *out.entry(name).or_insert(0) += 1;
         }
         out
+    }
+}
+
+/// What one object is made of, written out for a person to read.
+///
+/// GOAL.md §4.1's seventh law is that every selectable object knows **exactly which bytes of which
+/// content stream** produced it, and that this "lets the Inspector show what changed". The model has
+/// carried the byte ranges from the beginning; what has been missing is a way to *read* them, so
+/// the law was a claim rather than a fact.
+///
+/// This is that reading, and it is deliberately plain text: a caller that wants to show it in a
+/// panel formats it, and a caller that wants to diff it has the same lines twice.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Provenance {
+    /// One line per record, in drawing order, in the order [`PageObject::spans`] gives.
+    pub lines: Vec<String>,
+}
+
+impl Provenance {
+    /// The whole thing as text, one line per operation.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+}
+
+impl fmt::Display for Provenance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text())
+    }
+}
+
+/// What an object is made of, read out of the stream it came from.
+///
+/// **`stream` is the page's own content stream, decoded** — the one the object's spans are offsets
+/// into. Passing anything else would print bytes that belong to a different object, which is the
+/// exact failure provenance exists to prevent.
+#[must_use]
+pub fn provenance_of(object: &PageObject, stream: &[u8]) -> Provenance {
+    let mut lines = Vec::with_capacity(object.records.len());
+    let mut spans = object.spans.iter().peekable();
+    for (i, record) in object.records.iter().enumerate() {
+        let span = record.span.clone();
+        let bytes = stream
+            .get(span.clone())
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .unwrap_or_default();
+        // The resources the operation names, which is the other half of "which bytes produced it":
+        // a `Do /Im0` is only meaningful against the page's `/XObject`.
+        let names = names_of(&record.mark);
+        let what = names.map_or_else(String::new, |n| format!(" of /{n}"));
+        lines.push(format!(
+            "{i}\t{kind:?}\t{span:?}\t{bytes}{what}",
+            kind = object.kind,
+        ));
+        let _ = spans.next();
+    }
+    Provenance { lines }
+}
+
+/// The resource name a mark refers to, whichever kind it is.
+fn names_of(mark: &Mark) -> Option<String> {
+    match mark {
+        Mark::Image { name, .. } => name.clone(),
+        Mark::Shading { name, .. } => Some(name.clone()),
+        Mark::Glyphs { font, .. } => font.clone(),
+        _ => None,
     }
 }
 

@@ -30,7 +30,7 @@ pub use edits::{
     Change, ChangeError, Channel, Refusal, TextProperty, apply_change, map_point, verify,
 };
 pub use history::{Edit, History, HistoryError, Snapshot};
-pub use page_objects::{Kind, LineBreak, PageModel, PageObject};
+pub use page_objects::{Kind, LineBreak, PageModel, PageObject, Provenance, provenance_of};
 pub use session::{Editor, OpenError, Reason, SessionError};
 pub use surgery::{Applied, EditError, Patch};
 pub use writeback::{Save, SaveError, save_decoded, save_page, stream_digest};

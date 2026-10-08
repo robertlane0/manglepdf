@@ -38,7 +38,9 @@ use mangle_syntax::object::Object;
 use mangle_syntax::{Document, OpenOptions};
 
 /// A design export with images, and a government form of rules and type.
-const PAGES: &[&str] = &["pdfjs__TAMReview.pdf", "gov__irs-f1040.pdf"];
+/// Pages to run over, chosen for having several content streams each — the first page of the
+/// corpus is refused an edit, so a session needs somewhere it can work.
+const PAGES: &[&str] = &["gov__irs-f1040.pdf", "gov__nist-sp800-88.pdf"];
 
 /// A corpus file's document and page tree, or `None` when the submodule is not fetched.
 fn open_page(name: &str) -> Option<(Document, PageTree, usize)> {
@@ -175,7 +177,7 @@ fn a_session_round_trips_a_real_page() {
 /// other step.
 #[test]
 fn an_arrange_in_a_session_can_be_undone() {
-    let Some((doc, tree, index)) = open_page("pdfjs__TAMReview.pdf") else {
+    let Some((doc, tree, index)) = open_page("gov__irs-f1040.pdf") else {
         eprintln!("skipped: the corpus file is not fetched");
         return;
     };

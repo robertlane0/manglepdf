@@ -78,6 +78,14 @@ fn page_one(name: &str) -> Option<(Vec<u8>, Resources)> {
     Some((page.decoded_contents(&doc), resources))
 }
 
+/// Why this page would refuse an edit, for the skip message above.
+fn page_refusal(stream: &[u8], object: &mangle_edit::PageObject, change: &Change) -> String {
+    apply_change(stream, object, change)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default()
+}
+
 /// The centre of a box, which is what a move is measured on.
 fn centre(b: &mangle_content::state::ClipBounds) -> (f64, f64) {
     (f64::midpoint(b.x0, b.x1), f64::midpoint(b.y0, b.y1))
@@ -156,7 +164,13 @@ fn a_move_on_a_real_page_moves_the_object_and_leaves_every_other_byte_alone() {
         // 12 pt right and 5 pt down: a drag, not a nudge, so a rounding error could not pass
         // for it.
         let change = Change::move_by(12.0, -5.0);
-        let applied = apply_change(&stream, object, &change).expect("a move is always writable");
+        let Ok(applied) = apply_change(&stream, object, &change) else {
+            // A page whose inline image cannot be read is refused by name; that is the honesty
+            // law at work, and the test below asserts it.
+            let why = page_refusal(&stream, object, &change);
+            eprintln!("skipped: {name} is refused an edit: {why}");
+            continue;
+        };
         assert_ne!(applied.bytes, stream, "the edit changed something");
 
         // **Nothing outside the wrapper changed.** Taking the edit's own inserted bytes back
@@ -221,7 +235,7 @@ fn near(a: (f64, f64), b: (f64, f64)) -> bool {
 /// result is built from the patches rather than written down.
 #[test]
 fn a_delete_on_a_real_page_removes_exactly_that_objects_operators() {
-    let Some((stream, resources)) = page_one("pdfjs__TAMReview.pdf") else {
+    let Some((stream, resources)) = page_one("gov__irs-f1040.pdf") else {
         eprintln!("skipped: the corpus file is not fetched");
         return;
     };
@@ -369,9 +383,47 @@ fn an_object_from_inside_a_form_is_refused_rather_than_misread() {
 /// law exists for: the user is told, rather than shown a page that changed in a way they did not
 /// choose. Most corpus pages recolour fine, so this looks for one that does not without
 /// requiring one.
+/// A page whose inline image cannot be read refuses an edit, and names the reason.
+///
+/// `pdfjs__TAMReview.pdf` page 1 holds a `BI` whose dictionary does not parse, so the tokeniser
+/// leaves the `BI` bare and its data is read as ordinary content. On such a page what a byte
+/// *means* depends on what follows it: an edit inserted beside that `BI` changes how the bytes
+/// after it tokenise, and the stream comes out unbalanced. The corpus found this as a panic in the
+/// balance check; this is the honest answer to it.
+#[test]
+fn a_page_with_an_unreadable_inline_image_refuses_an_edit_by_name() {
+    const WITH_UNREADABLE_IMAGE: &str = "pdfjs__TAMReview.pdf";
+    let Some((stream, resources)) = page_one(WITH_UNREADABLE_IMAGE) else {
+        eprintln!("skipped: {WITH_UNREADABLE_IMAGE} is not fetched");
+        return;
+    };
+    let before = run_with(&ContentStream::parse(&stream), &resources);
+    let model = PageModel::build(&before.records);
+    let mut refused = 0usize;
+    for object in model.objects() {
+        let change = Change::move_by(12.0, -5.0);
+        match apply_change(&stream, object, &change) {
+            Ok(_) => {}
+            Err(e) => {
+                refused += 1;
+                assert!(
+                    e.to_string().contains("inline image"),
+                    "the refusal names the real reason: {e}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        refused,
+        model.objects().len(),
+        "every edit on such a page is refused, rather than some of them silently landing"
+    );
+    eprintln!("{refused} edit(s) refused on {WITH_UNREADABLE_IMAGE}");
+}
+
 #[test]
 fn a_recolour_that_cannot_be_written_is_refused_with_the_reason() {
-    let Some((stream, resources)) = page_one("pdfjs__TAMReview.pdf") else {
+    let Some((stream, resources)) = page_one("gov__irs-f1040.pdf") else {
         eprintln!("skipped: the corpus file is not fetched");
         return;
     };
@@ -428,7 +480,7 @@ fn a_move_is_in_user_space_and_the_page_may_scale_it() {
 /// than the string that was written.
 #[test]
 fn a_text_property_on_a_real_page_changes_only_that() {
-    for name in ["pdfjs__TAMReview.pdf", "gov__irs-f1040.pdf"] {
+    for name in ["gov__irs-f1040.pdf", "gov__nist-sp800-88.pdf"] {
         let Some((contents, resources)) = page_one(name) else {
             eprintln!("skipped: {name} is not fetched");
             continue;
@@ -514,7 +566,9 @@ fn with_wrappers_removed(after: &[u8], inserted: &[Vec<u8>]) -> Vec<u8> {
 ///    whole picture.
 #[test]
 fn a_crop_on_a_real_image_is_a_clip_and_nothing_else() {
-    let Some(name) = PAGES.first() else {
+    // A page with an image that opens: `TAMReview`'s own first page is refused, by name, because of
+    // its unreadable inline image.
+    let Some(name) = PAGES.get(2) else {
         return;
     };
     let Some((contents, resources)) = page_one(name) else {

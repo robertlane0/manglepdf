@@ -1043,6 +1043,32 @@ an edit that inserted bytes into the first content stream to the second one. The
 into the wrong object and nothing reported it; the split now goes by where the patches landed,
 which is what the save already did.
 
+## The page whose bytes mean what follows them
+
+Fixing the inline-image provenance span (B10) exposed something underneath it (B9), and the pair is
+worth writing down together.
+
+`pdfjs__TAMReview.pdf` page 1 has an inline image whose dictionary is
+`/CS [/I/RGB 3 <ECEBEBEC…>]/I true/W 161…`. Our tokeniser reads inline-image entries as key/value
+pairs, and that one is not one — so it fell back to *"`BI` is an ordinary operator"*, which left
+the `BI` with **no data at all** and the image's data read as ordinary content. Two things follow:
+
+- The `BI` operator's span ran to the end of the *following* token, so it covered bytes that were
+  not its own. An edit over it would have replaced another operator's number. Fixed: an operator's
+  span is its own bytes, and a corpus test now asserts that **a span never splits a token** — it
+  must start where a token starts and end where one ends. 1873 spans, all checked.
+- **The page is one where what a byte means depends on what follows it.** Inserting anything beside
+  that `BI` changes how the bytes after it tokenise, and both the change path and the arrange path
+  produced an *unbalanced stream*. This is not fixable by better tokenising: the file is damaged in
+  a way no reader can repair without guessing. So both paths now refuse, by name, with a message
+  that says why and what would make the page editable. On `TAMReview` page 1 that is all 36
+  objects.
+
+The lesson: **the span fix was right and it was not enough.** Making the bytes honest exposed that
+the *page* was not, and the balance assertion was the only thing standing between that and a
+corrupted save. Which is the argument for keeping a `debug_assert` on the invariant rather than
+trusting the code that produces it.
+
 ## A crop is a clip, and that is the whole of it
 
 GOAL.md §4.5 asks for "crop as a non-destructive clip (resettable)", and the parenthesis is the
@@ -1091,6 +1117,32 @@ character-spacing change. That is the file asking for what it asked for. A check
 object count was unchanged would have failed a correct edit, so the text property is verified by
 matching the run **by its string** and reading the value back out of the interpreter, and the
 grouping is left to be what it is.
+
+## The page whose bytes mean what follows them
+
+Fixing the inline-image provenance span (B10) exposed something underneath it (B9), and the pair is
+worth writing down together.
+
+`pdfjs__TAMReview.pdf` page 1 has an inline image whose dictionary is
+`/CS [/I/RGB 3 <ECEBEBEC…>]/I true/W 161…`. Our tokeniser reads inline-image entries as key/value
+pairs, and that one is not one — so it fell back to *"`BI` is an ordinary operator"*, which left
+the `BI` with **no data at all** and the image's data read as ordinary content. Two things follow:
+
+- The `BI` operator's span ran to the end of the *following* token, so it covered bytes that were
+  not its own. An edit over it would have replaced another operator's number. Fixed: an operator's
+  span is its own bytes, and a corpus test now asserts that **a span never splits a token** — it
+  must start where a token starts and end where one ends. 1873 spans, all checked.
+- **The page is one where what a byte means depends on what follows it.** Inserting anything beside
+  that `BI` changes how the bytes after it tokenise, and both the change path and the arrange path
+  produced an *unbalanced stream*. This is not fixable by better tokenising: the file is damaged in
+  a way no reader can repair without guessing. So both paths now refuse, by name, with a message
+  that says why and what would make the page editable. On `TAMReview` page 1 that is all 36
+  objects.
+
+The lesson: **the span fix was right and it was not enough.** Making the bytes honest exposed that
+the *page* was not, and the balance assertion was the only thing standing between that and a
+corrupted save. Which is the argument for keeping a `debug_assert` on the invariant rather than
+trusting the code that produces it.
 
 ## A crop is a clip, and that is the whole of it
 

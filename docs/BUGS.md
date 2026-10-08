@@ -94,6 +94,30 @@ edit.
 
 *Caught by* the arrange unit test that asserts the result is still balanced.
 
+### B9 — A page whose inline image could not be read was edited anyway
+
+**S1.** `pdfjs__TAMReview.pdf` page 1 carries a `BI` whose dictionary is `/CS [/I/RGB 3
+<ECEBEBECECECECECEDFF9933>]/I true/W 161…`. Our tokeniser reads the entries as key/value pairs and
+that one is not one, so it fell back to *"`BI` is an ordinary operator"* — leaving the `BI` with
+**no data at all**, and the image's own data read as ordinary content. On such a page what a byte
+means depends on what follows it, so an edit inserted beside that `BI` changed how the bytes after
+it tokenised and the stream came out **unbalanced**. Found as a `debug_assert` panic in the balance
+check, across both the change path and the arrange path.
+
+The honest answer is a refusal, not a fix: a page whose byte-level adjacency is unreliable is a page
+this project will not silently edit. Both paths now refuse, with a message that names the reason and
+says what would make the page editable. On `TAMReview` page 1 that is **all 36 objects**, and the
+corpus tests moved to a page that opens — the refusal has its own test.
+
+### B10 — An inline image's provenance span swallowed the byte after it
+
+**S1.** The same fallback gave the `BI` operator a span running to the end of the token *after*
+it, so the range covered bytes that were not the operation's. An edit written over it would have
+replaced a number belonging to some other operator. The operator's span is now its own two bytes.
+Found by a corpus test asserting that **a span never splits a token**: the object's range must
+start where a token starts and end where one ends. 1873 provenance spans on three pages, all
+checked.
+
 ## What the pattern is
 
 Seven of the eight are the same shape, and it is worth stating plainly rather than filing them

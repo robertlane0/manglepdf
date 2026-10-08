@@ -251,6 +251,9 @@ pub enum Refusal {
     },
     /// The object has no bytes at all, so there is nothing to edit.
     NoSpans,
+    /// The page holds an inline image our tokeniser could not read, so the meaning of a byte
+    /// depends on what follows it and an edit cannot be placed safely.
+    UnreadableInlineImage,
     /// The object has no colour of the kind asked for: a shading has none, and an image's is
     /// the colour its *mask's* zero bits paint in, which is not the image.
     NoSuchColour {
@@ -281,6 +284,12 @@ impl fmt::Display for Refusal {
             Self::NoSpans => write!(
                 f,
                 "this object covers no bytes, so there is nothing to edit"
+            ),
+            Self::UnreadableInlineImage => write!(
+                f,
+                "this page holds an inline image whose dictionary could not be read, so where an \
+                 edit lands changes what the page contains; the file needs a save by a tool that \
+                 writes that image as an XObject"
             ),
             Self::NoSuchColour { kind, channel } => {
                 write!(f, "a {kind:?} has no {channel} colour to change")
@@ -358,11 +367,34 @@ pub fn apply_change(
 /// Nothing is written here: this is the whole computation, separated so a caller can look at
 /// what an edit *would* touch before letting it, and so a test can assert the byte ranges
 /// directly instead of inferring them from the result.
+/// Whether the stream holds an inline image whose dictionary our tokeniser could not read.
+///
+/// Such an image is left behind as a bare `BI` operator with no data, and its data is then read
+/// as ordinary content — so the page is one where what a byte *means* depends on what follows
+/// it. Shared with `arrange`, which moves bytes to a place they were not before and so cannot
+/// be safe on such a page either.
+pub(crate) fn has_unreadable_inline_image(stream: &[u8]) -> bool {
+    ContentStream::parse(stream)
+        .tokens()
+        .iter()
+        .any(|t| t.operator() == Some(&b"BI"[..]))
+}
+
 pub fn patches_for(
     stream: &[u8],
     object: &PageObject,
     change: &Change,
 ) -> Result<Vec<Patch>, Refusal> {
+    // An inline image is a region from `BI` to the `EI` that closes it, and the bytes between them
+    // are its data. Where the dictionary does not read as key/value pairs, the tokeniser falls
+    // back to reading it as ordinary operators and operands, so the `BI` is left with its data
+    // somewhere else and inserting bytes beside it changes how the bytes after it tokenise. A
+    // corpus page has exactly that shape, and an edit on it unbalances the stream with nothing
+    // anywhere reporting it.
+    if has_unreadable_inline_image(stream) {
+        return Err(Refusal::UnreadableInlineImage);
+    }
+
     if object.spans.is_empty() {
         return Err(Refusal::NoSpans);
     }

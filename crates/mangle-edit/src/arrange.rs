@@ -97,6 +97,9 @@ pub enum ArrangeRefusal {
         /// How many separate ranges it covers.
         spans: usize,
     },
+    /// The object's bytes are a fragment of an inline image, so moving them attaches them to
+    /// whatever image follows them at the destination.
+    ImageFragment,
     /// The object claims bytes this stream does not have.
     ForeignSpan {
         /// What was asked for.
@@ -138,6 +141,11 @@ impl fmt::Display for ArrangeRefusal {
                 f,
                 "this object is drawn by {spans} separate operations with other objects' \
                  operators between them, so moving it would re-interleave it with theirs"
+            ),
+            Self::ImageFragment => write!(
+                f,
+                "this object's own bytes are part of an inline image rather than a whole one, so \
+                 moving them would attach them to whatever image follows at the destination"
             ),
             Self::ForeignSpan { span, len } => write!(
                 f,
@@ -225,6 +233,22 @@ pub fn arrange_patches(
         });
     }
     state_of(object)?;
+
+    // An inline image is a region from `BI` to the `EI` that closes it, and the bytes between
+    // them are its data. So `BI` is not a self-contained thing: move it and it attaches itself to
+    // whatever inline image happens to follow at the destination, and the two become one
+    // different image. A corpus page has exactly that shape — an image whose own bytes are the two
+    // characters `BI`, because the dictionary after it is one our tokeniser does not read as a
+    // dictionary — and arranging it unbalances the page with nothing reporting it.
+    if is_image_fragment(stream, &from) {
+        return Err(ArrangeRefusal::ImageFragment);
+    }
+    // And a page that *has* an unreadable inline image is unsafe to arrange anything on: the bare
+    // `BI` it leaves behind takes the next image's dictionary as its own, so where an edit lands
+    // changes what the page contains.
+    if crate::edits::has_unreadable_inline_image(stream) {
+        return Err(ArrangeRefusal::ImageFragment);
+    }
 
     // The neighbour, which is the nearest object in the direction asked for **that this one
     // overlaps** — not merely the nearest one. §4.7 says so explicitly: a designer who says
@@ -353,6 +377,36 @@ fn scope_of(stream: &[u8], from: &Range<usize>, arrange: Arrange) -> usize {
         (None, Arrange::ToFront) => stream.len(),
         (None, _) => 0,
     }
+}
+
+/// Whether these bytes are a *fragment* of an inline image rather than a whole one.
+///
+/// A whole inline image is one token covering the range, so the check is that there is an
+/// `InlineImage` token which is **not** the whole range, or a bare `BI` operator — which is what a
+/// dictionary our tokeniser could not read leaves behind.
+fn is_image_fragment(stream: &[u8], from: &Range<usize>) -> bool {
+    let Some(bytes) = stream.get(from.clone()) else {
+        return true;
+    };
+    let parsed = ContentStream::parse(bytes);
+    let has_partial_image = parsed.tokens().iter().any(|t| {
+        matches!(
+            t.kind,
+            mangle_content::tokens::ContentKind::InlineImage { .. }
+        ) && t.span != (0..bytes.len())
+    });
+    if has_partial_image {
+        return true;
+    }
+    // The shape the corpus actually holds: a `BI` whose dictionary our tokeniser could not read,
+    // so the extent is the two characters `BI` and tokenising them yields nothing at all. Read as
+    // bytes, that is a keyword an image's data has not followed.
+    let last = bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map_or(0, |i| i + 1);
+    let trimmed = bytes.get(..last).unwrap_or_default();
+    trimmed.ends_with(b"BI") || trimmed.ends_with(b"ID") || trimmed == b"EI"
 }
 
 /// Whether this object is a run of text, which needs a `BT … ET` around its moved bytes.
@@ -734,6 +788,25 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("ExtGState"), "{err}");
+    }
+
+    /// A page with an inline image our tokeniser could not read is not one to arrange on.
+    ///
+    /// The corpus has one: `pdfjs__TAMReview.pdf` page 1 carries a `BI` whose dictionary does not
+    /// read as key/value pairs, so the extent is the two characters `BI` and no data. Arranging
+    /// anything that lands next to it makes that `BI` take the next image's dictionary as its own,
+    /// and two images become one — which is how the corpus test found it, as an unbalanced stream
+    /// with nothing reporting it.
+    #[test]
+    fn a_page_with_an_unreadable_inline_image_refuses_an_arrange() {
+        // A `BI` whose "dictionary" is not one: the tokeniser falls back to reading it as an
+        // operator followed by operands.
+        let stream = b"q 1 0 0 1 0 0 cm /Im0 Do Q BI /not a dict 1 2 3 q /Im1 Do Q";
+        let model = PageModel::build(&run(&ContentStream::parse(stream)).records);
+        let err = arrange_patches(stream, &model, 0, Arrange::Forward)
+            .expect_err("the page holds an image our tokeniser could not read");
+        assert!(matches!(err, ArrangeRefusal::ImageFragment), "{err}");
+        assert!(err.to_string().contains("inline image"), "{err}");
     }
 
     /// A shading is refused for the right reason: it paints into the clip in force, so a clip is

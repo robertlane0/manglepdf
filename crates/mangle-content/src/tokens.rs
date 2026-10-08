@@ -602,12 +602,18 @@ fn inline_image(
                 dict.insert(Name::from_bytes(key), object_of(&value.token));
             }
             other => {
-                // Not a key: this is not an inline image after all, so `BI` is an
-                // ordinary operator and the token we just read is an operand. Dropping
-                // it would silently lose a number.
+                // Not a key: this is not an inline image after all, so `BI` is an ordinary
+                // operator and the token we just read is an operand. Dropping it would silently
+                // lose a number.
+                //
+                // **The operator's span is its own two bytes and no more.** It used to run to the
+                // end of the token that followed it, which is a range covering bytes that are not
+                // the operation's — and an edit written over such a range would replace a number
+                // that belonged to somebody else. The operand keeps its own span and is attached
+                // to the next operator, which is where the interpreter would have put it.
                 out.push(ContentToken {
                     kind: ContentKind::Operator(b"BI".to_vec()),
-                    span: start..spanned.end,
+                    span: start..start + 2,
                     value: Object::name("BI"),
                 });
                 out.push(ContentToken {

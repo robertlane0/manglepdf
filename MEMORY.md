@@ -166,6 +166,19 @@ line and the model regroups — `irs-f1040` page 1 goes 589 → 656 objects on o
 change, correctly. So the text property is verified by matching the run **by its string** and reading
 the value back, not by the object count or the old centre.
 
+**Two more bugs, both from one fix, both in `docs/BUGS.md`:**
+1. The inline-image fallback gave `BI` a span that swallowed the following token, so it covered
+   bytes that were not its own. Fixed, plus a corpus test asserting **a span never splits a
+   token** — it must start where a token starts and end where one ends. 1873 spans checked.
+2. Which exposed that `TAMReview` page 1 has an inline image whose dictionary does not parse, so the
+   `BI` is left bare and its data is read as ordinary content. On such a page inserting bytes
+   changes how the bytes after them tokenise, and an edit came out **unbalanced**. Not fixable by
+   better tokenising; both edit paths now refuse by name. On that page that is all 36 objects, and
+   the corpus tests moved to `irs-f1040` / `sp800-88`.
+
+**The lesson worth keeping:** making the bytes honest exposed that the *page* was not, and the
+balance `debug_assert` was the only thing between that and a corrupted save.
+
 **`Change::Crop` is in** (`--crop x0,y0,x1,y1`): §4.5's non-destructive crop, as `q <polygon> W n
 <Do> Q`. The rectangle is page space and the polygon is the record's CTM read backwards, so an image
 under `cm 106.1 0 0 31.2` gets corners one hundred-and-sixth the size. A polygon rather than a `re`
