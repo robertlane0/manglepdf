@@ -19,6 +19,8 @@
 
 pub mod history;
 pub mod page_objects;
+pub mod surgery;
 
 pub use history::{Edit, History, HistoryError, Snapshot};
 pub use page_objects::{Kind, LineBreak, PageModel, PageObject};
+pub use surgery::{Applied, EditError, Patch};

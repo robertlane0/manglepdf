@@ -81,6 +81,9 @@ change **no page**, so it was not written. Recorded at the end of D31.
   test found that.
 - `page_objects.rs` — `PageModel`, grouping glyph runs into selectable lines over the byte spans
   write-back needs, plus `tests/page_objects_corpus.rs` which runs it over four real corpus pages.
+- `surgery.rs` — the write-back. `Patch` ranges applied by position, overlap and out-of-range
+  refused up front, `is_balanced` for the result, plus `tests/surgery_corpus.rs` which scales an
+  image on a real page and proves every byte outside the patched range is identical.
 
 **Running a model over real corpus pages found a bug no unit test could.** `Record::bounds` for a
 glyph run took the union of glyph *origins*, and every glyph on a line shares a baseline — so the
@@ -98,9 +101,25 @@ Conventions worth reusing:
 - `clippy::single_range_in_vec_init` fires on one-element range lists; allow it in test mods
   rather than writing `vec![x][..].to_vec()`.
 
-**Next in M4:** the edits themselves (select/move/scale/recolour) and the write-back that gives
-FINISH.md S2 its exit criterion — edit → save → reopen with the JPEG stream's SHA-256 unchanged.
-`mangle-syntax::writer` already has `IncrementalUpdate` and `Writer::copying_from`.
+**Next in M4:** the write-back primitive is built (`surgery.rs` in `crates/mangle-edit`): a patch
+set is applied by position, overlapping and out-of-range patches are refused before a byte is
+copied, and `q`/`Q` balance is checkable across the result. What is left from it is the **edits
+themselves** (select/move/scale/recolour over `PageModel`'s spans, each producing patches rather
+than a rewritten stream) and the **save→reopen loop** that gives FINISH.md S2 its exit criterion —
+edit → save → reopen with the JPEG stream's SHA-256 unchanged. `mangle-syntax::writer` already has
+`IncrementalUpdate` and `Writer::copying_from`.
+
+Two conventions the surgery tests rely on, both worth reusing: a byte offset in a test is
+**computed from the fixture** (`windows(5).position(…)`) rather than hand-counted, because a
+hand-counted one is wrong the moment the fixture's whitespace changes; and a span from `Record`
+is **the operation that drew it** (`/PxARRO Do`), not the `cm` that positioned it — so moving a
+picture means editing the `cm` before it, which is the first thing to get wrong when writing an
+edit from a record's span.
+
+**The edits to write next, in order:** move (`cm` / `Tm` translation), scale, delete (remove the
+operators, drop the wrapper only if it becomes empty), recolour (in the object's *original* colour
+space). Each must land as a `Vec<Patch>` over the object's own spans, and each must satisfy U1:
+every byte outside those ranges identical.
 
 **Remaining corpus candidates, none of them a corpus number:** `TAMReview` (22 pages, D24 policy),
 `freeculture` (10 pages, 2 with damaged stencils).

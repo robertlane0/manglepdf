@@ -889,3 +889,44 @@ form's own resources, which is the same shape a font's `/Resources` needs.
 supporting it widens what the interpreter runs, and a bug in the depth bound is a stack overflow
 rather than a note. The mitigation is the bound being the *first* thing merged and tested, ahead of
 any rendering, because it is the only part of this that can crash.
+
+## M4 — surgical write-back
+
+GOAL.md §4 is the quality bar this project is judged on, and §4.3 states its rule plainly: an edit
+is a **byte-range replacement**, not a re-serialisation. Re-serialising a content stream from its
+token list would reproduce the rendering while silently discarding everything this project does
+not model — the author's comments, their whitespace, their number formatting, an operator from a
+later revision — and the user finds out years later. So the write-back in `mangle_edit::surgery`
+holds to one line: *give back the stream with some ranges replaced and every other byte
+identical*, and refuse anything that would make that untrue.
+
+Three decisions are already settled by tests:
+
+- **Patches apply by position, never by the order they were written.** Sorting by range makes the
+  same edit written either way produce the same file, which is what makes an edit reproducible at
+  all. The order is also the order they are reported in, so a history entry names what happened
+  rather than what was asked for.
+- **Bounds and overlap are checked before a byte is copied.** A rejected edit costs nothing and
+  cannot have half-applied. Overlap is refused rather than resolved, because two patches covering
+  the same byte would make the result depend on their order — and the caller who wrote them knows
+  which they meant in a way this module does not.
+- **`q`/`Q` balance is checked across the result**, because GOAL.md §4.3 asks for it and because an
+  edit that opens a wrapper without closing it leaves every operator after it under the wrong
+  graphics state, with nothing anywhere to say so.
+
+What the module deliberately does **not** do is make an edit *sane*. A caller that moves a picture
+by rewriting its `cm` must also re-materialise the graphics state around the new `cm` (§4.7); that
+belongs to the caller plus `PageModel`'s spans, and pretending otherwise here would hide the
+hard problem.
+
+**The corpus round trip is the test that matters**, and it is kept for a reason no unit test gives:
+`tests/surgery_corpus.rs` takes a real page, scales a real image's `cm`, and checks two things —
+that the interpreter sees the placement change, and that putting the original bytes back over the
+same span returns the original stream *exactly*. The second is what a re-serialisation cannot
+satisfy and what a user would never notice.
+
+Next in M4, in order: the edits themselves (move / scale / delete / recolour over a `PageModel`
+object's spans, each producing patches rather than a rewritten stream), and the save→reopen loop
+that gives FINISH.md its exit criterion — an edit, a save, a reopen, and an untouched JPEG stream
+whose SHA-256 has not moved. `mangle-syntax::writer` already has `IncrementalUpdate` and
+`Writer::copying_from` for the save half.
