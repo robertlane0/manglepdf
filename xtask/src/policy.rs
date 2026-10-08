@@ -58,10 +58,16 @@ const PDF_PROVENANCE_WORDS: &[&str] = &["pdf", "acrobat", "portable document for
 const OS_INTEGRATION_ALLOWLIST: &[&str] = &["crates/mangle-ui/src/os_integration.rs"];
 
 /// Docs `FINISH.md` G0.9 requires, and where they live.
+///
+/// `BUGS.md` is in the list because `FINISH.md` makes its emptiness of open S1/S2 an acceptance
+/// condition, and a document required at acceptance is a document that can go missing before then.
+/// It is now the record of the write-back defects the corpus found, each named with the test that
+/// caught it.
 const REQUIRED_DOCS: &[&str] = &[
     "README.md",
     "docs/ARCHITECTURE.md",
     "docs/STATUS.md",
+    "docs/BUGS.md",
     "docs/DEPENDENCIES.md",
     "docs/PDF-QUIRKS.md",
     "docs/TESTING.md",
