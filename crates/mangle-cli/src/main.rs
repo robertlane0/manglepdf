@@ -5,6 +5,8 @@
 //! on this binary existing; it exists so that "what does ManglePDF think of this file?"
 //! can be asked without a window.
 
+#![forbid(unsafe_code)]
+
 use std::io::Write as _;
 use std::path::Path;
 
