@@ -273,7 +273,10 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   the alternate's components are each a **report by name**, because the previous behaviour —
   painting every tint black — was a wrong answer wearing a plausible hat, and a spot colour is
   the one space where a reader is most inclined to guess.
-- **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`.
+- **`mangle-cli`** — the headless surface: `info`, `pages`, `check`, `extract`, `save`, and
+  `edit`, which runs the whole editing loop on one line — list what is on a page, select an
+  object, move / scale / delete / recolour it, save the result as an incremental update, reopen
+  it and report whether the change the user asked for is the one that came back.
   This is how "what does ManglePDF think of this file?" is asked without a window.
 - **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one
   stroke weight, a light and a dark theme, and a contrast test that both themes must

@@ -1,4 +1,3 @@
-#![forbid(unsafe_code)]
 //! The headless surface: what the tests and the acceptance harness drive.
 //!
 //! Every command here is a question about a file with a definite answer, and every
@@ -26,6 +25,7 @@ fn main() -> std::process::ExitCode {
         "render" => render(&rest),
         "extract" => extract(&rest),
         "save" => save(&rest),
+        "edit" => edit(&rest),
         "--help" | "-h" | "help" => {
             usage();
             Ok(())
@@ -53,6 +53,15 @@ manglepdf-cli <command> <file.pdf> [options]
   render   -o FILE       rasterize a page (not implemented yet)
   extract  [-page N]     the text of a page
   save     [-o FILE] [--incremental] [--full] [--reset-prefs]
+  edit     [options]     select and change a page object; save the result
+                            --list                 what is on the page, one line each
+                            --page N               which page (default 1)
+                            --object I             which object (see --list)
+                            --move dx dy           move it by dx, dy points
+                            --scale s              scale it about its centre
+                            --delete               remove it
+                            --colour r,g,b         recolour it (0-1 each)
+                            -o FILE                where to write (default beside the input)
 "
     );
 }
@@ -71,6 +80,208 @@ fn value(args: &[String], name: &str) -> Option<String> {
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+/// Select an object on a page, change it, and save the file.
+///
+/// This is the whole editing loop on one command, and it exists so the loop can be driven from a
+/// script and from the acceptance harness without a window. The printout names what was selected,
+/// what changed, and what the save rewrote, because an edit whose effect cannot be read is an edit
+/// nobody can check.
+fn edit(args: &[String]) -> Result<(), String> {
+    let path = args.first().ok_or("edit needs a file")?;
+    let doc = open(path)?;
+    let cat = doc.catalog().map_err(|e| format!("{path}: {e}"))?;
+    let root = cat
+        .get("Pages")
+        .and_then(mangle_syntax::object::Object::as_ref_id)
+        .ok_or("the page tree root is missing")?;
+    let tree = mangle_doc::PageTree::build(&doc, root).map_err(|e| format!("{path}: {e}"))?;
+    let index = value(args, "--page")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let page = tree.get(index).ok_or_else(|| {
+        format!(
+            "page {index} is not one of this file's {} pages",
+            tree.len()
+        )
+    })?;
+    let resources = page_resources(&doc, page);
+    let stream = page.decoded_contents(&doc);
+    let run = mangle_content::interp::run_with(
+        &mangle_content::ContentStream::parse(&stream),
+        &resources,
+    );
+    let model = mangle_edit::PageModel::build(&run.records);
+
+    let mut out = std::io::stdout().lock();
+    if flag(args, "--list") {
+        for (i, o) in model.objects().iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "{i}\t{kind:?}\t{x0:.2} {y0:.2} {x1:.2} {y1:.2}\t{spans} span(s)\t{form}",
+                kind = o.kind,
+                x0 = o.bounds.x0,
+                y0 = o.bounds.y0,
+                x1 = o.bounds.x1,
+                y1 = o.bounds.y1,
+                spans = o.spans.len(),
+                form = o.form.as_deref().unwrap_or("page"),
+            );
+        }
+        let _ = writeln!(
+            out,
+            "{} object(s) on page {}",
+            model.objects().len(),
+            index + 1
+        );
+        return Ok(());
+    }
+
+    let which = value(args, "--object")
+        .and_then(|v| v.parse::<usize>().ok())
+        .ok_or("--object needs an index; --list prints them")?;
+    let object = model.objects().get(which).ok_or_else(|| {
+        format!(
+            "object {which} is not one of the page's {} objects",
+            model.objects().len()
+        )
+    })?;
+
+    let change = if flag(args, "--delete") {
+        Some(mangle_edit::Change::Delete)
+    } else if let Some(moved) = value(args, "--move") {
+        let parts: Vec<f64> = moved.split(',').filter_map(|p| p.parse().ok()).collect();
+        let dx = parts.first().copied().ok_or("--move needs dx,dy")?;
+        let dy = parts.get(1).copied().ok_or("--move needs dx,dy")?;
+        Some(mangle_edit::Change::move_by(dx, dy))
+    } else if let Some(scale) = value(args, "--scale") {
+        let s: f64 = scale
+            .parse()
+            .map_err(|_| format!("--scale needs a number, got `{scale}`"))?;
+        let b = object.bounds;
+        Some(mangle_edit::Change::scale_about(
+            f64::midpoint(b.x0, b.x1),
+            f64::midpoint(b.y0, b.y1),
+            s,
+            s,
+        ))
+    } else if let Some(colour) = value(args, "--colour") {
+        let parts: Vec<f64> = colour.split(',').filter_map(|p| p.parse().ok()).collect();
+        let (r, g, b) = (
+            parts.first().copied(),
+            parts.get(1).copied(),
+            parts.get(2).copied(),
+        );
+        match (r, g, b) {
+            (Some(r), Some(g), Some(b)) => {
+                Some(mangle_edit::Change::recolour(mangle_content::state::Rgba {
+                    r,
+                    g,
+                    b,
+                    a: 1.0,
+                }))
+            }
+            _ => return Err("--colour needs r,g,b in 0..1".to_string()),
+        }
+    } else {
+        None
+    };
+    let Some(change) = change else {
+        return Err(
+            "say what to do: --move dx,dy, --scale s, --delete or --colour r,g,b".to_string(),
+        );
+    };
+
+    let before = &run;
+    let applied =
+        mangle_edit::apply_change(&stream, object, &change).map_err(|e| format!("{path}: {e}"))?;
+    let save =
+        mangle_edit::save_page(&doc, page, &applied.applied).map_err(|e| format!("{path}: {e}"))?;
+
+    // Write beside the target and rename, so an interrupted save never leaves a half-written file
+    // where the real one was.
+    let out_path = value(args, "-o").unwrap_or_else(|| format!("{path}.edited.pdf"));
+    let target = Path::new(&out_path);
+    let temp = target.with_extension("pdf.part");
+    std::fs::write(&temp, &save.bytes).map_err(|e| format!("{}: {e}", temp.display()))?;
+    std::fs::rename(&temp, target).map_err(|e| format!("{}: {e}", target.display()))?;
+
+    // Reopen what was written and check the edit is in it, which is the only evidence that counts.
+    let reopened = Document::open(save.bytes.clone(), OpenOptions::default())
+        .map_err(|e| format!("{out_path}: {e}"))?;
+    let cat2 = reopened.catalog().map_err(|e| format!("{out_path}: {e}"))?;
+    let root2 = cat2
+        .get("Pages")
+        .and_then(mangle_syntax::object::Object::as_ref_id)
+        .ok_or("the saved file has no page tree")?;
+    let tree2 =
+        mangle_doc::PageTree::build(&reopened, root2).map_err(|e| format!("{out_path}: {e}"))?;
+    let page2 = tree2
+        .get(index)
+        .ok_or_else(|| format!("{out_path}: page {index} is gone"))?;
+    let resources2 = page_resources(&reopened, page2);
+    let stream2 = page2.decoded_contents(&reopened);
+    let after = mangle_content::interp::run_with(
+        &mangle_content::ContentStream::parse(&stream2),
+        &resources2,
+    );
+
+    let _ = writeln!(
+        out,
+        "selected {which} on page {index_plus_one}",
+        index_plus_one = index + 1
+    );
+    let _ = writeln!(out, "wrote     {out_path}");
+    let _ = writeln!(
+        out,
+        "bytes     {}, {} of them new",
+        save.bytes.len(),
+        save.bytes.len() - doc.bytes().len()
+    );
+    let _ = writeln!(
+        out,
+        "rewrote   {} content stream object(s){}",
+        save.rewritten.len(),
+        if save.re_encoded {
+            ", re-encoded in the file's own filter"
+        } else {
+            ""
+        }
+    );
+    let _ = writeln!(
+        out,
+        "appended  {}",
+        if save.appended_only(doc.bytes()) {
+            "the file's existing bytes are untouched"
+        } else {
+            "NO: the file was rewritten, which a save must never be"
+        }
+    );
+    match mangle_edit::verify(before, &after, which, &change) {
+        Ok(()) => {
+            let _ = writeln!(
+                out,
+                "verified  the reopened page shows the change that was asked for"
+            );
+        }
+        Err(e) => {
+            let _ = writeln!(out, "verified  NO: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// A page's resources, resolved the way the interpreter needs.
+fn page_resources(doc: &Document, page: &mangle_doc::Page) -> mangle_content::Resources {
+    page.inherited
+        .resources
+        .as_ref()
+        .and_then(|o| doc.resolve_object(o))
+        .and_then(|o| o.as_dict().cloned())
+        .map(|d| mangle_content::Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+        .unwrap_or_default()
 }
 
 fn info(args: &[String]) -> Result<(), String> {

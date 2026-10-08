@@ -92,6 +92,11 @@ change **no page**, so it was not written. Recorded at the end of D31.
   streams that changed and re-encoding them with the file's own filter, plus
   `tests/writeback_corpus.rs`: edit → save → reopen, with the untouched image's SHA-256 asserted
   unchanged. That is FINISH.md S2's exit criterion and it passes.
+- The CLI can drive it: `cargo run -p mangle-cli -- edit FILE --page 1 --list`, then `--object I
+  --move 10,5 | --scale 1.2 | --delete | --colour r,g,b -o OUT.pdf`. It prints what it selected,
+  what the save rewrote, whether the file was appended rather than rewritten, and whether the
+  reopened page shows the change. A stroke-only path refuses a recolour ("a Path has no fill
+  colour to change"), which is the honesty law working through the CLI.
 
 **Running a model over real corpus pages found a bug no unit test could.** `Record::bounds` for a
 glyph run took the union of glyph *origins*, and every glyph on a line shares a baseline — so the
