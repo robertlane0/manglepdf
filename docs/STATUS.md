@@ -183,6 +183,8 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   them with the file's own filter. Refusing to preserve a file's comments, whitespace,
   number formatting and unknown operators is not lossy-looking, it is loss, found by nobody
   for years.
+- **`mangle-content`** — content streams (see above); a mark's box in device space now includes
+  **half the stroke width** on a stroked path, so a hairline rule is clickable on its ink.
 - **`mangle-render`** — the rasterizer. Coverage is **analytic**, not sampled: each pixel
   row is subdivided at the heights where an edge crosses a pixel boundary, and between two
   cuts the covered width is linear, so a pixel's coverage is a trapezoid and a path's total

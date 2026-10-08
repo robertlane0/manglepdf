@@ -197,9 +197,30 @@ impl Record {
     /// caller usually wants from it: where the baseline is, and how big the type is. It is *not*
     /// a hit-test boundary to the pixel, and a caller that needs exact glyph extents has to get
     /// them from the font. The horizontal extent is exact, because glyph placements carry it.
+    ///
+    /// For a **stroked path** the box is the path's own, grown by half the stroke width on every
+    /// side, because a stroke is centred on its path and half of it is outside it. GOAL.md §4.2
+    /// asks for bounds "including stroke width", and the reason is hit-testing: a one-point rule
+    /// stroked along a line has a geometry box of *no height at all*, so a click that lands on the
+    /// ink — a point half a unit either side of the centreline — used to miss.
     #[must_use]
     pub fn bounds(&self) -> Option<ClipBounds> {
-        bounds_of(&self.mark)
+        let from_geometry = bounds_of(&self.mark)?;
+        let stroke = match &self.mark {
+            Mark::Path {
+                stroke: Some(_), ..
+            } => self.device_line_width / 2.0,
+            _ => 0.0,
+        };
+        if stroke <= 0.0 {
+            return Some(from_geometry);
+        }
+        Some(ClipBounds {
+            x0: from_geometry.x0 - stroke,
+            y0: from_geometry.y0 - stroke,
+            x1: from_geometry.x1 + stroke,
+            y1: from_geometry.y1 + stroke,
+        })
     }
 }
 
@@ -3674,7 +3695,55 @@ mod tests {
             .first()
             .and_then(Record::bounds)
             .expect("bounds");
-        assert!(near(a.x1, 10.0) && near(b.x1, 20.0));
+        // **The box includes half the stroke on each side**, because a stroke is centred on its
+        // path. Both runs are stroked with the default width of 1, which the doubled CTM scales to
+        // 2 — so plain grows by half a unit and the zoomed one by a full one.
+        assert!(
+            near(a.x1, 10.5),
+            "the stroked path's box is its geometry plus half the width: {}",
+            a.x1
+        );
+        assert!(
+            near(b.x1, 21.0),
+            "and the zoomed one is twice that, stroke included: {}",
+            b.x1
+        );
+    }
+
+    /// A stroked line with no area of its own is still clickable: the box holds the ink.
+    ///
+    /// This is the reason bounds carry the stroke width. A horizontal rule drawn with `S` along
+    /// `y = 0` has a geometry box of *zero height*, so a click a quarter of a unit above the line
+    /// — on the ink — used to miss.
+    #[test]
+    fn a_stroked_line_has_a_box_that_holds_its_ink() {
+        let out = run_bytes(b"0 0 m 100 0 l 2 w S");
+        let b = out
+            .records
+            .first()
+            .and_then(Record::bounds)
+            .expect("bounds");
+        assert!(
+            b.y0 < 0.0 && b.y1 > 0.0,
+            "the box straddles the line it strokes, and holds the 2-unit width of it: {:?}",
+            (b.y0, b.y1)
+        );
+        assert!(near(b.y0, -1.0) && near(b.y1, 1.0), "{:?}", (b.y0, b.y1));
+    }
+
+    /// A **filled** path's box is its geometry and nothing else: a fill has no width to add.
+    #[test]
+    fn a_filled_paths_box_is_its_geometry_alone() {
+        let out = run_bytes(b"10 10 40 20 re 2 w f");
+        let b = out
+            .records
+            .first()
+            .and_then(Record::bounds)
+            .expect("bounds");
+        assert!(
+            near(b.x0, 10.0) && near(b.x1, 50.0) && near(b.y0, 10.0) && near(b.y1, 30.0),
+            "a `2 w` that only strokes changes nothing for a fill: {b:?}"
+        );
     }
 
     #[test]

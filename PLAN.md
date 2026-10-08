@@ -1043,6 +1043,17 @@ an edit that inserted bytes into the first content stream to the second one. The
 into the wrong object and nothing reported it; the split now goes by where the patches landed,
 which is what the save already did.
 
+## A stroked line had no box to click on
+
+GOAL.md §4.2 asks for "exact bounds (including stroke width and glyph bounds)". The stroke half was
+missing: `bounds_of` took the path's own geometry and nothing else, so a horizontal rule drawn with
+`2 w S` along `y = 0` had a box of **zero height** — and a click a quarter of a unit above the line,
+square on the ink, missed. `Record::bounds` now grows a stroked path's box by half the *device* width
+on every side, which is where a stroke actually sits, and a filled path's box is still its geometry
+alone because a fill has no width to add. The corpus model's object counts did not move — f1040 page
+1 is still 589 objects, TAMReview 36 — which is the check that this changed the boxes and not the
+grouping.
+
 ## Text properties, and the check that had to move
 
 Every control GOAL.md §4.4 lists that is a *text-state* operator is now a `Change`: `Tf`, `Tc`,
@@ -1063,6 +1074,17 @@ character-spacing change. That is the file asking for what it asked for. A check
 object count was unchanged would have failed a correct edit, so the text property is verified by
 matching the run **by its string** and reading the value back out of the interpreter, and the
 grouping is left to be what it is.
+
+## A stroked line had no box to click on
+
+GOAL.md §4.2 asks for "exact bounds (including stroke width and glyph bounds)". The stroke half was
+missing: `bounds_of` took the path's own geometry and nothing else, so a horizontal rule drawn with
+`2 w S` along `y = 0` had a box of **zero height** — and a click a quarter of a unit above the line,
+square on the ink, missed. `Record::bounds` now grows a stroked path's box by half the *device* width
+on every side, which is where a stroke actually sits, and a filled path's box is still its geometry
+alone because a fill has no width to add. The corpus model's object counts did not move — f1040 page
+1 is still 589 objects, TAMReview 36 — which is the check that this changed the boxes and not the
+grouping.
 
 ## Text properties, and the check that had to move
 
