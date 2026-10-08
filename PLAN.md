@@ -1014,4 +1014,28 @@ Two things about it are worth writing down:
   page that is 201 objects refused next to 582 arranged — the refusals are the finding, not a
   failure: most of a page is text, and the Text Properties panel is what would make it arrangeable.
 
+## The session, and the shape a save takes
+
+`session::Editor` ties the pieces together: it owns the document, the page, the page's resources and
+the history, and every operation goes through it. GOAL.md §4.8's four requirements are what it is
+for — a command pattern, deep history, and undo that restores *structurally identical* content.
+
+Two decisions in it are worth writing down:
+
+- **The history holds the page's content streams, not the model.** A model is a *derivation* —
+  whatever the interpreter makes of the stream — so restoring the model but not the stream would
+  leave a session whose picture and whose bytes disagree. The selection is deliberately not restored
+  either: it is a UI concern and this module is headless.
+- **A save after an undo takes the target, not the range.** The interesting question a session
+  raises is what "the patches from the file to what I now have" means once an undo has moved the
+  stream somewhere no single edit produced. Composing byte-range edits across an undo is a merge,
+  and a merge that picks a side is a merge that can drop bytes. So `writeback::save_decoded` takes
+  what each stream should now contain, and the session hands it exactly that.
+
+One bug the session's own tests found, and it is the reason `part_lengths` exists in `writeback`
+rather than in `session`: a stream split back into parts **by the lengths they started with** gives
+an edit that inserted bytes into the first content stream to the second one. The save moved bytes
+into the wrong object and nothing reported it; the split now goes by where the patches landed,
+which is what the save already did.
+
 What is left in M4 is the UI wiring.

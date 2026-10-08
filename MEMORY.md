@@ -121,11 +121,14 @@ Conventions worth reusing:
 **Next in M4:** the edits are built (`edits.rs` — a `Change` becomes patches over a
 `PageModel` object's spans, each a `q … Q` wrapper around the object's own operators), so is the
 save (`writeback.rs` — `save_page` appends an incremental update, rewriting only the content
-streams that changed and re-encoding them with the file's own filter), and so is **Arrange**
+streams that changed and re-encoding them with the file's own filter), so is **Arrange**
 (`arrange.rs` — the one edit that cannot be a wrapper, so the bytes move and the state they were
-drawn under is re-materialised at the destination). FINISH.md S2's exit criterion — edit → save
-→ reopen with the untouched JPEG stream's SHA-256 unchanged — is asserted in
-`tests/writeback_corpus.rs` and passes. What is left in M4 is the UI wiring.
+drawn under is re-materialised at the destination), and so is the **session** (`session.rs` —
+`Editor` owns the document, the page, the resources and the `History`, so an undo restores the
+content byte for byte and a redo returns it). FINISH.md S2's exit criterion — edit → save → reopen
+with the untouched JPEG stream's SHA-256 unchanged — is asserted in `tests/writeback_corpus.rs` and
+passes; `tests/session_corpus.rs` does the whole loop over a real 4-stream page. What is left in M4
+is the UI wiring.
 
 Two conventions the surgery and edits tests rely on, both worth reusing: a byte offset in a test is
 **computed from the fixture** (`windows(5).position(…)`) rather than hand-counted, because a

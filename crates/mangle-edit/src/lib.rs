@@ -21,6 +21,7 @@ pub mod arrange;
 pub mod edits;
 pub mod history;
 pub mod page_objects;
+pub mod session;
 pub mod surgery;
 pub mod writeback;
 
@@ -28,5 +29,6 @@ pub use arrange::{Arrange, ArrangeError, ArrangeRefusal, apply_arrange, arrange_
 pub use edits::{Change, ChangeError, Channel, Refusal, apply_change, map_point, verify};
 pub use history::{Edit, History, HistoryError, Snapshot};
 pub use page_objects::{Kind, LineBreak, PageModel, PageObject};
+pub use session::{Editor, OpenError, Reason, SessionError};
 pub use surgery::{Applied, EditError, Patch};
-pub use writeback::{Save, SaveError, save_page, stream_digest};
+pub use writeback::{Save, SaveError, save_decoded, save_page, stream_digest};

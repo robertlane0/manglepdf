@@ -98,6 +98,13 @@ pub enum SaveError {
         /// Where the two streams join in the concatenation.
         boundary: usize,
     },
+    /// The caller named a different number of content streams than the page has.
+    PartsMismatch {
+        /// How many the page has.
+        have: usize,
+        /// How many were named.
+        asked: usize,
+    },
     /// The patch could not be applied to the stream it was meant for.
     Stream(crate::surgery::EditError),
 }
@@ -132,6 +139,10 @@ impl std::fmt::Display for SaveError {
                 "the patch {span:?} covers byte {boundary}, where two content streams join; it \
                  is two edits about two different objects"
             ),
+            Self::PartsMismatch { have, asked } => write!(
+                f,
+                "this page has {have} content stream(s), and {asked} were named"
+            ),
             Self::Stream(e) => write!(f, "{e}"),
         }
     }
@@ -147,18 +158,64 @@ impl From<crate::surgery::EditError> for SaveError {
 
 /// One content stream of a page, resolved to its object and its bytes.
 #[derive(Debug, Clone)]
-struct Part {
+pub(crate) struct Part {
     /// The object it lives in, which is what a save replaces.
-    r: Ref,
+    pub(crate) r: Ref,
     /// The stream as it stands, still filtered.
-    stream: Stream,
+    pub(crate) stream: Stream,
     /// The decoded bytes.
-    decoded: Vec<u8>,
+    pub(crate) decoded: Vec<u8>,
     /// Where this part starts in the concatenation the interpreter ran.
-    at: usize,
+    pub(crate) at: usize,
 }
 
-/// Apply `patches` to a page's content streams and save the result as an incremental update.
+/// Save a page whose content streams should now hold exactly these decoded bytes.
+///
+/// # Why this exists beside [`save_page`]
+///
+/// `save_page` answers "here are the byte ranges that should change", which is what a single edit
+/// produces and what makes the surgical claim checkable. An **editing session** answers a different
+/// question: after a move, a recolour and an undo, the caller knows what each stream should now
+/// contain, and asking it to re-derive the ranges from the file's bytes is asking it to *compose*
+/// edits — a composition whose answer changes when an undo has moved the stream somewhere that no
+/// single edit ever produced. There is no right answer to that, and guessing one would be exactly
+/// the silent rewrite GOAL.md §4.1 forbids.
+///
+/// So this takes the target instead, one entry per content stream in `/Contents` order, `None`
+/// meaning "this one is unchanged". Everything else a save promises still holds: only the streams
+/// that changed are rewritten, and they are re-encoded with the filter the file declared.
+pub fn save_decoded(
+    doc: &Document,
+    page: &Page,
+    wanted: &[Option<Vec<u8>>],
+) -> Result<Save, SaveError> {
+    if doc.info().encryption.encrypted {
+        return Err(SaveError::Encrypted);
+    }
+    let parts = parts_of(doc, page)?;
+    if wanted.len() != parts.len() {
+        return Err(SaveError::PartsMismatch {
+            have: parts.len(),
+            asked: wanted.len(),
+        });
+    }
+
+    let mut rewritten: Vec<(Ref, Stream)> = Vec::new();
+    let mut re_encoded = false;
+    for (i, (part, want)) in parts.iter().zip(wanted).enumerate() {
+        let Some(new) = want else { continue };
+        if *new == part.decoded {
+            continue;
+        }
+        let stream = re_encode(part, new.clone())?;
+        re_encoded = re_encoded || stream.raw != part.stream.raw;
+        rewritten.push((part.r, stream));
+        let _ = i;
+    }
+    finish(doc, rewritten, re_encoded)
+}
+
+/// Take the wanted ranges in `wanted` and save them, which is the shape a single edit produces.
 ///
 /// The patches are the ones an [`crate::edits`] call produced, so their ranges are offsets into
 /// the *decoded and concatenated* stream — the same stream `PageModel` was built from.
@@ -184,14 +241,27 @@ pub fn save_page(doc: &Document, page: &Page, patches: &[Patch]) -> Result<Save,
     let joined = joined(&parts);
     let applied = apply(&joined, patches)?;
 
-    // Each part's new length is its old one plus the net change of the patches inside it.
+    let lengths = part_lengths(&parts, patches)?;
+    let rewritten = rewritten_parts(&parts, &applied.bytes, &lengths)?;
+    finish(doc, rewritten.0, rewritten.1)
+}
+
+/// Each part's length once `patches` are applied to the concatenation.
+///
+/// A part's length is its own plus the net change of the patches **inside it**, which is why this
+/// walks the parts and asks of each patch rather than the other way round. Splitting a joined
+/// stream by the lengths it started with would hand an edit that inserts bytes into the first
+/// stream to the second one — which is a save that moves bytes into the wrong object, and is
+/// invisible until someone opens the file.
+///
+/// A patch covering either edge of a part is the straddle this refuses: it is two patches about
+/// two different objects, and the byte between them was never in the file.
+pub(crate) fn part_lengths(parts: &[Part], patches: &[Patch]) -> Result<Vec<usize>, SaveError> {
     let mut lengths: Vec<usize> = parts.iter().map(|p| p.decoded.len()).collect();
     for (i, part) in parts.iter().enumerate() {
         let from = part.at;
         let to = from + part.decoded.len();
         for patch in patches {
-            // Outside this part altogether is fine; inside it is what changes the length;
-            // covering either edge is the straddle this refuses.
             if patch.range.start >= to || patch.range.end <= from {
                 continue;
             }
@@ -207,16 +277,24 @@ pub fn save_page(doc: &Document, page: &Page, patches: &[Patch]) -> Result<Save,
             }
         }
     }
+    Ok(lengths)
+}
 
-    // Walk the result, taking each part's new length and stepping over the separator that was
-    // synthetic in the first place.
+/// Split a patched concatenation back into parts, and re-encode the ones that changed.
+///
+/// Walked in order, taking each part's new length and stepping over the separator that was
+/// synthetic in the first place.
+pub(crate) fn rewritten_parts(
+    parts: &[Part],
+    after: &[u8],
+    lengths: &[usize],
+) -> Result<(Vec<(Ref, Stream)>, bool), SaveError> {
     let mut rewritten: Vec<(Ref, Stream)> = Vec::new();
     let mut cursor = 0usize;
     let mut re_encoded = false;
     for (i, part) in parts.iter().enumerate() {
         let take = lengths.get(i).copied().unwrap_or(0);
-        let new = applied
-            .bytes
+        let new = after
             .get(cursor..cursor + take)
             .ok_or(SaveError::PatchStraddles {
                 span: cursor..cursor + take,
@@ -230,11 +308,55 @@ pub fn save_page(doc: &Document, page: &Page, patches: &[Patch]) -> Result<Save,
         }
         cursor += take;
         // Step over the newline that was between this part and the next.
-        if i + 1 < parts.len() && applied.bytes.get(cursor) == Some(&b'\n') {
+        if i + 1 < parts.len() && after.get(cursor) == Some(&b'\n') {
             cursor += 1;
         }
     }
+    Ok((rewritten, re_encoded))
+}
 
+/// The parts of a page, split back out of a patched concatenation of them.
+///
+/// Shared with the session, which needs it for the same reason the save does: after an edit the
+/// bytes have to go back into the stream they came from, and the only record of which one that is
+/// is the patches and where they landed.
+pub(crate) fn split_like(
+    parts: &[Part],
+    after: &[u8],
+    patches: &[Patch],
+) -> Result<Vec<Vec<u8>>, SaveError> {
+    let lengths = part_lengths(parts, patches)?;
+    let mut out = Vec::with_capacity(parts.len());
+    let mut cursor = 0usize;
+    for i in 0..parts.len() {
+        let take = lengths.get(i).copied().unwrap_or(0);
+        out.push(
+            after
+                .get(cursor..cursor + take)
+                .ok_or(SaveError::PatchStraddles {
+                    span: cursor..cursor + take,
+                    boundary: cursor,
+                })?
+                .to_vec(),
+        );
+        cursor += take;
+        if i + 1 < parts.len() && after.get(cursor) == Some(&b'\n') {
+            cursor += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// Append a revision holding exactly these replacement streams, and nothing else.
+///
+/// Both saves end here, so there is one place where the file's existing bytes are kept verbatim
+/// and only the changed objects are appended. A second path would be a second place for the
+/// locality guarantee to be got wrong.
+fn finish(
+    doc: &Document,
+    rewritten: Vec<(Ref, Stream)>,
+    re_encoded: bool,
+) -> Result<Save, SaveError> {
     let mut update = IncrementalUpdate::new(doc.xref().size());
     for (r, stream) in &rewritten {
         update.set(r.num, Object::Stream(stream.clone()));
@@ -256,7 +378,7 @@ pub fn save_page(doc: &Document, page: &Page, patches: &[Patch]) -> Result<Save,
 }
 
 /// The page's content streams as indirect objects.
-fn parts_of(doc: &Document, page: &Page) -> Result<Vec<Part>, SaveError> {
+pub(crate) fn parts_of(doc: &Document, page: &Page) -> Result<Vec<Part>, SaveError> {
     let Some(contents) = page.dict.get("Contents") else {
         return Ok(Vec::new());
     };

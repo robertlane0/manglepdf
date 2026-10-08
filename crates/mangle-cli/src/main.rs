@@ -167,27 +167,27 @@ fn edit(args: &[String]) -> Result<(), String> {
         None
     };
 
-    let (save, report) = match arrange {
-        Some(arrange) => {
-            let applied = mangle_edit::apply_arrange(&stream, &model, which, arrange)
-                .map_err(|e| format!("{path}: {e}"))?;
-            (
-                mangle_edit::save_page(&doc, page, &applied.applied)
-                    .map_err(|e| format!("{path}: {e}"))?,
-                arrange.to_string(),
-            )
-        }
+    // A **session**, not a one-shot edit: the loop is the same one a window drives, and the
+    // history is what makes an undo exact. A command line cannot hold a session between two
+    // invocations, so this reports the depth rather than pretending there is a stack to pop.
+    let mut session =
+        mangle_edit::Editor::open(doc, page, &resources).map_err(|e| format!("{path}: {e}"))?;
+    let size_before = session.document().bytes().len();
+    let original = session.document().bytes().to_vec();
+    let report = match arrange {
+        Some(arrange) => session
+            .arrange(which, arrange)
+            .map_err(|e| format!("{path}: {e}"))?,
         None => {
             let change = change_from_args(args, object)?;
-            let applied = mangle_edit::apply_change(&stream, object, &change)
-                .map_err(|e| format!("{path}: {e}"))?;
-            (
-                mangle_edit::save_page(&doc, page, &applied.applied)
-                    .map_err(|e| format!("{path}: {e}"))?,
-                change_name(&change),
-            )
+            session
+                .apply(which, &change)
+                .map_err(|e| format!("{path}: {e}"))?
         }
     };
+    let save = session.save().map_err(|e| format!("{path}: {e}"))?;
+    let (back, forward) = session.depth();
+    let history = session.labels().join(", ");
 
     // Write beside the target and rename, so an interrupted save never leaves a half-written file
     // where the real one was.
@@ -206,12 +206,16 @@ fn edit(args: &[String]) -> Result<(), String> {
         y0 = object.bounds.y0,
     );
     let _ = writeln!(out, "did       {report}");
+    let _ = writeln!(
+        out,
+        "history   {back} step(s) back, {forward} forward: {history}"
+    );
     let _ = writeln!(out, "wrote     {out_path}");
     let _ = writeln!(
         out,
         "bytes     {}, {} of them new",
         save.bytes.len(),
-        save.bytes.len() - doc.bytes().len()
+        save.bytes.len() - size_before
     );
     let _ = writeln!(
         out,
@@ -226,7 +230,7 @@ fn edit(args: &[String]) -> Result<(), String> {
     let _ = writeln!(
         out,
         "appended  {}",
-        if save.appended_only(doc.bytes()) {
+        if save.appended_only(&original) {
             "the file's existing bytes are untouched"
         } else {
             "NO: the file was rewritten, which a save must never be"
@@ -253,16 +257,15 @@ fn edit(args: &[String]) -> Result<(), String> {
         &resources2,
     );
 
+    // Reopen what was written and check the page is still there, which is the only evidence
+    // that counts: a file that will not open is a save that lost.
+    let _ = writeln!(
+        out,
+        "reopened  the file opens and page {} is still there",
+        index + 1
+    );
     match arrange {
-        // Arrange changes the order the objects are drawn in, so what to report is that the file
-        // still opens and the page is still readable; the byte-level check is the corpus test's.
-        Some(_) => {
-            let _ = writeln!(
-                out,
-                "reopened  the file opens and page {} is still there",
-                index + 1
-            );
-        }
+        Some(_) => {}
         None => {
             let change = change_from_args(args, object)?;
             match mangle_edit::verify(&run, &after, which, &change) {
@@ -329,23 +332,6 @@ fn change_from_args(
         "say what to do: --move dx,dy, --scale s, --delete, --colour r,g,b, or an arrange flag"
             .to_string(),
     )
-}
-
-/// A name for what was done, for the report.
-fn change_name(change: &mangle_edit::Change) -> String {
-    match change {
-        mangle_edit::Change::Delete => "delete the object".to_string(),
-        mangle_edit::Change::Recolour { colour, channel } => {
-            format!("recolour the {channel} to #{colour:?}")
-        }
-        mangle_edit::Change::Transform(m) => {
-            if m.b == 0.0 && m.c == 0.0 {
-                format!("move by {}, {}", m.e, m.f)
-            } else {
-                format!("transform to [{m:?}]")
-            }
-        }
-    }
 }
 
 /// A page's resources, resolved the way the interpreter needs.
