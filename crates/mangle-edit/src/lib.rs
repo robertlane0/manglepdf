@@ -16,3 +16,7 @@
     clippy::indexing_slicing
 )]
 #![warn(missing_debug_implementations)]
+
+pub mod history;
+
+pub use history::{Edit, History, HistoryError, Snapshot};
