@@ -74,19 +74,33 @@ byte-based bound would admit is either a `freeculture` stencil that the decode v
 or the `/SMask` of a 2×2 image in `issue16263`, which is asked the pixel bound anyway. It would
 change **no page**, so it was not written. Recorded at the end of D31.
 
-**M4 has started.** `crates/mangle-edit/src/history.rs` — `History<T>` over `Arc`-shared immutable
-snapshots, bounded at 512 steps. **The bounded case needed rebasing**: dropping the oldest `Edit`
-leaves the next one's `before` naming a state nobody saw, so `trim` copies the dropped entry's
-`before` onto the survivor. A test found that. Next in M4: page objects, then select/move/scale/
-recolour, then the write-back that gives FINISH.md S2 its exit criterion (edit → save → reopen
-with the JPEG stream's SHA-256 unchanged).
+**M4 has started.** Two modules in `crates/mangle-edit`:
+- `history.rs` — `History<T>` over `Arc`-shared immutable snapshots, bounded at 512 steps. The
+  bounded case needed **rebasing**: dropping the oldest `Edit` leaves the next one's `before`
+  naming a state nobody saw, so `trim` copies the dropped entry's `before` onto the survivor. A
+  test found that.
+- `page_objects.rs` — `PageModel`, grouping glyph runs into selectable lines over the byte spans
+  write-back needs, plus `tests/page_objects_corpus.rs` which runs it over four real corpus pages.
+
+**Running a model over real corpus pages found a bug no unit test could.** `Record::bounds` for a
+glyph run took the union of glyph *origins*, and every glyph on a line shares a baseline — so the
+boxes had **zero height**. Grouping still looked plausible on fixtures because runs on one baseline
+have identical `y`. `bounds_of` now derives ascent/descent from the placement's em (0.75/0.25).
+`f1040` went 613 → 589 objects, 102 → 81 lines. **Keep the corpus test; it is the check that
+catches this class of mistake.**
 
 Conventions worth reusing:
 - Test modules carry `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]` with a
   comment saying the panic-free rule is about what the product does with a file — see
-  `mangle-content`'s test mods.
+  `mangle-content`'s test mods. Add `float_cmp`, `indexing_slicing` where the tests need them.
 - `Snapshot<T>`'s `Clone` and `PartialEq` are hand-written, not derived: a derive would put
   `T: Clone` on both, and avoiding that bound is the point of the type.
+- `clippy::single_range_in_vec_init` fires on one-element range lists; allow it in test mods
+  rather than writing `vec![x][..].to_vec()`.
+
+**Next in M4:** the edits themselves (select/move/scale/recolour) and the write-back that gives
+FINISH.md S2 its exit criterion — edit → save → reopen with the JPEG stream's SHA-256 unchanged.
+`mangle-syntax::writer` already has `IncrementalUpdate` and `Writer::copying_from`.
 
 **Remaining corpus candidates, none of them a corpus number:** `TAMReview` (22 pages, D24 policy),
 `freeculture` (10 pages, 2 with damaged stencils).
