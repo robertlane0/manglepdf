@@ -403,7 +403,7 @@ fn num(v: f64) -> String {
 /// Both halves come out together because they only mean anything as a pair — `rg` with one
 /// component is a damaged stream, and so is `g` with three.
 #[derive(Debug, Clone, PartialEq)]
-struct Written {
+pub(crate) struct Written {
     /// The operator, cased for the channel.
     op: &'static str,
     /// The components, in the space's own order.
@@ -460,11 +460,18 @@ fn written_as(object: &PageObject, colour: Rgba, channel: Channel) -> Result<Wri
 
 /// The operator and components that paint `colour` in `space`.
 ///
+/// `pub(crate)` because arrange re-uses it: a moved object's colours are written back exactly as a
+/// recolour's are, and two copies of that arithmetic would be two places to get it wrong.
+///
 /// The space is the object's own, because GOAL.md §4.6 says a recolour preserves it: a
 /// DeviceCMYK object stays CMYK and a Separation stays a Separation with its tint edited.
 /// Writing a new `cs` would re-point the space, which changes what every operator after the
 /// edit means as well as what this object draws in.
-fn write_in(space: &ColourSpace, colour: Rgba, channel: Channel) -> Result<Written, Refusal> {
+pub(crate) fn write_in(
+    space: &ColourSpace,
+    colour: Rgba,
+    channel: Channel,
+) -> Result<Written, Refusal> {
     let unwritable = |why: &'static str| Refusal::ColourSpaceNotWritable {
         space: space.name.clone(),
         channel,

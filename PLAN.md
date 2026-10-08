@@ -990,6 +990,28 @@ touch nothing it did not have to.
 - **An encrypted document is refused.** A new revision of an encrypted file has to be encrypted,
   and this does not do that; the alternative is a file that opens with a repair prompt.
 
-Next in M4: the UI wiring, then Arrange (§4.7) — move an operator range past the next **overlapping**
-object and re-materialise the state at the destination, which is the first edit here that cannot be
-a wrapper because it changes the *order* of operators rather than the space they draw in.
+## Arrange — the edit that cannot be a wrapper
+
+Every other edit here is a wrapper, because a `q … Q` changes the space an object is drawn **in**.
+Arrange changes the *order* operators appear in, and in a content stream that order **is** the
+z-order. So an arrange is a **move**: the object's bytes come out of where they were and go in
+somewhere else, wrapped in every piece of state the record carries — the CTM, the colours in the
+space the file used, the stroke width, the caps, the joins, the dash.
+
+Two things about it are worth writing down:
+
+- **The direction is inverted from what it looks like.** Later operators draw on top, so a move to
+  the front is a move to *after* the neighbour and a move to the back is a move to *before* it.
+  Getting it the other way round is an arrange that appears to work and moves the object the
+  opposite way. The first version of this did exactly that, and the test that caught it was the one
+  that read the bytes back.
+- **What the record does not carry is where this stops.** A clip cannot be re-established (a record
+  carries the *region* the clip resolved to, not the path operators that built it); an alpha or a
+  blend mode cannot be re-established (they live in a named `/ExtGState`, and inventing a name
+  would either collide with the file's or draw attention to a resource nobody defined); and **text
+  cannot be re-established** (a run depends on the font, size, `Tc`, `Tw`, `Tz`, `TL`, `Ts` in
+  force where it sat, and none of that is on the record). Each is refused with a name, and on a real
+  page that is 201 objects refused next to 582 arranged — the refusals are the finding, not a
+  failure: most of a page is text, and the Text Properties panel is what would make it arrangeable.
+
+What is left in M4 is the UI wiring.

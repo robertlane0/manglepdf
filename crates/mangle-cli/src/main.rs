@@ -63,6 +63,8 @@ manglepdf-cli <command> <file.pdf> [options]
                             --scale s              scale it about its centre
                             --delete               remove it
                             --colour r,g,b         recolour it (0-1 each)
+                            --forward|--backward   arrange it past the object it overlaps
+                            --to-front|--to-back   arrange it to the ends of the page
                             -o FILE                where to write (default beside the input)
 "
     );
@@ -151,56 +153,41 @@ fn edit(args: &[String]) -> Result<(), String> {
         )
     })?;
 
-    let change = if flag(args, "--delete") {
-        Some(mangle_edit::Change::Delete)
-    } else if let Some(moved) = value(args, "--move") {
-        let parts: Vec<f64> = moved.split(',').filter_map(|p| p.parse().ok()).collect();
-        let dx = parts.first().copied().ok_or("--move needs dx,dy")?;
-        let dy = parts.get(1).copied().ok_or("--move needs dx,dy")?;
-        Some(mangle_edit::Change::move_by(dx, dy))
-    } else if let Some(scale) = value(args, "--scale") {
-        let s: f64 = scale
-            .parse()
-            .map_err(|_| format!("--scale needs a number, got `{scale}`"))?;
-        let b = object.bounds;
-        Some(mangle_edit::Change::scale_about(
-            f64::midpoint(b.x0, b.x1),
-            f64::midpoint(b.y0, b.y1),
-            s,
-            s,
-        ))
-    } else if let Some(colour) = value(args, "--colour") {
-        let parts: Vec<f64> = colour.split(',').filter_map(|p| p.parse().ok()).collect();
-        let (r, g, b) = (
-            parts.first().copied(),
-            parts.get(1).copied(),
-            parts.get(2).copied(),
-        );
-        match (r, g, b) {
-            (Some(r), Some(g), Some(b)) => {
-                Some(mangle_edit::Change::recolour(mangle_content::state::Rgba {
-                    r,
-                    g,
-                    b,
-                    a: 1.0,
-                }))
-            }
-            _ => return Err("--colour needs r,g,b in 0..1".to_string()),
-        }
+    // Arrange is a different kind of command from the others: it has to know the object's
+    // neighbours to know where to move it, so it is not a change to one object.
+    let arrange = if flag(args, "--forward") {
+        Some(mangle_edit::Arrange::Forward)
+    } else if flag(args, "--backward") {
+        Some(mangle_edit::Arrange::Backward)
+    } else if flag(args, "--to-front") {
+        Some(mangle_edit::Arrange::ToFront)
+    } else if flag(args, "--to-back") {
+        Some(mangle_edit::Arrange::ToBack)
     } else {
         None
     };
-    let Some(change) = change else {
-        return Err(
-            "say what to do: --move dx,dy, --scale s, --delete or --colour r,g,b".to_string(),
-        );
-    };
 
-    let before = &run;
-    let applied =
-        mangle_edit::apply_change(&stream, object, &change).map_err(|e| format!("{path}: {e}"))?;
-    let save =
-        mangle_edit::save_page(&doc, page, &applied.applied).map_err(|e| format!("{path}: {e}"))?;
+    let (save, report) = match arrange {
+        Some(arrange) => {
+            let applied = mangle_edit::apply_arrange(&stream, &model, which, arrange)
+                .map_err(|e| format!("{path}: {e}"))?;
+            (
+                mangle_edit::save_page(&doc, page, &applied.applied)
+                    .map_err(|e| format!("{path}: {e}"))?,
+                arrange.to_string(),
+            )
+        }
+        None => {
+            let change = change_from_args(args, object)?;
+            let applied = mangle_edit::apply_change(&stream, object, &change)
+                .map_err(|e| format!("{path}: {e}"))?;
+            (
+                mangle_edit::save_page(&doc, page, &applied.applied)
+                    .map_err(|e| format!("{path}: {e}"))?,
+                change_name(&change),
+            )
+        }
+    };
 
     // Write beside the target and rename, so an interrupted save never leaves a half-written file
     // where the real one was.
@@ -210,31 +197,15 @@ fn edit(args: &[String]) -> Result<(), String> {
     std::fs::write(&temp, &save.bytes).map_err(|e| format!("{}: {e}", temp.display()))?;
     std::fs::rename(&temp, target).map_err(|e| format!("{}: {e}", target.display()))?;
 
-    // Reopen what was written and check the edit is in it, which is the only evidence that counts.
-    let reopened = Document::open(save.bytes.clone(), OpenOptions::default())
-        .map_err(|e| format!("{out_path}: {e}"))?;
-    let cat2 = reopened.catalog().map_err(|e| format!("{out_path}: {e}"))?;
-    let root2 = cat2
-        .get("Pages")
-        .and_then(mangle_syntax::object::Object::as_ref_id)
-        .ok_or("the saved file has no page tree")?;
-    let tree2 =
-        mangle_doc::PageTree::build(&reopened, root2).map_err(|e| format!("{out_path}: {e}"))?;
-    let page2 = tree2
-        .get(index)
-        .ok_or_else(|| format!("{out_path}: page {index} is gone"))?;
-    let resources2 = page_resources(&reopened, page2);
-    let stream2 = page2.decoded_contents(&reopened);
-    let after = mangle_content::interp::run_with(
-        &mangle_content::ContentStream::parse(&stream2),
-        &resources2,
-    );
-
     let _ = writeln!(
         out,
-        "selected {which} on page {index_plus_one}",
-        index_plus_one = index + 1
+        "selected {which} on page {}, a {kind:?} at {x0:.2} {y0:.2}",
+        index + 1,
+        kind = object.kind,
+        x0 = object.bounds.x0,
+        y0 = object.bounds.y0,
     );
+    let _ = writeln!(out, "did       {report}");
     let _ = writeln!(out, "wrote     {out_path}");
     let _ = writeln!(
         out,
@@ -261,18 +232,120 @@ fn edit(args: &[String]) -> Result<(), String> {
             "NO: the file was rewritten, which a save must never be"
         }
     );
-    match mangle_edit::verify(before, &after, which, &change) {
-        Ok(()) => {
+
+    // Reopen what was written and check the edit is in it, which is the only evidence that counts.
+    let reopened = Document::open(save.bytes.clone(), OpenOptions::default())
+        .map_err(|e| format!("{out_path}: {e}"))?;
+    let cat2 = reopened.catalog().map_err(|e| format!("{out_path}: {e}"))?;
+    let root2 = cat2
+        .get("Pages")
+        .and_then(mangle_syntax::object::Object::as_ref_id)
+        .ok_or("the saved file has no page tree")?;
+    let tree2 =
+        mangle_doc::PageTree::build(&reopened, root2).map_err(|e| format!("{out_path}: {e}"))?;
+    let page2 = tree2
+        .get(index)
+        .ok_or_else(|| format!("{out_path}: page {index} is gone"))?;
+    let resources2 = page_resources(&reopened, page2);
+    let stream2 = page2.decoded_contents(&reopened);
+    let after = mangle_content::interp::run_with(
+        &mangle_content::ContentStream::parse(&stream2),
+        &resources2,
+    );
+
+    match arrange {
+        // Arrange changes the order the objects are drawn in, so what to report is that the file
+        // still opens and the page is still readable; the byte-level check is the corpus test's.
+        Some(_) => {
             let _ = writeln!(
                 out,
-                "verified  the reopened page shows the change that was asked for"
+                "reopened  the file opens and page {} is still there",
+                index + 1
             );
         }
-        Err(e) => {
-            let _ = writeln!(out, "verified  NO: {e}");
+        None => {
+            let change = change_from_args(args, object)?;
+            match mangle_edit::verify(&run, &after, which, &change) {
+                Ok(()) => {
+                    let _ = writeln!(
+                        out,
+                        "verified  the reopened page shows the change that was asked for"
+                    );
+                }
+                Err(e) => {
+                    let _ = writeln!(out, "verified  NO: {e}");
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// The change the arguments ask for, read out of them once so the verification can use the same.
+fn change_from_args(
+    args: &[String],
+    object: &mangle_edit::PageObject,
+) -> Result<mangle_edit::Change, String> {
+    if flag(args, "--delete") {
+        return Ok(mangle_edit::Change::Delete);
+    }
+    if let Some(moved) = value(args, "--move") {
+        let parts: Vec<f64> = moved.split(',').filter_map(|p| p.parse().ok()).collect();
+        let dx = parts.first().copied().ok_or("--move needs dx,dy")?;
+        let dy = parts.get(1).copied().ok_or("--move needs dx,dy")?;
+        return Ok(mangle_edit::Change::move_by(dx, dy));
+    }
+    if let Some(scale) = value(args, "--scale") {
+        let s: f64 = scale
+            .parse()
+            .map_err(|_| format!("--scale needs a number, got `{scale}`"))?;
+        let b = object.bounds;
+        return Ok(mangle_edit::Change::scale_about(
+            f64::midpoint(b.x0, b.x1),
+            f64::midpoint(b.y0, b.y1),
+            s,
+            s,
+        ));
+    }
+    if let Some(colour) = value(args, "--colour") {
+        let parts: Vec<f64> = colour.split(',').filter_map(|p| p.parse().ok()).collect();
+        match (
+            parts.first().copied(),
+            parts.get(1).copied(),
+            parts.get(2).copied(),
+        ) {
+            (Some(r), Some(g), Some(b)) => {
+                return Ok(mangle_edit::Change::recolour(mangle_content::state::Rgba {
+                    r,
+                    g,
+                    b,
+                    a: 1.0,
+                }));
+            }
+            _ => return Err("--colour needs r,g,b in 0..1".to_string()),
+        }
+    }
+    Err(
+        "say what to do: --move dx,dy, --scale s, --delete, --colour r,g,b, or an arrange flag"
+            .to_string(),
+    )
+}
+
+/// A name for what was done, for the report.
+fn change_name(change: &mangle_edit::Change) -> String {
+    match change {
+        mangle_edit::Change::Delete => "delete the object".to_string(),
+        mangle_edit::Change::Recolour { colour, channel } => {
+            format!("recolour the {channel} to #{colour:?}")
+        }
+        mangle_edit::Change::Transform(m) => {
+            if m.b == 0.0 && m.c == 0.0 {
+                format!("move by {}, {}", m.e, m.f)
+            } else {
+                format!("transform to [{m:?}]")
+            }
+        }
+    }
 }
 
 /// A page's resources, resolved the way the interpreter needs.

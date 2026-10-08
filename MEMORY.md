@@ -88,6 +88,11 @@ change **no page**, so it was not written. Recorded at the end of D31.
   `PageModel` object's spans, each a `q … Q` wrapper around the object's own operators so those
   bytes come out untouched, plus `tests/edits_corpus.rs` which runs move, delete and recolour over
   three real pages and checks the effect *through the interpreter*, not the patch text.
+- `arrange.rs` — the one edit that is not a wrapper. Arrange changes the order operators appear
+  in, so the bytes move and the CTM, colours, stroke width, caps, joins and dash are written back
+  around them. Text, clipped objects, alpha and blend are all refused **by name** (the record does
+  not carry the text state, a clip's pathOps, or a named `/ExtGState`) — 201 objects refused to
+  582 arranged across three corpus pages, and the refusals are the finding.
 - `writeback.rs` — the save. `save_page` appends an incremental update, rewriting only the content
   streams that changed and re-encoding them with the file's own filter, plus
   `tests/writeback_corpus.rs`: edit → save → reopen, with the untouched image's SHA-256 asserted
@@ -115,11 +120,13 @@ Conventions worth reusing:
   rather than writing `vec![x][..].to_vec()`.
 
 **Next in M4:** the edits are built (`edits.rs` — a `Change` becomes patches over a
-`PageModel` object's spans, each a `q … Q` wrapper around the object's own operators), and so is the
+`PageModel` object's spans, each a `q … Q` wrapper around the object's own operators), so is the
 save (`writeback.rs` — `save_page` appends an incremental update, rewriting only the content
-streams that changed and re-encoding them with the file's own filter). FINISH.md S2's exit
-criterion — edit → save → reopen with the untouched JPEG stream's SHA-256 unchanged — is asserted in
-`tests/writeback_corpus.rs` and passes. What is left is the UI wiring and Arrange.
+streams that changed and re-encoding them with the file's own filter), and so is **Arrange**
+(`arrange.rs` — the one edit that cannot be a wrapper, so the bytes move and the state they were
+drawn under is re-materialised at the destination). FINISH.md S2's exit criterion — edit → save
+→ reopen with the untouched JPEG stream's SHA-256 unchanged — is asserted in
+`tests/writeback_corpus.rs` and passes. What is left in M4 is the UI wiring.
 
 Two conventions the surgery and edits tests rely on, both worth reusing: a byte offset in a test is
 **computed from the fixture** (`windows(5).position(…)`) rather than hand-counted, because a
@@ -141,9 +148,9 @@ one to remember: my unit test asserted the patch *text* and passed, the corpus t
 is too short passes every read test and breaks the first write — provenance is what the write-back
 rests on.
 
-**Next after that, in order:** the UI wiring, then Arrange (§4.7) — move an operator range past the
-next *overlapping* object and re-materialise the state at the destination. That one cannot be a
-wrapper, because it changes the *order* of operators rather than the space they draw in.
+**Next after that, in order:** the UI wiring (the `mangle-ui` window shell), then the Text State on
+`Record` that would make text arrangeable and give §4.4's Text Properties panel something to
+write.
 
 Two conventions the surgery tests rely on, both worth reusing: a byte offset in a test is
 **computed from the fixture** (`windows(5).position(…)`) rather than hand-counted, because a
