@@ -919,14 +919,49 @@ by rewriting its `cm` must also re-materialise the graphics state around the new
 belongs to the caller plus `PageModel`'s spans, and pretending otherwise here would hide the
 hard problem.
 
-**The corpus round trip is the test that matters**, and it is kept for a reason no unit test gives:
-`tests/surgery_corpus.rs` takes a real page, scales a real image's `cm`, and checks two things —
-that the interpreter sees the placement change, and that putting the original bytes back over the
-same span returns the original stream *exactly*. The second is what a re-serialisation cannot
-satisfy and what a user would never notice.
+**The corpus round trip is the test that matters**, and it is kept for a reason no unit test
+gives: `tests/surgery_corpus.rs` takes a real page, scales a real image's `cm`, and checks two
+things — that the interpreter sees the placement change, and that putting the original bytes back
+over the same span returns the original stream *exactly*. The second is what a re-serialisation
+cannot satisfy and what a user would never notice.
 
-Next in M4, in order: the edits themselves (move / scale / delete / recolour over a `PageModel`
-object's spans, each producing patches rather than a rewritten stream), and the save→reopen loop
-that gives FINISH.md its exit criterion — an edit, a save, a reopen, and an untouched JPEG stream
-whose SHA-256 has not moved. `mangle-syntax::writer` already has `IncrementalUpdate` and
-`Writer::copying_from` for the save half.
+## What the edits found on real pages
+
+`tests/edits_corpus.rs` runs move, scale, delete and recolour over three corpus pages. It found
+two defects that **every unit test in this module passed**, and they are the reason it exists.
+
+**1. An insertion with no whitespace of its own becomes part of the token it lands in.**
+`pdfjs__TAMReview.pdf` writes `0.000 Tc(Working Papers on Information Systems)Tj` — an operator
+immediately against its operand, which the lexer handles and which nothing in the file forbids.
+Inserting `q 1 0 0 1 12 -3 cm` at the start of that string produced `Tcq 1 0 0 1 …`: `Tcq` is
+**one keyword**, so the wrapper this module had just opened was not an operator at all and the
+`Q` that was meant to close it closed nothing. The stream was unbalanced and the page drew under a
+wrong graphics state. Nothing reported it. The fix is that an insertion carries its own separator,
+and the mirror for a deletion, because a delete that leaves `Td` against `Q` writes `TdQ` and
+removes an operator.
+
+**2. A colour written operands-after-operator is a different stream.** The recolour emitted
+`rg 0.784 0.063 0.18`. A content stream is written operands first: `0.784 0.063 0.18 rg`. What was
+written instead reads as an `rg` with *no operands* followed by four stray numbers — so the colour
+was never set, the next operator quietly collected the numbers as its own operands, and the page
+rendered perfectly with **the old colour**. My first unit test asserted the patch *text*
+(`contains("rg 1 1 1")`) and passed; the corpus test asserted the *colour the interpreter reports*
+and failed. That is the whole argument for running the interpreter on the result: a string of the
+right words in the wrong order is still a string of the right words.
+
+Both are the shape of mistake STATUS.md's preamble describes — a fixture written to be simple is a
+fixture that cannot express them.
+
+**A third thing the corpus test pins down rather than a bug:** an edit's matrix is in the stream's
+**user space**, while an object's bounds are in **device space** with the CTM already applied. They
+are the same only under the identity CTM. `map_point` converts, and the test asserts the conversion
+on a page that really does scale, because a drag that lands somewhere the pointer never was is
+worse than one that does not move.
+
+Next in M4, in order: the edits themselves are now built (move/scale/delete/recolour over a
+`PageModel` object's spans, each producing patches rather than a rewritten stream, `Channel::Both`
+for a path filled and stroked in one colour), and what remains is the **save→reopen loop** that
+gives FINISH.md its exit criterion — an edit, a save, a reopen, and an untouched JPEG stream whose
+SHA-256 has not moved. `mangle-syntax::writer` already has `IncrementalUpdate` and
+`Writer::copying_from` for the save half. Arrange (§4.7) — moving an operator range past the next
+*overlapping* object and re-materialising the state at the destination — is the edit after that.

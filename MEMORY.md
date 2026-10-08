@@ -74,7 +74,7 @@ byte-based bound would admit is either a `freeculture` stencil that the decode v
 or the `/SMask` of a 2×2 image in `issue16263`, which is asked the pixel bound anyway. It would
 change **no page**, so it was not written. Recorded at the end of D31.
 
-**M4 has started.** Two modules in `crates/mangle-edit`:
+**M4 has started.** Three modules in `crates/mangle-edit`:
 - `history.rs` — `History<T>` over `Arc`-shared immutable snapshots, bounded at 512 steps. The
   bounded case needed **rebasing**: dropping the oldest `Edit` leaves the next one's `before`
   naming a state nobody saw, so `trim` copies the dropped entry's `before` onto the survivor. A
@@ -84,6 +84,10 @@ change **no page**, so it was not written. Recorded at the end of D31.
 - `surgery.rs` — the write-back. `Patch` ranges applied by position, overlap and out-of-range
   refused up front, `is_balanced` for the result, plus `tests/surgery_corpus.rs` which scales an
   image on a real page and proves every byte outside the patched range is identical.
+- `edits.rs` — the edits. `Change` (transform / delete / recolour) becomes patches over a
+  `PageModel` object's spans, each a `q … Q` wrapper around the object's own operators so those
+  bytes come out untouched, plus `tests/edits_corpus.rs` which runs move, delete and recolour over
+  three real pages and checks the effect *through the interpreter*, not the patch text.
 
 **Running a model over real corpus pages found a bug no unit test could.** `Record::bounds` for a
 glyph run took the union of glyph *origins*, and every glyph on a line shares a baseline — so the
@@ -101,13 +105,32 @@ Conventions worth reusing:
 - `clippy::single_range_in_vec_init` fires on one-element range lists; allow it in test mods
   rather than writing `vec![x][..].to_vec()`.
 
-**Next in M4:** the write-back primitive is built (`surgery.rs` in `crates/mangle-edit`): a patch
-set is applied by position, overlapping and out-of-range patches are refused before a byte is
-copied, and `q`/`Q` balance is checkable across the result. What is left from it is the **edits
-themselves** (select/move/scale/recolour over `PageModel`'s spans, each producing patches rather
-than a rewritten stream) and the **save→reopen loop** that gives FINISH.md S2 its exit criterion —
-edit → save → reopen with the JPEG stream's SHA-256 unchanged. `mangle-syntax::writer` already has
-`IncrementalUpdate` and `Writer::copying_from`.
+**Next in M4:** the edits are built too — `edits.rs` turns a `Change` into patches over a
+`PageModel` object's spans, each a `q … Q` wrapper around the object's own operators. What remains
+is the **save→reopen loop** that gives FINISH.md S2 its exit criterion — edit → save → reopen with
+the JPEG stream's SHA-256 unchanged. `mangle-syntax::writer` already has `IncrementalUpdate` and
+`Writer::copying_from`.
+
+Two conventions the surgery and edits tests rely on, both worth reusing: a byte offset in a test is
+**computed from the fixture** (`windows(5).position(…)`) rather than hand-counted, because a
+hand-counted one is wrong the moment the fixture's whitespace changes; and a span from `Record`
+is **the operation that drew it** (`/PxARRO Do`), not the `cm` that positioned it — so moving a
+picture means editing the `cm` before it, which is the first thing to get wrong when writing an
+edit from a record's span.
+
+**Two bugs the corpus test found that every unit test passed, both recorded in `PLAN.md`: an
+insertion that carries no whitespace of its own glues onto the token it lands in** (a real page
+writes `0.000 Tc(Working Papers)Tj`; inserting `q …` there produced `Tcq`, one keyword, so the
+wrapper was never an operator and the stream was unbalanced), **and a colour written
+operands-after-operator** (`rg 0.784 0.063 0.18` rather than `0.784 0.063 0.18 rg` is an `rg` with
+no operands, so the colour never changed and the page rendered perfectly with the old one). The
+second is the one to remember: my unit test asserted the patch *text* and passed, the corpus test
+asserted the *colour the interpreter reports* and failed. **Assert the effect, not the string.**
+
+**The edits to write next, in order:** the save half (incremental update through
+`IncrementalUpdate`), then Arrange (§4.7) — move an operator range past the next *overlapping*
+object and re-materialise the state at the destination. Each must land as a `Vec<Patch>` over the
+object's own spans, and each must satisfy U1: every byte outside those ranges identical.
 
 Two conventions the surgery tests rely on, both worth reusing: a byte offset in a test is
 **computed from the fixture** (`windows(5).position(…)`) rather than hand-counted, because a
@@ -115,11 +138,6 @@ hand-counted one is wrong the moment the fixture's whitespace changes; and a spa
 is **the operation that drew it** (`/PxARRO Do`), not the `cm` that positioned it — so moving a
 picture means editing the `cm` before it, which is the first thing to get wrong when writing an
 edit from a record's span.
-
-**The edits to write next, in order:** move (`cm` / `Tm` translation), scale, delete (remove the
-operators, drop the wrapper only if it becomes empty), recolour (in the object's *original* colour
-space). Each must land as a `Vec<Patch>` over the object's own spans, and each must satisfy U1:
-every byte outside those ranges identical.
 
 **Remaining corpus candidates, none of them a corpus number:** `TAMReview` (22 pages, D24 policy),
 `freeculture` (10 pages, 2 with damaged stencils).
