@@ -774,6 +774,31 @@ fn decode_samples(
     let components = space.components();
     let space = apply_decode(space, &read_decode(dict.get("Decode"), components));
 
+    // A decode that reported damage is not a picture, and drawing it is worse than not drawing
+    // it. `sample_at` past the end of the buffer answers zero, so a decode that lost its place
+    // does not read as a short image — it reads as a complete image with damage in it, which is
+    // a claim about the file that the file never made.
+    //
+    // The Group 4 case is what makes this concrete. `pdfjs__freeculture.pdf` pages 171 and 255
+    // hold a 9258 by 12259 stencil whose data desynchronises 232 rows into the decode. Every row
+    // still comes out — a resync guesses, and the guess consumes *something* — so the row count
+    // is right and the contents are not: sampled rows alternate between entirely black (9258 of
+    // 9258) and nearly empty against a photographic page, with an ink fraction of 0.553 where
+    // the oracle has 0.471. Measured against `mutool`, drawing that scored **0.4718** where
+    // refusing it scored **0.5716**: the page got worse by being drawn. The decode's own verdict
+    // is therefore honoured rather than second-guessed. See [D31].
+    //
+    // **A picture only.** A soft mask is judged on its own terms just below — refused for being
+    // short, because a hole in the transparency removes part of the picture without saying so —
+    // and this verdict would refuse some masks that pass that check, so it does not apply there.
+    if role == Role::Picture && !decoded.complete {
+        notes.push(format!(
+            "the samples of a {width} by {height} image did not decode cleanly, so it was not \
+             drawn rather than drawn wrong"
+        ));
+        return None;
+    }
+
     // A short stream is a fact about the mask's *alpha* rather than about its colour, so it
     // is checked here and only here. `sample_at` past the end of the buffer answers zero, and
     // for a picture zero is a colour the file may well have meant; for a mask it is a hole in
@@ -1559,15 +1584,79 @@ mod tests {
     #[test]
     fn a_fax_stream_is_read_one_sample_per_byte_at_its_declared_value() {
         // White 3, black 3, white 2, as three Group 3 1D terminating codes: `1000`, `10`
-        // and `011`. Every run is written down rather than left to the end of the row,
+        // and `1100`. Every run is written down rather than left to the end of the row,
         // because the decoder's last run of a line is a separate matter from this one.
-        let (raster, notes) = decode_ok(&fax_image(8, "100010011"));
+        //
+        // The last code is `1100` and not `011`, which is what this fixture carried for a long
+        // time, and the difference is worth stating because it is the same one that made a
+        // corpus page look like a decoder fault: **T.4 has no code for a white run of two**, so
+        // `011` is a valid *prefix* that walks on looking for a longer match and never finds one,
+        // and the line comes back reported as damaged. libtiff agrees — encoding this same row
+        // with `tiffcp -c g3:1d` produces `100010011100`. See [D31].
+        let (raster, notes) = decode_ok(&fax_image(8, "100010011100"));
         assert_eq!((raster.width, raster.height), (8, 1), "{notes:?}");
         assert_eq!(
             row_of(&raster),
             vec![255, 255, 255, 0, 0, 0, 255, 255],
             "each pixel is the byte the decoder wrote for it, read over the range \
              /BitsPerComponent declares rather than over 255"
+        );
+    }
+
+    /// A G3 1D stream whose data stops partway, which is what damage looks like from here:
+    /// two rows of codes for a four-row image, so the decoder runs the buffer dry.
+    fn truncated_fax_image(w: usize, h: usize) -> Stream {
+        let mut dict = Dict::new();
+        dict.set("Width", Object::Int(w as i64));
+        dict.set("Height", Object::Int(h as i64));
+        dict.set("BitsPerComponent", Object::Int(1));
+        dict.set("ColorSpace", Object::name("DeviceGray"));
+        dict.set("Filter", Object::name("CCITTFaxDecode"));
+        dict.set(
+            "DecodeParms",
+            Object::Dict({
+                let mut p = Dict::new();
+                p.set("K", Object::Int(0));
+                p.set("Columns", Object::Int(w as i64));
+                p.set("Rows", Object::Int(h as i64));
+                p
+            }),
+        );
+        Stream::new(
+            dict,
+            pack("000000000001100010011100000000000001100010011100"),
+        )
+    }
+
+    /// A picture whose samples did not decode cleanly is refused rather than drawn wrong.
+    ///
+    /// The corpus case is `pdfjs__freeculture.pdf` pages 171 and 255, where a Group 4 stencil
+    /// desynchronises 232 rows in and every row after comes out as noise — measured against
+    /// `mutool`, drawing it scored 0.4718 and refusing it scored 0.5716. **A row count that comes
+    /// out right is exactly what makes this dangerous**, so what is asserted is that the
+    /// *decoder's own verdict* is what stops the picture, not a size or a length.
+    #[test]
+    fn a_picture_whose_decode_reported_damage_is_refused_rather_than_drawn_wrong() {
+        let mut notes = Vec::new();
+        assert!(
+            decode(&truncated_fax_image(8, 4), &|o| Some(o.clone()), &mut notes).is_none(),
+            "a picture that lost its place is not a picture: {notes:?}"
+        );
+        assert!(
+            said(&notes).contains("did not decode cleanly"),
+            "and it says so rather than drawing it anyway: {notes:?}"
+        );
+    }
+
+    /// The verdict is about *pictures*, and a soft mask is judged on its own terms.
+    #[test]
+    fn the_damage_verdict_does_not_apply_to_a_soft_mask() {
+        let mask = truncated_fax_image(8, 4);
+        let mut notes = Vec::new();
+        let _ = decode_soft_mask(&mask, 8, 4, &|o| Some(o.clone()), &mut notes);
+        assert!(
+            !said(&notes).contains("did not decode cleanly"),
+            "a mask is not refused for this: {notes:?}"
         );
     }
 

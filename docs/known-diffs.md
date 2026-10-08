@@ -3617,11 +3617,20 @@ project's own rule already says which: *a note about it beats a picture of noise
 `Decoded::complete`, and the image path does not consult it.
 
 **The real fix is therefore not the bound. It is that an image whose filter chain reported an
-incomplete decode is refused, or drawn only up to the last good row** — with
-`/DamagedRowsBeforeError` honoured when the file states a tolerance, which this one does not and so
-gets the PDF default of never giving up, which is what let a desynchronised decode run to the end
-of the page. That work is **not done**, and this entry is the reason to do it: the bound looks like
-the obvious defect on this page and is not.
+incomplete decode is refused rather than drawn** — and that is **now done**
+(`crates/mangle-render/src/image.rs`): a **picture** whose decode reported
+`Decoded::complete == false` is refused with a note naming the size, on the grounds above. It is a
+picture only, because a soft mask is judged on its own terms just below and the verdict would
+refuse some masks that pass that check.
+
+**What the measurement says about it, stated exactly.** Re-measuring `freeculture` after the
+change gives **the same numbers as before** — 0.5716 and 0.8688 for the two pages, a file median
+of 0.9606, 10 pages below 0.95 — **because the size bound fires first on both of them**, so the new
+refusal never gets the chance to. That is the honest reading: **this change is unexercised by the
+corpus as it stands.** It is worth having because it is what makes raising the bound safe, and the
+two pages it would then catch are exactly the two this entry is about. A change whose justification
+is a future edit is a weaker thing to land than one that moves a number, and it is recorded here
+rather than claimed as a fix.
 
 ### A wrong hypothesis, recorded because it was expensive
 
@@ -3649,6 +3658,21 @@ can be read correctly enough to pass every hand-written test while being wrong a
 **The oracle is what told me, and it was in the repository the whole time.** Had I taken the two
 failing tests as the thing to fix, the project's real-world numbers would have improved and its
 correctness would have been destroyed.
+
+### What it cost to find, and the one fixture that was wrong all along
+
+The reason the first attempt at the fix could not even compile was a fixture carrying the same
+misreading: `a_fax_stream_is_read_one_sample_per_byte_at_its_declared_value` encoded its last run as
+`011` and called it white 2. **That fixture was wrong for as long as it existed**, and nothing
+caught it because the decoder reported the row damaged, the row's samples came out right, and the
+test asserted the samples. Encoded through `tiffcp -c g3:1d`, the same row comes out as
+`100010011100`; the fixture now carries that, and the assertion is unchanged because the pixels were
+never the thing that was wrong.
+
+**A test can be green, self-consistent, and wrong, when it was written from the same
+misunderstanding as the code it checks.** That is the failure mode this entry is really about, and
+it is why the libtiff fixtures — expectations produced by something outside this repository — are
+worth more than another hand-written case.
 
 `freeculture` page 255 is therefore still refused, and still scores 0.5716 — which is the honest
 number for a page whose only content is an image this project cannot decode correctly. **A bad
