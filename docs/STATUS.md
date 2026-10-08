@@ -164,7 +164,9 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   the deliberate trade for a renderer that never has to ask the machine for a font.
 - **`mangle-content`** — content streams. Every token, every operator and every mark
   carries the bytes it came from, which is what makes a selection a byte range and an
-  edit a single rewrite. The operator table is the specification's, the graphics state is
+  edit a single rewrite — and a record of text carries the **text state** it was drawn with
+  (font, size, `Tc`, `Tw`, `Tz`, `TL`, `Ts`, and the matrix the run started from), which is
+  what lets a moved run be written back rather than refused. The operator table is the specification's, the graphics state is
   a value rather than a place, and a test proves across the whole corpus that every mark
   names bytes that are inside the page it came from.
 - **`mangle-edit`** — what a person would call one thing on a page, and the surgery that

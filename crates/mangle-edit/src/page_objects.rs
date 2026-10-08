@@ -407,6 +407,8 @@ mod tests {
             dash: mangle_content::state::Dash::default(),
             tag: None,
             form: None,
+            text: mangle_content::state::TextState::default(),
+            text_matrix: Matrix::IDENTITY,
         }
     }
 
@@ -431,6 +433,8 @@ mod tests {
             dash: mangle_content::state::Dash::default(),
             tag: None,
             form: None,
+            text: mangle_content::state::TextState::default(),
+            text_matrix: Matrix::IDENTITY,
         }
     }
 

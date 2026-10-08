@@ -891,6 +891,8 @@ mod tests {
             dash: Dash::default(),
             tag: None,
             form: None,
+            text: mangle_content::state::TextState::default(),
+            text_matrix: Matrix::IDENTITY,
         }
     }
 

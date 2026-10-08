@@ -150,9 +150,14 @@ one to remember: my unit test asserted the patch *text* and passed, the corpus t
 is too short passes every read test and breaks the first write — provenance is what the write-back
 rests on.
 
-**Next after that, in order:** the UI wiring (the `mangle-ui` window shell), then the Text State on
-`Record` that would make text arrangeable and give §4.4's Text Properties panel something to
-write.
+**The Text State is on `Record` now** (`text` + `text_matrix`), so arrange can write a moved run
+back instead of refusing it: three corpus pages went from 201 refusals to 168 and 582 arrangements
+to 615. That is also what §4.4's Text Properties panel will write through — a control that
+changes `Tc` or `Tz` needs a `Record` that says what they were.
+
+**Next after that, in order:** the UI wiring (the `mangle-ui` window shell), then §4.4's Text
+Properties panel and layout (recompute positions / `Tw` inside the edited block's original width,
+keeping untouched lines' operators byte-identical).
 
 Two conventions the surgery tests rely on, both worth reusing: a byte offset in a test is
 **computed from the fixture** (`windows(5).position(…)`) rather than hand-counted, because a

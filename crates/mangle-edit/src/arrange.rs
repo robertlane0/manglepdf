@@ -278,6 +278,15 @@ pub fn arrange_patches(
         })?
         .to_vec();
     let body = state_of(object)?;
+    // A run of text is wrapped in `BT … ET` as well as `q … Q`, because the moved bytes only
+    // show inside a text object and the destination may not be in one.
+    // The leading space is what keeps the closing `Q` off the byte the moved operators end on:
+    // `Q Q` is two operators and `QQ` is one keyword that means neither.
+    let tail = if object_is_text(object) {
+        " ET Q\n"
+    } else {
+        " Q\n"
+    };
     Ok(vec![
         Patch::delete(from.clone(), "the object leaves its old place"),
         Patch::insert(
@@ -285,7 +294,7 @@ pub fn arrange_patches(
             pad_for_insertion(
                 stream,
                 at,
-                &format!("q {body}\n{} Q\n", String::from_utf8_lossy(&moved)),
+                &format!("q {body}\n{}{tail}", String::from_utf8_lossy(&moved)),
             ),
             "and takes its place at the front",
         ),
@@ -346,6 +355,14 @@ fn scope_of(stream: &[u8], from: &Range<usize>, arrange: Arrange) -> usize {
     }
 }
 
+/// Whether this object is a run of text, which needs a `BT … ET` around its moved bytes.
+fn object_is_text(object: &PageObject) -> bool {
+    matches!(
+        object.records.first().map(|r| &r.mark),
+        Some(Mark::Glyphs { .. })
+    )
+}
+
 /// The operators that re-establish, at the destination, the state an object was drawn under.
 ///
 /// Everything here comes off the record, and anything not on the record is a refusal rather than a
@@ -357,10 +374,15 @@ fn state_of(object: &PageObject) -> Result<String, ArrangeRefusal> {
         // that one day might, rather than a panic in a library.
         return Err(ArrangeRefusal::Scattered { spans: 0 });
     };
+    // A clip is a refusal whatever the mark is: the region a record carries is not the path
+    // operators that built it, and a clip cannot be re-established from a region.
+    if record.clip.is_some() {
+        return Err(ArrangeRefusal::NeedsClip);
+    }
     match &record.mark {
-        // A run of text depends on the text state in force where it sat, and none of that is on
-        // the record.
-        Mark::Glyphs { .. } => Err(ArrangeRefusal::NeedsTextState),
+        // A run of text is drawn by the text state in force where it sat, and the record carries
+        // that state now — so it can be written back rather than refused.
+        Mark::Glyphs { .. } => Ok(text_state_of(record)),
         // A shading is painted into the clip in force, and a clip cannot be re-established from
         // the region a record carries.
         Mark::Shading { .. } => Err(ArrangeRefusal::NeedsClip),
@@ -369,6 +391,56 @@ fn state_of(object: &PageObject) -> Result<String, ArrangeRefusal> {
         // the answer that tells the truth about what is missing.
         Mark::ClipChanged(_) => Err(ArrangeRefusal::NeedsClip),
     }
+}
+
+/// The operators that re-establish a run of text at the destination.
+///
+/// A `Tj` names no font, no size, no spacing and no rise, and the matrix it places glyphs by is
+/// not part of the graphics state either — so all of it has to be written back. The order matters:
+/// `BT` opens the text object, `Tf`/`Tz`/`Ts` set the parameters, `Tm` sets the matrix the run
+/// starts from, and then the moved bytes show the string.
+///
+/// The font itself is named, not re-embedded: `Tf /F1` resolves against the resources in force at
+/// the destination, which is the same table the file already uses. A form with its own `/Font`
+/// entry is why the caller has to arrange within one scope.
+fn text_state_of(record: &Record) -> String {
+    let text = &record.text;
+    let mut out = String::new();
+    let _ = writeln!(out, "BT");
+    if let Some(font) = &text.font {
+        let _ = writeln!(out, "/{} {} Tf", font, num(text.size));
+    }
+    let _ = writeln!(
+        out,
+        "{} Tc {} Tw {} Tz {} TL {} Ts",
+        num(text.char_spacing),
+        num(text.word_spacing),
+        num(text.horizontal_scale),
+        num(text.leading),
+        num(text.rise)
+    );
+    let m = record.text_matrix;
+    let _ = writeln!(
+        out,
+        "{} {} {} {} {} {} Tm",
+        num(m.a),
+        num(m.b),
+        num(m.c),
+        num(m.d),
+        num(m.e),
+        num(m.f)
+    );
+    // `ET` is emitted by the caller, after the moved bytes: the string has to be shown inside the
+    // text object it belongs to.
+    out
+}
+
+/// One number as a stream would write it.
+fn num(v: f64) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    format!("{v}")
 }
 
 /// The state operators for one record, in the order a content stream would carry them.
@@ -575,6 +647,8 @@ mod tests {
             dash: Dash::default(),
             tag: None,
             form: None,
+            text: mangle_content::state::TextState::default(),
+            text_matrix: Matrix::IDENTITY,
         }
     }
 
@@ -679,9 +753,11 @@ mod tests {
         assert!(err.to_string().contains("clip"), "{err}");
     }
 
+    /// A run of text can be arranged after all: the record carries the text state, so it is
+    /// written back rather than refused.
     #[test]
-    fn text_is_refused_because_the_text_state_is_not_on_the_record() {
-        let r = record(
+    fn a_run_of_text_carries_the_state_it_was_drawn_with() {
+        let mut r = record(
             mangle_content::Mark::Glyphs {
                 font: Some("F1".into()),
                 size: 12.0,
@@ -694,30 +770,57 @@ mod tests {
             },
             0..4,
         );
+        r.text = mangle_content::state::TextState {
+            font: Some("F1".into()),
+            widths: None,
+            composite: false,
+            size: 12.0,
+            char_spacing: 0.5,
+            word_spacing: 0.0,
+            horizontal_scale: 90.0,
+            leading: 14.0,
+            rise: 3.0,
+            render_mode: mangle_content::state::RenderMode::Fill,
+        };
+        r.text_matrix = Matrix::new(1.0, 0.0, 0.0, 1.0, 20.0, 700.0);
         let o = object(Kind::Line, vec![r], box_of(0.0, 0.0, 10.0, 10.0));
-        let err = state_of(&o).expect_err("no text state is carried");
-        assert!(matches!(err, ArrangeRefusal::NeedsTextState), "{err}");
+        let state = state_of(&o).expect("text is arrangeable now");
+        assert!(state.contains("BT\n"), "a text object is opened: {state}");
+        assert!(state.contains("/F1 12 Tf"), "the font and size: {state}");
+        assert!(state.contains("0.5 Tc"), "the character spacing: {state}");
+        assert!(state.contains("90 Tz"), "the horizontal scale: {state}");
+        assert!(state.contains("3 Ts"), "the rise: {state}");
+        assert!(
+            state.contains("1 0 0 1 20 700 Tm"),
+            "the matrix the run starts from: {state}"
+        );
     }
 
-    /// A line whose runs have another operator between them is one object over two spans.
-    ///
-    /// The model has to be built from a real stream — `PageModel` has no public constructor,
-    /// because a model that could be assembled by hand is a model that could disagree with the
-    /// interpreter — so the fixture is two runs with a colour change between them, which is the
-    /// shape a producer actually writes.
+    /// What remains refused for text is a **clip**: the record carries the text state now, but a
+    /// run drawn inside a clip still cannot be moved out of it.
     #[test]
-    fn a_scattered_object_is_refused_rather_than_re_interleaved() {
-        let stream = b"BT (A) Tj 1 0 0 rg (B) Tj ET";
-        let model = PageModel::build(&run(&ContentStream::parse(stream)).records);
-        let line = model
-            .objects()
-            .iter()
-            .position(|o| o.spans.len() > 1)
-            .expect("the two runs are one line");
-        let err = arrange_patches(stream, &model, line, Arrange::Forward)
-            .expect_err("two spans with an operator between them");
-        assert!(matches!(err, ArrangeRefusal::Scattered { .. }), "{err}");
-        assert!(err.to_string().contains("interleave"), "{err}");
+    fn a_run_of_text_drawn_inside_a_clip_is_still_refused() {
+        let mut r = record(
+            mangle_content::Mark::Glyphs {
+                font: Some("F1".into()),
+                size: 12.0,
+                text: vec![b'a'],
+                codes: vec![97],
+                two_byte: false,
+                fill: Colour::black(),
+                text_spans: vec![0..3],
+                placements: vec![Matrix::IDENTITY],
+            },
+            0..4,
+        );
+        r.clip = Some(mangle_content::state::Clip {
+            paths: std::sync::Arc::new(Vec::new()),
+            bounds: box_of(0.0, 0.0, 10.0, 10.0),
+        });
+        let o = object(Kind::Line, vec![r], box_of(0.0, 0.0, 10.0, 10.0));
+        let err = state_of(&o).expect_err("a clip cannot be re-established");
+        assert!(matches!(err, ArrangeRefusal::NeedsClip), "{err}");
+        assert!(err.to_string().contains("clip"), "{err}");
     }
 
     /// The shape of an arrange: the object's bytes move, and they move to the other side of the

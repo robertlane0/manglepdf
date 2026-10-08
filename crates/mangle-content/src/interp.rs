@@ -19,7 +19,7 @@ use crate::matrix::Matrix;
 use crate::ops;
 use crate::state::{
     Clip, ClipBounds, ClipPath, Colour, ColourSpace, Dash, GraphicsState, LineCap, LineJoin,
-    PathSegment, StateStack,
+    PathSegment, StateStack, TextState,
 };
 use crate::tokens::{ContentStream, ContentToken, Operation};
 
@@ -172,6 +172,19 @@ pub struct Record {
     ///
     /// `None` is a mark on the page itself, and that is the only thing it means.
     pub form: Option<String>,
+    /// The text parameters in force, which is what a run of glyphs was drawn with.
+    ///
+    /// Carried for the same reason the colour is: a `Tj` takes no font, no size, no spacing
+    /// and no rise, so without this a consumer that moved the run would have nothing to
+    /// re-establish at the destination. `Mark::Glyphs` has *some* of it — the font and the
+    /// size — but not `Tc`, `Tw`, `Tz`, `TL` or `Ts`, and those change where every
+    /// glyph after the first one lands.
+    pub text: TextState,
+    /// The text matrix the run started from.
+    ///
+    /// Not part of the graphics state, so it is not what `Q` restores — but it is what the
+    /// glyphs were placed by, and a consumer that moves the run has to write it back.
+    pub text_matrix: Matrix,
 }
 
 impl Record {
@@ -1110,6 +1123,8 @@ impl Context<'_> {
             dash: self.state.stroke.dash.clone(),
             tag: self.out.tags.last().cloned(),
             form: self.form.clone(),
+            text: self.state.text.clone(),
+            text_matrix: self.state.text_matrix,
         }
     }
 
