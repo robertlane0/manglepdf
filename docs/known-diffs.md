@@ -3653,3 +3653,28 @@ correctness would have been destroyed.
 `freeculture` page 255 is therefore still refused, and still scores 0.5716 — which is the honest
 number for a page whose only content is an image this project cannot decode correctly. **A bad
 number that is true beats a better one that was bought by drawing noise.**
+
+### libtiff was asked directly, and it agrees with the table
+
+The retraction above rests on `crates/mangle-filters/tests/ccitt_libtiff.rs`, which is good but is
+indirect: it says the fourteen frozen fixtures stop matching. **libtiff can be asked what code *it*
+emits for a two-pixel white run, and it was.** Encoding a single row of *white 2, black 1, white 2*
+through `tiffcp -c g3:1d` and reading the strip back gives:
+
+| | |
+|---|---|
+| strip bytes | `00 17 58` |
+| the line, after the EOL | `011101` `011000` |
+| decoded against this project's tables | **white 2** (`0111`), black 1 (`010`), white 5 (`1100`) |
+
+**libtiff writes white 2 as `0111`, which is what `WHITE_TERMINATING[2]` already holds.** So the
+table was right, my correction was wrong, and the row this project decodes as *white 3, black 3,
+white 2* is not a row anyone wrote — its third code is white **7**, which overruns the width and is
+why the decoder called the line damaged. **The fixture was wrong and the decoder was right**, twice
+over: `011` is a valid prefix that walks on looking for a longer code, which is precisely what
+`read_run` did.
+
+What this adds to the retraction above: an index-aligned transcription of T.4 can look wrong in a
+way that every hand-written test agrees with, because the hand-written tests were written from the
+same misreading. **Only a comparison against the thing itself settles it**, and here that meant
+both the frozen fixtures and a direct question to libtiff.
