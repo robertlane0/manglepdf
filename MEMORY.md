@@ -74,11 +74,22 @@ byte-based bound would admit is either a `freeculture` stencil that the decode v
 or the `/SMask` of a 2×2 image in `issue16263`, which is asked the pixel bound anyway. It would
 change **no page**, so it was not written. Recorded at the end of D31.
 
-**Next candidates, none of them a corpus number:**
-- `pdfjs__TAMReview.pdf` — 22 pages below 0.95, all unembedded-font (D24 policy).
-- `pdfjs__freeculture.pdf` — 10 pages, dominated by 2 pages whose stencil decodes damaged.
-- M4+ (page objects, select/move/scale, undo/redo) — entirely unstarted, and the real bulk of the
-  remaining project. Gates 4–9 need it.
+**M4 has started.** `crates/mangle-edit/src/history.rs` — `History<T>` over `Arc`-shared immutable
+snapshots, bounded at 512 steps. **The bounded case needed rebasing**: dropping the oldest `Edit`
+leaves the next one's `before` naming a state nobody saw, so `trim` copies the dropped entry's
+`before` onto the survivor. A test found that. Next in M4: page objects, then select/move/scale/
+recolour, then the write-back that gives FINISH.md S2 its exit criterion (edit → save → reopen
+with the JPEG stream's SHA-256 unchanged).
+
+Conventions worth reusing:
+- Test modules carry `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]` with a
+  comment saying the panic-free rule is about what the product does with a file — see
+  `mangle-content`'s test mods.
+- `Snapshot<T>`'s `Clone` and `PartialEq` are hand-written, not derived: a derive would put
+  `T: Clone` on both, and avoiding that bound is the point of the type.
+
+**Remaining corpus candidates, none of them a corpus number:** `TAMReview` (22 pages, D24 policy),
+`freeculture` (10 pages, 2 with damaged stencils).
 
 ## Things that will waste time if forgotten
 
