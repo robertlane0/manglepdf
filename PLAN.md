@@ -1043,4 +1043,46 @@ an edit that inserted bytes into the first content stream to the second one. The
 into the wrong object and nothing reported it; the split now goes by where the patches landed,
 which is what the save already did.
 
+## Text properties, and the check that had to move
+
+Every control GOAL.md §4.4 lists that is a *text-state* operator is now a `Change`: `Tf`, `Tc`,
+`Tw`, `Tz`, `TL`, `Ts`, `Tr`. Each is a `q … Q` around the run's own `Tj` with the one operator
+inside it, which is what makes it local.
+
+Writing them found **the operand-order bug for the third time**: the text property was emitted as
+`Tc 2` rather than `2 Tc`, which is a `Tc` with no operands followed by a stray number — the property
+was never set and the page drew exactly as it did. The unit test that asserted the patch *text*
+passed. The corpus test that asserted the *value the interpreter reports* caught it. The third
+occurrence is the one that settles the lesson, so it is written on the function that does it.
+
+The verification also had to move, and for an interesting reason. A text property **moves the
+glyphs**: character spacing widens the run, a baseline shift lifts it, and on a page whose text
+matrix is sheared (`0 7 -6.9999 0 41.598 748.001 Tm` on `irs-f1040`) the run spreads *along the
+shear*, so it leaves the line it was in and the model regroups — 589 objects become 656 on one
+character-spacing change. That is the file asking for what it asked for. A check that insisted the
+object count was unchanged would have failed a correct edit, so the text property is verified by
+matching the run **by its string** and reading the value back out of the interpreter, and the
+grouping is left to be what it is.
+
+## Text properties, and the check that had to move
+
+Every control GOAL.md §4.4 lists that is a *text-state* operator is now a `Change`: `Tf`, `Tc`,
+`Tw`, `Tz`, `TL`, `Ts`, `Tr`. Each is a `q … Q` around the run's own `Tj` with the one operator
+inside it, which is what makes it local.
+
+Writing them found **the operand-order bug for the third time**: the text property was emitted as
+`Tc 2` rather than `2 Tc`, which is a `Tc` with no operands followed by a stray number — the property
+was never set and the page drew exactly as it did. The unit test that asserted the patch *text*
+passed. The corpus test that asserted the *value the interpreter reports* caught it. The third
+occurrence is the one that settles the lesson, so it is written on the function that does it.
+
+The verification also had to move, and for an interesting reason. A text property **moves the
+glyphs**: character spacing widens the run, a baseline shift lifts it, and on a page whose text
+matrix is sheared (`0 7 -6.9999 0 41.598 748.001 Tm` on `irs-f1040`) the run spreads *along the
+shear*, so it leaves the line it was in and the model regroups — 589 objects become 656 on one
+character-spacing change. That is the file asking for what it asked for. A check that insisted the
+object count was unchanged would have failed a correct edit, so the text property is verified by
+matching the run **by its string** and reading the value back out of the interpreter, and the
+grouping is left to be what it is.
+
 What is left in M4 is the UI wiring.

@@ -43,7 +43,7 @@ use mangle_content::interp::run_with;
 use mangle_content::{ContentStream, Matrix, Resources};
 use mangle_doc::PageTree;
 use mangle_edit::PageModel;
-use mangle_edit::edits::{Change, apply_change, verify};
+use mangle_edit::edits::{Change, TextProperty, apply_change, verify};
 use mangle_edit::surgery::Patch;
 use mangle_syntax::object::Object;
 use mangle_syntax::{Document, OpenOptions};
@@ -418,4 +418,86 @@ fn a_move_is_in_user_space_and_the_page_may_scale_it() {
         mangle_edit::edits::map_point(&doubled, m, 10.0, 0.0),
         (16.0, 0.0)
     );
+}
+
+/// A text property on a real page: the interpreter reports the new value, and the bytes around
+/// the run are untouched.
+///
+/// This is the control GOAL.md §4.4 maps to a real operator, and it is the newest kind of edit here
+/// — so it gets the check that caught the last two: the effect, read out of the interpreter, rather
+/// than the string that was written.
+#[test]
+fn a_text_property_on_a_real_page_changes_only_that() {
+    for name in ["pdfjs__TAMReview.pdf", "gov__irs-f1040.pdf"] {
+        let Some((contents, resources)) = page_one(name) else {
+            eprintln!("skipped: {name} is not fetched");
+            continue;
+        };
+        let before = run_with(&ContentStream::parse(&contents), &resources);
+        let model = PageModel::build(&before.records);
+        // A line, which is the only thing a text property can be applied to.
+        let Some(index) = model
+            .objects()
+            .iter()
+            .position(|o| matches!(o.kind, mangle_edit::Kind::Line | mangle_edit::Kind::Block))
+        else {
+            eprintln!("skipped: no text on this page");
+            continue;
+        };
+        for (label, change) in [
+            (
+                "character spacing",
+                Change::text(TextProperty::CharacterSpacing(2.0)),
+            ),
+            (
+                "horizontal scale",
+                Change::text(TextProperty::HorizontalScale(90.0)),
+            ),
+            (
+                "baseline shift",
+                Change::text(TextProperty::BaselineShift(4.0)),
+            ),
+        ] {
+            let applied = match apply_change(&contents, &model.objects()[index], &change) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("skipped: {name} {label}: {e}");
+                    continue;
+                }
+            };
+            let after = run_with(&ContentStream::parse(&applied.bytes), &resources);
+            verify(&before, &after, index, &change)
+                .unwrap_or_else(|e| panic!("{name} {label}: {e}"));
+
+            // **Nothing else changed.** Taking the inserted wrapper back out gives the original.
+            let inserted = applied
+                .applied
+                .iter()
+                .map(|p| p.bytes.clone())
+                .collect::<Vec<_>>();
+            let stripped = with_wrappers_removed(&applied.bytes, &inserted);
+            assert_eq!(
+                stripped, contents,
+                "{name} {label}: the run's own bytes and everything around them are unchanged"
+            );
+        }
+    }
+}
+
+/// Taking the edit's inserted bytes back out of the result, which is what "nothing else changed"
+/// means in bytes.
+fn with_wrappers_removed(after: &[u8], inserted: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(after.len());
+    let mut cursor = 0usize;
+    for bytes in inserted {
+        let at = after[cursor..]
+            .windows(bytes.len())
+            .position(|w| w == bytes)
+            .map(|i| cursor + i)
+            .expect("the edit's own bytes are in the stream it wrote");
+        out.extend_from_slice(&after[cursor..at]);
+        cursor = at + bytes.len();
+    }
+    out.extend_from_slice(&after[cursor..]);
+    out
 }

@@ -63,6 +63,12 @@ manglepdf-cli <command> <file.pdf> [options]
                             --scale s              scale it about its centre
                             --delete               remove it
                             --colour r,g,b         recolour it (0-1 each)
+                            --tc N                 character spacing, points
+                            --tw N                 word spacing, points
+                            --tz N                 horizontal scale, a percentage
+                            --tl N                 leading, points
+                            --ts N                 baseline shift, points
+                            --size N               the font size, points
                             --forward|--backward   arrange it past the object it overlaps
                             --to-front|--to-back   arrange it to the ends of the page
                             -o FILE                where to write (default beside the input)
@@ -310,6 +316,27 @@ fn change_from_args(
             s,
         ));
     }
+    for (flag, build) in [
+        ("--tc", 0usize),
+        ("--tw", 1),
+        ("--tz", 2),
+        ("--tl", 3),
+        ("--ts", 4),
+        ("--size", 5),
+    ] {
+        if let Some(v) = value(args, flag) {
+            let n = number(&v, flag)?;
+            let property = match build {
+                0 => mangle_edit::TextProperty::CharacterSpacing(n),
+                1 => mangle_edit::TextProperty::WordSpacing(n),
+                2 => mangle_edit::TextProperty::HorizontalScale(n),
+                3 => mangle_edit::TextProperty::Leading(n),
+                4 => mangle_edit::TextProperty::BaselineShift(n),
+                _ => mangle_edit::TextProperty::Size(n),
+            };
+            return Ok(mangle_edit::Change::text(property));
+        }
+    }
     if let Some(colour) = value(args, "--colour") {
         let parts: Vec<f64> = colour.split(',').filter_map(|p| p.parse().ok()).collect();
         match (
@@ -329,9 +356,16 @@ fn change_from_args(
         }
     }
     Err(
-        "say what to do: --move dx,dy, --scale s, --delete, --colour r,g,b, or an arrange flag"
+        "say what to do: --move dx,dy, --scale s, --delete, --colour r,g,b, a text property \
+         (--tc/--tw/--tz/--tl/--ts/--size), or an arrange flag"
             .to_string(),
     )
+}
+
+/// Parse a number argument, saying which flag it came from.
+fn number(text: &str, flag: &str) -> Result<f64, String> {
+    text.parse::<f64>()
+        .map_err(|_| format!("{flag} needs a number, got `{text}`"))
 }
 
 /// A page's resources, resolved the way the interpreter needs.

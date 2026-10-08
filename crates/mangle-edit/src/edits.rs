@@ -108,6 +108,70 @@ pub enum Change {
         /// Which of the two colours.
         channel: Channel,
     },
+    /// Change one text property of a run of glyphs.
+    ///
+    /// Every control GOAL.md §4.4 lists that is a *text-state* operator rather than a
+    /// position is here: `Tf`, `Tc`, `Tw`, `Tz`, `TL`, `Ts`, `Tr`. A change is a `q … Q`
+    /// around the run's own `Tj`, with the one operator inside it, which is what makes the
+    /// edit local — the surrounding text state is what the file had it as, restored by the
+    /// `Q`.
+    Text(TextProperty),
+}
+
+/// One text property, in the units the specification's own operators use.
+///
+/// The units are the operators' rather than a friendlier ones, because a panel that shows
+/// "character spacing 4 pt" and writes `4 Tc` is a panel that tells the truth, and one that
+/// converts on the way in is a panel that has to be right twice.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextProperty {
+    /// `Tc` — added to every glyph's displacement, in points.
+    CharacterSpacing(f64),
+    /// `Tw` — added to every space's displacement, in points. Not in every font.
+    WordSpacing(f64),
+    /// `Tz` — the horizontal scale, as a percentage: 100 is normal.
+    HorizontalScale(f64),
+    /// `TL` — the leading `T*` moves by, in points.
+    Leading(f64),
+    /// `Ts` — how far above the baseline the run rises, in points.
+    BaselineShift(f64),
+    /// `Tf`'s size, in points. The font the run already uses is kept — changing the *face* is
+    /// a different edit, because it needs a font the page's resources do not necessarily have.
+    Size(f64),
+    /// `Tr` — how the glyphs are painted: filled, stroked, both, invisible, or as a clip.
+    RenderMode(mangle_content::state::RenderMode),
+}
+
+impl TextProperty {
+    /// The operator that carries this property, and its operand.
+    fn written(&self) -> (&'static str, f64) {
+        match self {
+            Self::CharacterSpacing(v) => ("Tc", *v),
+            Self::WordSpacing(v) => ("Tw", *v),
+            Self::HorizontalScale(v) => ("Tz", *v),
+            Self::Leading(v) => ("TL", *v),
+            Self::BaselineShift(v) => ("Ts", *v),
+            // `Tf`'s operand is the size, and the font it keeps is the one the run used; the
+            // name is written by the caller, which has the record.
+            Self::Size(v) => ("", *v),
+            // `Tr` takes an integer, which is what `RenderMode` is.
+            Self::RenderMode(mode) => ("Tr", f64::from(render_mode_number(*mode))),
+        }
+    }
+
+    /// What this property is called in a panel and in a history entry.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::CharacterSpacing(_) => "character spacing",
+            Self::WordSpacing(_) => "word spacing",
+            Self::HorizontalScale(_) => "horizontal scale",
+            Self::Leading(_) => "leading",
+            Self::BaselineShift(_) => "baseline shift",
+            Self::Size(_) => "size",
+            Self::RenderMode(_) => "render mode",
+        }
+    }
 }
 
 impl Change {
@@ -140,6 +204,12 @@ impl Change {
     #[must_use]
     pub fn recolour_in(colour: Rgba, channel: Channel) -> Self {
         Self::Recolour { colour, channel }
+    }
+
+    /// Change a text property of a run of glyphs.
+    #[must_use]
+    pub fn text(property: TextProperty) -> Self {
+        Self::Text(property)
     }
 
     /// The matrix this installs, for a transform. `None` for the other kinds.
@@ -295,8 +365,69 @@ pub fn patches_for(
             let body = colour_body(object, *colour, *channel)?;
             Ok(wrap_each(stream, object, "", &body))
         }
+        Change::Text(property) => {
+            let body = text_body(object, property)?;
+            Ok(wrap_each(stream, object, "", &body))
+        }
         Change::Delete => delete_patches(stream, object),
     }
+}
+
+/// The one operator that sets a text property, written where the run's own `Tj` can see it.
+///
+/// `q`…`Q` is legal *inside* a `BT`, and the run's span is always inside one — a `Tj` outside a text
+/// object is not a `Tj`. So the wrapper is simply the operator and nothing else: the state
+/// operators this project needs are all that `q`/`Q` save and restore beside the text matrix,
+/// which is exactly the property being set.
+/// The number the file writes for a render mode.
+///
+/// The specification numbers them zero to eight in the order they are declared, so the mapping is
+/// total and has no wrong answer to give. `RenderMode::from_int` is the reader; this is the writer.
+fn render_mode_number(mode: mangle_content::state::RenderMode) -> u8 {
+    use mangle_content::state::RenderMode;
+    match mode {
+        RenderMode::Fill => 0,
+        RenderMode::Stroke => 1,
+        RenderMode::FillThenStroke => 2,
+        RenderMode::Invisible => 3,
+        RenderMode::FillAndClip => 4,
+        RenderMode::StrokeAndClip => 5,
+        RenderMode::FillThenStrokeAndClip => 6,
+        RenderMode::Clip => 7,
+        RenderMode::ClipStroke => 8,
+    }
+}
+
+fn text_body(object: &PageObject, property: &TextProperty) -> Result<String, Refusal> {
+    let Some(record) = object.records.first() else {
+        return Err(Refusal::NoSpans);
+    };
+    let Mark::Glyphs { .. } = &record.mark else {
+        return Err(Refusal::NoSuchColour {
+            kind: object.kind,
+            channel: Channel::Fill,
+        });
+    };
+    let (operator, value) = property.written();
+    // A size change has to name the font alongside it, because `Tf` takes both and a stream
+    // that wrote a bare size would be answered with a font nobody chose.
+    if operator.is_empty() {
+        let font = record
+            .text
+            .font
+            .clone()
+            .ok_or(Refusal::ColourSpaceNotWritable {
+                space: "no font".to_string(),
+                channel: Channel::Fill,
+                why: "this run names no font, so a size cannot be set without changing it",
+            })?;
+        return Ok(format!("/{} {} Tf\n", font, num(value)));
+    }
+    // **Operands first, then the operator.** This is the third time this project has written the
+    // pair the other way round — once for a colour, once for a dash — and the result is the same
+    // every time: `Tc 2` is a `Tc` with no operands followed by a stray number, so the property is
+    // never set and the page draws exactly as it did. Nothing reports it.
+    Ok(format!("{} {}\n", num(value), operator))
 }
 
 /// One `q … Q` wrapper per span, so an object whose operations are not contiguous — a line with
@@ -733,6 +864,14 @@ pub fn verify(
         ));
     };
 
+    // A text property is dispatched before the object count is looked at, because it is the one
+    // edit that legitimately **changes the grouping**: moving glyphs along a sheared text matrix
+    // moves them out of the line they were in, and the model regroups. Every other edit adds or
+    // removes nothing from the geometry, so the count is the same.
+    if let Change::Text(_) = change {
+        return verify_text(before, after, object, change);
+    }
+
     let expected = match change {
         Change::Delete => old.objects().len().saturating_sub(1),
         _ => old.objects().len(),
@@ -748,6 +887,8 @@ pub fn verify(
     let from = centre(&target.bounds);
 
     match change {
+        // Dispatched above: the one edit that changes the grouping.
+        Change::Text(_) => Ok(()),
         Change::Transform(m) => {
             let ctm = target
                 .records
@@ -831,6 +972,101 @@ pub fn verify(
             }
             Ok(())
         }
+    }
+}
+
+/// Did a text property become the value that was asked for?
+///
+/// Read out of the interpreter rather than out of the bytes, for the reason the recolour
+/// verification exists: a string of the right words in the wrong order is still a string of the
+/// right words, and only running the result says which one this is.
+///
+/// **The run is matched by its string, not by its index and not by where it is.** A text property
+/// *moves* the glyphs — character spacing widens the run, a baseline shift lifts it — and on a page
+/// whose text matrix is sheared it moves them along the shear, so the run leaves the line it was
+/// in and the model regroups. `gov__irs-f1040` page 1 goes from 589 objects to 656 on one character
+/// spacing change for exactly that reason, and that is the file asking for what it asked for. A
+/// check that insisted the object count was unchanged would be a check that failed on a correct
+/// edit, and a check that looked for the object at its old centre would be looking for a run that
+/// had not changed.
+fn verify_text(
+    before: &PageContent,
+    after: &PageContent,
+    object: usize,
+    change: &Change,
+) -> Result<(), String> {
+    use crate::page_objects::PageModel;
+
+    let Change::Text(property) = change else {
+        return Err("not a text property".to_string());
+    };
+    let old = PageModel::build(&before.records);
+    let Some(target) = old.objects().get(object) else {
+        return Err(format!(
+            "object {object} is not one of the page's {} objects",
+            old.objects().len()
+        ));
+    };
+    let Some(was) = target.records.first() else {
+        return Err("the object has no records to check".to_string());
+    };
+    let Mark::Glyphs { text: string, .. } = &was.mark else {
+        return Err("the object is not a run of text".to_string());
+    };
+
+    // Every record in the result with the same string is a candidate, and the one the edit
+    // touched is the one whose value is the one asked for. A page with the same run twice is
+    // answered the same way either: both are checked, and a refusal names what it saw.
+    let (name, want) = property_operand(property);
+    let mut checked = 0usize;
+    for record in &after.records {
+        let Mark::Glyphs { text: other, .. } = &record.mark else {
+            continue;
+        };
+        if other != string {
+            continue;
+        }
+        let have = match property {
+            TextProperty::CharacterSpacing(_) => record.text.char_spacing,
+            TextProperty::WordSpacing(_) => record.text.word_spacing,
+            TextProperty::HorizontalScale(_) => record.text.horizontal_scale,
+            TextProperty::Leading(_) => record.text.leading,
+            TextProperty::BaselineShift(_) => record.text.rise,
+            TextProperty::Size(_) => record.text.size,
+            TextProperty::RenderMode(_) => f64::from(render_mode_number(record.text.render_mode)),
+        };
+        if (have - want).abs() > 1e-6 {
+            return Err(format!(
+                "the {name} is now {have} and the edit asked for {want}"
+            ));
+        }
+        checked += 1;
+    }
+    if checked == 0 {
+        return Err("the run is no longer in the page".to_string());
+    }
+    // And the edit did not change the *number* of records: an edit that added or removed a glyph
+    // would be a different edit from the one asked for.
+    if after.records.len() != before.records.len() {
+        return Err(format!(
+            "the edit left {} records, and a text property should have left {}",
+            after.records.len(),
+            before.records.len()
+        ));
+    }
+    Ok(())
+}
+
+/// The operand a text property is written with, for a label and for the check above.
+pub(crate) fn property_operand(property: &TextProperty) -> (&'static str, f64) {
+    match property {
+        TextProperty::CharacterSpacing(v) => ("Tc", *v),
+        TextProperty::WordSpacing(v) => ("Tw", *v),
+        TextProperty::HorizontalScale(v) => ("Tz", *v),
+        TextProperty::Leading(v) => ("TL", *v),
+        TextProperty::BaselineShift(v) => ("Ts", *v),
+        TextProperty::Size(v) => ("Tf", *v),
+        TextProperty::RenderMode(m) => ("Tr", f64::from(render_mode_number(*m))),
     }
 }
 
@@ -1022,6 +1258,124 @@ mod tests {
             map_point(&flat, Matrix::translate(9.0, 9.0), 4.0, 5.0),
             (4.0, 5.0)
         );
+    }
+
+    /// A run of glyphs carrying its text state, which is what a `Tf` change needs a font from.
+    fn glyphs(at: usize, len: usize) -> Record {
+        let mut r = record(
+            Mark::Glyphs {
+                font: Some("F1".into()),
+                size: 12.0,
+                text: vec![b'a'],
+                codes: vec![97],
+                two_byte: false,
+                fill: Colour::black(),
+                text_spans: vec![at..at + 3],
+                placements: vec![Matrix::IDENTITY],
+            },
+            at..at + len,
+        );
+        r.text = mangle_content::state::TextState {
+            font: Some("F1".into()),
+            widths: None,
+            composite: false,
+            size: 12.0,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            horizontal_scale: 100.0,
+            leading: 0.0,
+            rise: 0.0,
+            render_mode: mangle_content::state::RenderMode::Fill,
+        };
+        r
+    }
+
+    /// A text property is written as the one operator that sets it, and nothing else.
+    #[test]
+    fn a_text_property_is_the_operator_that_sets_it() {
+        let o = object(Kind::Line, vec![glyphs(4, 4)]);
+        let patches = patches_for(
+            b"BT (x) Tj ET",
+            &o,
+            &Change::text(crate::TextProperty::CharacterSpacing(2.0)),
+        )
+        .expect("a text property is writable");
+        let text = insert_at(&patches, 4).expect("inserted before the run");
+        assert!(text.contains("2 Tc"), "and nothing else: {text}");
+        assert!(!text.contains("Tw"), "one property is one operator: {text}");
+    }
+
+    /// **The property the interpreter reports is the one that was asked for.**
+    ///
+    /// The lesson the corpus taught, applied to the newest edit: a string of the right words in
+    /// the wrong order is still a string of the right words, so the check runs the result.
+    #[test]
+    fn a_text_property_is_only_done_when_the_interpreter_sees_the_new_value() {
+        let stream = b"BT (x) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let o = model
+            .objects()
+            .iter()
+            .find(|o| matches!(o.kind, Kind::Line | Kind::Block))
+            .expect("a run of text");
+        let change = Change::text(crate::TextProperty::CharacterSpacing(2.5));
+        let applied = apply_change(stream, o, &change).expect("writable");
+        let after = run(&ContentStream::parse(&applied.bytes));
+        let index = model
+            .objects()
+            .iter()
+            .position(|x| std::ptr::eq(x, o))
+            .unwrap_or(0);
+        verify(&before, &after, index, &change)
+            .expect("the character spacing the interpreter reports is 2.5");
+    }
+
+    /// A size change names the font alongside it, because `Tf` takes both and a stream that wrote
+    /// a bare size would be answered with a font nobody chose.
+    #[test]
+    fn a_size_change_names_the_font_it_keeps() {
+        let o = object(Kind::Line, vec![glyphs(4, 4)]);
+        let patches = patches_for(
+            b"BT (x) Tj ET",
+            &o,
+            &Change::text(crate::TextProperty::Size(18.0)),
+        )
+        .expect("writable");
+        let text = insert_at(&patches, 4).expect("inserted");
+        assert!(
+            text.contains("/F1 18 Tf"),
+            "the font it already had: {text}"
+        );
+    }
+
+    /// The render mode is written as the number the file uses, and the placeholder is gone.
+    #[test]
+    fn a_render_mode_is_written_as_its_own_number() {
+        let o = object(Kind::Line, vec![glyphs(4, 4)]);
+        let patches = patches_for(
+            b"BT (x) Tj ET",
+            &o,
+            &Change::text(crate::TextProperty::RenderMode(
+                mangle_content::state::RenderMode::Invisible,
+            )),
+        )
+        .expect("writable");
+        let text = insert_at(&patches, 4).expect("inserted");
+        assert!(text.contains("3 Tr"), "invisible is `Tr 3`: {text}");
+    }
+
+    /// A property that is not a text property is refused rather than written as one.
+    #[test]
+    fn a_text_property_on_an_object_that_is_not_text_is_refused() {
+        let o = object(Kind::Image, vec![image(2, 4)]);
+        let err = patches_for(
+            b"01 /Im0 Do Q",
+            &o,
+            &Change::text(crate::TextProperty::CharacterSpacing(2.0)),
+        )
+        .expect_err("an image has no text state");
+        assert!(matches!(err, Refusal::NoSuchColour { .. }), "{err}");
     }
 
     #[test]

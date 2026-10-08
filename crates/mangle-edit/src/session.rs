@@ -454,6 +454,11 @@ fn change_label(change: &Change) -> String {
                 "transform".to_string()
             }
         }
+        Change::Text(property) => {
+            let (operator, value) = crate::edits::property_operand(property);
+            let _ = operator;
+            format!("set the {} to {}", property.name(), value)
+        }
     }
 }
 

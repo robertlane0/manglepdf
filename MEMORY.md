@@ -152,8 +152,19 @@ rests on.
 
 **The Text State is on `Record` now** (`text` + `text_matrix`), so arrange can write a moved run
 back instead of refusing it: three corpus pages went from 201 refusals to 168 and 582 arrangements
-to 615. That is also what §4.4's Text Properties panel will write through — a control that
-changes `Tc` or `Tz` needs a `Record` that says what they were.
+to 615. §4.4's text controls are built on it too — `--tc/--tw/--tz/--tl/--ts/--size` (and `Tr`) are
+each a `q … Q` around the run's own `Tj` with the one operator inside it.
+
+**Third occurrence of the operand-order bug, and it settled the lesson:** the text property was
+emitted as `Tc 2` instead of `2 Tc`, so the property was never set and the page drew exactly as it
+did. The unit test asserting the patch text passed; the corpus test asserting the value the
+interpreter reports caught it. There is now a comment on the function that formats it.
+
+**And the verification for a text property had to move, for a reason worth knowing: a text property
+*moves the glyphs*.** On a sheared text matrix the run spreads along the shear, so it leaves its
+line and the model regroups — `irs-f1040` page 1 goes 589 → 656 objects on one character-spacing
+change, correctly. So the text property is verified by matching the run **by its string** and reading
+the value back, not by the object count or the old centre.
 
 **Next after that, in order:** the UI wiring (the `mangle-ui` window shell), then §4.4's Text
 Properties panel and layout (recompute positions / `Tw` inside the edited block's original width,

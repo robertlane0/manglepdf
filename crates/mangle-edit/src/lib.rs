@@ -26,7 +26,9 @@ pub mod surgery;
 pub mod writeback;
 
 pub use arrange::{Arrange, ArrangeError, ArrangeRefusal, apply_arrange, arrange_patches, extent};
-pub use edits::{Change, ChangeError, Channel, Refusal, apply_change, map_point, verify};
+pub use edits::{
+    Change, ChangeError, Channel, Refusal, TextProperty, apply_change, map_point, verify,
+};
 pub use history::{Edit, History, HistoryError, Snapshot};
 pub use page_objects::{Kind, LineBreak, PageModel, PageObject};
 pub use session::{Editor, OpenError, Reason, SessionError};
