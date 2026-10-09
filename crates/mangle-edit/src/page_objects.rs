@@ -253,6 +253,52 @@ impl PageModel {
     }
 }
 
+/// What the UI needs to hit-test and move an object, without the records it came from.
+///
+/// A `PageObject` carries every `Record` it is made of, which is what an edit needs and is a great
+/// deal for a window to hold: a page of a scanned document is tens of thousands of records, and a
+/// window that kept them all to draw a selection box would keep the whole document in memory to
+/// show one rectangle.
+///
+/// So a worker sends these instead. They carry the three facts a canvas uses — what it is, where it
+/// is, which bytes it covers — and the marks stay where they can be edited. `summarise` is the
+/// bridge, and the spans are kept because a *move* written back over them is the same edit either
+/// way: the summary says what to move, and the worker's own document says what to rewrite.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Summary {
+    /// What it is, for a panel to label and a tool to switch on.
+    pub kind: Kind,
+    /// Its box in page space, which is what a click is tested against.
+    pub bounds: ClipBounds,
+    /// The byte ranges it covers, for the Inspector and for the write-back.
+    pub spans: Vec<Range<usize>>,
+    /// The form XObject it was drawn inside, if any.
+    pub form: Option<String>,
+    /// Why a run was left out of its line, if it was.
+    pub line_break: Option<LineBreak>,
+}
+
+impl Summary {
+    /// Whether the point is inside the box.
+    #[must_use]
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        let b = self.bounds;
+        x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1
+    }
+}
+
+/// The summary of an object.
+#[must_use]
+pub fn summarise(object: &PageObject) -> Summary {
+    Summary {
+        kind: object.kind,
+        bounds: object.bounds,
+        spans: object.spans.clone(),
+        form: object.form.clone(),
+        line_break: object.line_break,
+    }
+}
+
 /// What one object is made of, written out for a person to read.
 ///
 /// GOAL.md §4.1's seventh law is that every selectable object knows **exactly which bytes of which

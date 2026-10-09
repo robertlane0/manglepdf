@@ -206,8 +206,8 @@ fn edit(args: &[String]) -> Result<(), String> {
     // A **session**, not a one-shot edit: the loop is the same one a window drives, and the
     // history is what makes an undo exact. A command line cannot hold a session between two
     // invocations, so this reports the depth rather than pretending there is a stack to pop.
-    let mut session =
-        mangle_edit::Editor::open(doc, page, &resources).map_err(|e| format!("{path}: {e}"))?;
+    let mut session = mangle_edit::Editor::open(std::sync::Arc::new(doc), page, &resources)
+        .map_err(|e| format!("{path}: {e}"))?;
     let size_before = session.document().bytes().len();
     let original = session.document().bytes().to_vec();
     let report = match arrange {

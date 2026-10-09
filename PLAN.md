@@ -1211,5 +1211,24 @@ repaint immediately, so the poll is a ceiling on noticing, not the latency.
 while the channel held the answer. A screenshot proved the window drew; only the thread states
 showed it had stopped asking.)*
 
-What is left in M4 is the rest of the wiring: selection and the drag-to-move gesture, the panel
-controls mapped onto the `Change`/`Arrange` types, and undo/redo bound to the keys.
+What is left in M4 is the rest of the wiring: the panel controls mapped onto the `Change` and
+`Arrange` types, and text editing (§4.4). Selection and drag-to-move are done, and three things
+about them are worth writing down.
+
+**A click and the pixel have to agree, and the only way to get that is to reuse the renderer's
+placement.** The arithmetic is *not* "subtract the corner, flip the y, divide by the zoom" — that is
+wrong the moment the page has a `/Rotate` or a `/MediaBox` that does not start at the origin, and
+both are ordinary. `Placement::fit` is the matrix that takes page space to the buffer the window
+draws, so its inverse takes a pixel back to the page. A test covers each case, rotation included.
+
+**After an edit the worker re-opens what it just wrote and renders *that*.** The alternative is a
+canvas that draws the model in memory, which is free to disagree with the file on disk — and the
+user forms their opinion of the edit by looking at whichever of the two they are looking at.
+Re-opening is the cheapest way to make GOAL §4.1's sixth law literally true, and it costs one parse
+per edit rather than one per drag.
+
+**The pointer decision was separated from the windowing** (`pointer_outcome`: a click selects the
+topmost object, a click on the paper deselects, a drag moves by its distance in page points, a click
+that did not travel is not an edit). A test that needed a real mouse could not have answered any of
+it, and the "did it travel" distinction is the one a window gets wrong: every click becomes a move
+of nothing, and the worker is asked to save a file for a click.

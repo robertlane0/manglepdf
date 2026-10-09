@@ -75,7 +75,7 @@ fn a_session_round_trips_a_real_page() {
         let page = tree.pages().get(index).expect("page one");
         let resources = resources_of(&doc, page);
 
-        let mut editor = match Editor::open(doc, page, &resources) {
+        let mut editor = match Editor::open(std::sync::Arc::new(doc), page, &resources) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("skipped: {name} cannot be edited in place: {e}");
@@ -183,7 +183,7 @@ fn an_arrange_in_a_session_can_be_undone() {
     };
     let page = tree.pages().get(index).expect("page one");
     let resources = resources_of(&doc, page);
-    let mut editor = match Editor::open(doc, page, &resources) {
+    let mut editor = match Editor::open(std::sync::Arc::new(doc), page, &resources) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("skipped: {e}");

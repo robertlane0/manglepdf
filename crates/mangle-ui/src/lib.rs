@@ -20,10 +20,12 @@
 )]
 #![warn(missing_debug_implementations)]
 
+pub mod canvas;
 pub mod shell;
 pub mod theme;
 pub mod worker;
 
+pub use canvas::PagePlacement;
 pub use shell::{App, LeftPanel, Region, RightPanel, State};
 pub use theme::{Metrics, Spacing, Theme};
 pub use worker::{Job, JobResult, Supervisor};

@@ -197,8 +197,20 @@ finished page sat unread and the window looked *exactly* like a working one in a
 fix is `request_repaint_after(33ms)`. Instrumented via the worker's CPU (stopped at one page's
 render) and `/proc/<pid>/task/*/wchan`, not by looking.
 
-**Next after that, in order:** the widgets — selection + drag-to-move on the canvas, the panel
-controls mapped onto `Change`/`Arrange`, undo/redo on the keys, then §4.4's Text
+**Selection and drag-to-move are on the canvas now.** `canvas.rs` maps a window point to a page
+point through the renderer's own placement matrix (`Placement::fit`), so a click and the pixel
+agree — including on a rotated page. `worker.rs` gained `Job::Edit`/`Undo`/`Redo` and holds one
+`mangle_edit::Editor` per page, and **after every edit it re-opens what it just wrote and renders
+that** — the window cannot show an edit the file does not have (GOAL §4.1 law 6). `Summary` (in
+`mangle_edit`) is what crosses the channel: bounds, kind, spans, no records.
+
+**The pointer decision was extracted from the windowing** (`pointer_outcome`, in shell.rs) precisely
+so it could be tested: a click selects the topmost object, a click on the paper deselects, a drag
+moves by its distance *in page points*, and a click that did not travel is not an edit. Four tests,
+none needing a real mouse.
+
+**Next after that, in order:** the panel controls mapped onto `Change`/`Arrange` (the rows are
+already drawn), then §4.4's Text
 Properties panel and layout (recompute positions / `Tw` inside the edited block's original width,
 keeping untouched lines' operators byte-identical).
 

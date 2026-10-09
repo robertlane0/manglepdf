@@ -51,7 +51,7 @@ use crate::writeback::{Part, Save, SaveError, save_decoded, split_like};
 /// be re-opened from bytes on every call.
 #[derive(Debug)]
 pub struct Editor {
-    doc: Document,
+    doc: std::sync::Arc<Document>,
     page: Page,
     resources: Resources,
     /// The page's content streams as the file has them — the undo floor, never rewritten.
@@ -174,7 +174,16 @@ impl From<Reason> for SessionError {
 
 impl Editor {
     /// Open a session on a page of a document the caller owns.
-    pub fn open(doc: Document, page: &Page, resources: &Resources) -> Result<Self, OpenError> {
+    ///
+    /// The document is taken **by `Arc`**, because the caller that keeps one is a worker that
+    /// opens a file once and serves every page from it. A session that took the document by value
+    /// would force that worker to re-parse the file per session — and the corpus's biggest file
+    /// takes seconds.
+    pub fn open(
+        doc: std::sync::Arc<Document>,
+        page: &Page,
+        resources: &Resources,
+    ) -> Result<Self, OpenError> {
         if doc.info().encryption.encrypted {
             return Err(OpenError::Encrypted);
         }
@@ -558,8 +567,9 @@ mod tests {
     #[test]
     fn a_session_starts_with_the_streams_the_file_has() {
         let (doc, page) = doc_with(&["q 1 0 0 1 0 0 cm /Im0 Do Q", "q /Im1 Do Q"]);
-        let mut editor = crate::Editor::open(doc, &page, &Resources::default())
-            .expect("a two-stream page can be edited in place");
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &Resources::default())
+                .expect("a two-stream page can be edited in place");
         assert_eq!(editor.base().len(), 2, "the page has two content streams");
         assert_eq!(editor.parts().len(), 2, "and the session starts on them");
         assert_eq!(editor.stream(), b"q 1 0 0 1 0 0 cm /Im0 Do Q\nq /Im1 Do Q");
@@ -576,7 +586,9 @@ mod tests {
     #[test]
     fn an_undo_gives_back_the_same_bytes_and_a_redo_the_edited_state() {
         let (doc, page) = doc_with(&["q 1 0 0 1 0 0 cm /Im0 Do Q"]);
-        let mut editor = crate::Editor::open(doc, &page, &Resources::default()).expect("editable");
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &Resources::default())
+                .expect("editable");
         let was = editor.stream();
 
         let label = editor
@@ -611,7 +623,9 @@ mod tests {
     #[test]
     fn a_new_edit_after_an_undo_discards_the_redo_stack() {
         let (doc, page) = doc_with(&["q 1 0 0 1 0 0 cm /Im0 Do Q"]);
-        let mut editor = crate::Editor::open(doc, &page, &Resources::default()).expect("editable");
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &Resources::default())
+                .expect("editable");
         editor.apply(0, &Change::move_by(7.0, 0.0)).expect("a move");
         editor.undo().expect("back");
         assert_eq!(
@@ -631,7 +645,9 @@ mod tests {
     #[test]
     fn a_session_save_writes_only_the_streams_that_changed() {
         let (doc, page) = doc_with(&["q 1 0 0 1 0 0 cm /Im0 Do Q", "q /Im1 Do Q"]);
-        let mut editor = crate::Editor::open(doc, &page, &Resources::default()).expect("editable");
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &Resources::default())
+                .expect("editable");
         let before = editor.document().bytes().to_vec();
         editor.apply(0, &Change::move_by(7.0, 0.0)).expect("a move");
         let save = editor.save().expect("and it saves");
@@ -662,7 +678,8 @@ mod tests {
     #[test]
     fn a_session_that_changed_nothing_rewrites_nothing() {
         let (doc, page) = doc_with(&["q 1 0 0 1 0 0 cm /Im0 Do Q"]);
-        let editor = crate::Editor::open(doc, &page, &Resources::default()).expect("editable");
+        let editor = crate::Editor::open(std::sync::Arc::new(doc), &page, &Resources::default())
+            .expect("editable");
         let save = editor.save().expect("it saves");
         assert!(save.rewritten.is_empty(), "nothing was rewritten");
         assert!(!save.re_encoded, "so nothing was re-encoded");
@@ -697,7 +714,11 @@ mod tests {
                     if let Some(page) = tree.pages().first() {
                         // The page tree may not resolve; when it does, the session must refuse a
                         // page it could not save.
-                        let _ = crate::Editor::open(doc, page, &Resources::default());
+                        let _ = crate::Editor::open(
+                            std::sync::Arc::new(doc),
+                            page,
+                            &Resources::default(),
+                        );
                     }
                 }
             }
@@ -729,7 +750,9 @@ mod tests {
     #[test]
     fn a_refused_change_records_no_step() {
         let (doc, page) = doc_with(&["q 1 0 0 1 0 0 cm /Im0 Do Q"]);
-        let mut editor = crate::Editor::open(doc, &page, &Resources::default()).expect("editable");
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &Resources::default())
+                .expect("editable");
         let err = editor
             .apply(99, &Change::Delete)
             .expect_err("no such object");

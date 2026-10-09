@@ -21,7 +21,7 @@ use eframe::egui;
 use eframe::egui::Painter;
 
 use crate::theme::{Size, Theme};
-use crate::worker::{Job, JobResult, Supervisor};
+use crate::worker::{EditRequest, Job, JobResult, Supervisor};
 
 /// The six regions of the window, in the layout the mockup describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,22 +97,56 @@ impl State {
 }
 
 /// The application.
-/// The pixels of each page, as textures, by index.
+/// A page as it has been drawn: the pixels, and where they came from.
 ///
 /// `Debug` by hand rather than derived: a texture handle is a GPU resource that says nothing
 /// useful when printed, and the application is `Debug` because a window nobody can print is a
 /// window nobody can test.
 #[derive(Default)]
 pub struct Pages {
-    /// The pixels of each page, by index.
-    pub textures: HashMap<usize, egui::TextureHandle>,
+    /// Each page drawn so far, by index.
+    pub drawn: HashMap<usize, DrawnPage>,
 }
 
 impl std::fmt::Debug for Pages {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pages")
-            .field("drawn", &self.textures.len())
+            .field("drawn", &self.drawn.len())
             .finish()
+    }
+}
+
+/// One page's pixels, with the placement that made them.
+///
+/// The placement travels with the texture because the window needs both: the texture is what to
+/// draw and the placement is what says where a page point went. Keeping them apart is how a
+/// click ends up on a glyph that is not the one under the pointer.
+///
+/// `Debug` by hand rather than derived: a texture handle is a GPU resource that says nothing
+/// useful when printed.
+pub struct DrawnPage {
+    /// The pixels.
+    pub handle: egui::TextureHandle,
+    /// The renderer's placement: page space to buffer pixels.
+    pub matrix: mangle_content::Matrix,
+}
+
+impl std::fmt::Debug for DrawnPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let [w, h] = self.handle.size();
+        f.debug_struct("DrawnPage")
+            .field("pixels", &(w, h))
+            .field("matrix", &self.matrix)
+            .finish()
+    }
+}
+
+impl DrawnPage {
+    /// The placement of a page drawn in `rect`.
+    #[must_use]
+    pub fn placement(&self, rect: egui::Rect) -> crate::canvas::PagePlacement {
+        let [w, h] = self.handle.size();
+        crate::canvas::PagePlacement::new(rect, (w, h), self.matrix)
     }
 }
 
@@ -134,6 +168,21 @@ pub struct App {
     notes: Vec<String>,
     /// The toolbar's Open button was pressed and the dialog has not answered yet.
     pending_open: bool,
+    /// What is on the page, as the worker summarised it.
+    objects: Vec<mangle_edit::Summary>,
+    /// Which object is selected, by index into `objects`.
+    selected: Option<usize>,
+    /// Where a drag started on the page, and what the object under it was.
+    drag: Option<Drag>,
+}
+
+/// A drag in progress: where the pointer went down, and what it grabbed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Drag {
+    /// The page point under the pointer when it went down.
+    start: (f64, f64),
+    /// Which object was under it.
+    object: usize,
 }
 
 impl std::fmt::Debug for App {
@@ -144,10 +193,13 @@ impl std::fmt::Debug for App {
         // are both trivially small, so they are printed rather than dropped.
         f.debug_struct("App")
             .field("theme", &self.theme)
+            .field("objects", &self.objects.len())
+            .field("selected", &self.selected)
+            .field("drag", &self.drag)
             .field("state", &self.state)
             .field("pages", &self.pages.len())
             .field("worker", &self.worker)
-            .field("drawn", &self.pages_pixels.textures.len())
+            .field("drawn", &self.pages_pixels.drawn.len())
             .field("notes", &self.notes)
             .field("pending_open", &self.pending_open)
             .finish()
@@ -168,6 +220,9 @@ impl App {
             pages_pixels: Pages::default(),
             notes: Vec::new(),
             pending_open: false,
+            objects: Vec::new(),
+            selected: None,
+            drag: None,
         }
     }
 
@@ -179,7 +234,7 @@ impl App {
         self.state.page_points.clear();
         self.state.page_index = 0;
         self.state.bookmarks.clear();
-        self.pages_pixels.textures.clear();
+        self.pages_pixels.drawn.clear();
         self.notes.clear();
         self.worker.ask(Job::Open(path.into()));
     }
@@ -191,7 +246,7 @@ impl App {
     /// vector page is that it can be re-drawn sharp.
     pub fn set_zoom(&mut self, zoom: f32) {
         self.state.zoom = zoom.clamp(0.25, 4.0);
-        self.pages_pixels.textures.clear();
+        self.pages_pixels.drawn.clear();
         for i in 0..self.state.page_count {
             self.worker.ask(Job::Page(i, f64::from(self.state.zoom)));
         }
@@ -218,10 +273,18 @@ impl App {
                     width,
                     height,
                     points,
+                    rotate,
+                    objects,
                     notes,
                 } => {
                     if let Some(slot) = self.state.page_points.get_mut(index) {
                         *slot = points;
+                    }
+                    // What is on the page, in the window's hands. The summaries are all the
+                    // canvas needs: the box, the kind and the spans. The records stay in the
+                    // worker, which is where an edit is applied.
+                    if index == self.state.page_index {
+                        self.objects = objects;
                     }
                     // Notes are the reason a page is not all there: they are shown, because a
                     // blank region the user cannot account for is worse than a line of text
@@ -236,10 +299,25 @@ impl App {
                         egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba),
                         egui::TextureOptions::LINEAR,
                     );
-                    self.pages_pixels.textures.insert(index, handle);
+                    let matrix = mangle_render::page::Placement::fit(
+                        &mangle_syntax::Rect::new(0.0, 0.0, points.0, points.1),
+                        (width, height),
+                        1.0,
+                        rotate,
+                    )
+                    .matrix;
+                    self.pages_pixels
+                        .drawn
+                        .insert(index, DrawnPage { handle, matrix });
                     // The canvas is stale until this frame is redrawn, and a message arriving
                     // from another thread is exactly the case where nothing else would ask.
                     ctx.request_repaint();
+                }
+                JobResult::Saved { bytes, objects } => {
+                    // A save is worth saying out loud: the user asked for a file, and got one.
+                    self.state.notice = Some(format!(
+                        "saved {bytes} bytes, rewriting {objects} stream(s)"
+                    ));
                 }
                 JobResult::Failed { reason } => {
                     self.tell(reason);
@@ -296,6 +374,8 @@ impl eframe::App for App {
         // The worker's answers arrive first, so the regions below draw the page that came in
         // rather than the one from the frame before.
         self.pump(ui.ctx());
+        // Then the pointer, so a click on this frame selects on this frame.
+        self.pointer(ui);
         // The file dialog is a windowing thing, so it opens outside the regions and the answer
         // comes back as a path. `rfd` is the native dialog, which is what a user expects of a
         // desktop program.
@@ -336,6 +416,85 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// What the pointer is doing to the page.
+    ///
+    /// A click selects; a drag moves by the distance it travelled. The arithmetic is done here
+    /// and *once*: a pointer position becomes a page point through the page's placement, and the
+    /// edit that goes to the worker is a plain `Move { dx, dy }` in page points. A window that
+    /// sent raw pointer deltas would be leaving the arithmetic of "how far is that in the file's
+    /// own units" to be done twice.
+    fn pointer(&mut self, ui: &egui::Ui) {
+        let Some(i) = self
+            .state
+            .page_index
+            .checked_sub(0)
+            .filter(|i| *i < self.state.page_count)
+        else {
+            return;
+        };
+        let page_rect = match self.pages.get(i) {
+            Some(r) => *r,
+            None => return,
+        };
+        // The placement travels with the page's texture, so a click and the pixel agree.
+        let Some(drawn) = self.pages_pixels.drawn.get(&i) else {
+            return;
+        };
+        let placement = drawn.placement(page_rect);
+
+        let Some(hover) = ui.ctx().input(|i| i.pointer.hover_pos()) else {
+            return;
+        };
+        // Undo and redo are the two keys a PDF viewer is expected to answer.
+        let (undo, redo) = ui.ctx().input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::Z),
+                i.modifiers.command && i.key_pressed(egui::Key::Y),
+            )
+        });
+        if undo || redo {
+            self.worker
+                .ask(if undo { Job::Undo(i) } else { Job::Redo(i) });
+            return;
+        }
+
+        let pressed = ui.ctx().input(|i| i.pointer.any_pressed());
+        let released = ui.ctx().input(|i| i.pointer.any_released());
+        // The decision is pure and tested below; only the acting on it is here.
+        match pointer_outcome(
+            &self.objects,
+            self.drag,
+            &placement,
+            hover,
+            pressed,
+            released,
+        ) {
+            Pointer::Idle => {}
+            Pointer::Deselect => {
+                self.selected = None;
+                self.drag = None;
+            }
+            Pointer::Select { object } => {
+                self.selected = Some(object);
+                self.drag = Some(Drag {
+                    start: placement.to_page(hover).unwrap_or((0.0, 0.0)),
+                    object,
+                });
+            }
+            Pointer::Move { object, dx, dy } => {
+                // A click that did not move is a selection, not an edit; the decision above
+                // makes that distinction and this is where the edit is asked for.
+                self.selected = Some(object);
+                self.drag = None;
+                self.worker.ask(Job::Edit {
+                    page: i,
+                    object,
+                    request: EditRequest::Move { dx, dy },
+                });
+            }
+        }
+    }
+
     fn top_bar(&mut self, ui: &egui::Ui, p: &Painter, t: &Theme, screen: egui::Rect) {
         let rect = egui::Rect::from_min_size(
             egui::pos2(0.0, 0.0),
@@ -562,13 +721,52 @@ impl App {
             );
             // The page itself, once the worker has rasterized it. Until then the paper is what
             // there is, which is the honest state of a page that has not arrived.
-            if let Some(texture) = self.pages_pixels.textures.get(&i) {
+            if let Some(drawn) = self.pages_pixels.drawn.get(&i) {
                 p.image(
-                    texture.id(),
+                    drawn.handle.id(),
                     r,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
+            }
+            // The selection, drawn onto the page the way a designer sees it: a box at the
+            // object's own bounds, and handles at its corners.
+            if i == self.state.page_index
+                && let Some(object) = self.selected.and_then(|at| self.objects.get(at))
+                && let Some(drawn) = self.pages_pixels.drawn.get(&i)
+            {
+                let box_ = drawn.placement(r);
+                let corners = [
+                    (object.bounds.x0, object.bounds.y0),
+                    (object.bounds.x1, object.bounds.y0),
+                    (object.bounds.x1, object.bounds.y1),
+                    (object.bounds.x0, object.bounds.y1),
+                ];
+                let pts: Vec<egui::Pos2> = corners
+                    .iter()
+                    .filter_map(|(x, y)| box_.to_window(*x, *y))
+                    .collect();
+                if pts.len() == 4 {
+                    p.add(egui::Shape::convex_polygon(
+                        pts.clone(),
+                        egui::Color32::from_rgba_unmultiplied(90, 150, 255, 40),
+                        egui::Stroke::new(1.5, t.accent),
+                    ));
+                    // Handles, so a corner reads as a corner.
+                    for corner in &pts {
+                        p.rect_filled(
+                            egui::Rect::from_center_size(*corner, egui::vec2(7.0, 7.0)),
+                            1.0,
+                            t.page,
+                        );
+                        p.rect_stroke(
+                            egui::Rect::from_center_size(*corner, egui::vec2(7.0, 7.0)),
+                            1.0,
+                            egui::Stroke::new(1.0, t.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
             }
             // The label under the page, as every viewer shows it.
             p.text(
@@ -823,3 +1021,196 @@ fn rows_for(panel: RightPanel) -> Vec<&'static str> {
 }
 
 pub use crate::theme::{Metrics, Spacing};
+
+/// What a pointer event did to the selection, decided without any windowing.
+///
+/// Taking the window's input as plain values is what makes the interaction testable: the
+/// arithmetic of "is this a click or a drag, and on what" is the part that is easy to get wrong,
+/// and a test that needed a real mouse could not answer it at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Pointer {
+    /// Nothing happened.
+    Idle,
+    /// A click on the paper, away from anything: the selection goes.
+    Deselect,
+    /// A click on an object, which becomes the selection.
+    Select {
+        /// Which object.
+        object: usize,
+    },
+    /// A drag that travelled, which asks for a move by that distance.
+    Move {
+        /// Which object.
+        object: usize,
+        /// How far right, in page points.
+        dx: f64,
+        /// How far down, in page points.
+        dy: f64,
+    },
+}
+
+/// Decide what a pointer event means.
+///
+/// `hover` is where the pointer is, `pressed` and `released` are this frame's buttons, and `drag`
+/// is a drag that began on an earlier frame. The placement turns the pointer into a page point,
+/// which is the only windowing thing left and is itself a pure function tested in `canvas`.
+fn pointer_outcome(
+    objects: &[mangle_edit::Summary],
+    drag: Option<Drag>,
+    placement: &crate::canvas::PagePlacement,
+    hover: egui::Pos2,
+    pressed: bool,
+    released: bool,
+) -> Pointer {
+    if pressed {
+        // A click on the paper, away from anything: the selection goes.
+        let Some((x, y)) = placement.to_page(hover) else {
+            return Pointer::Deselect;
+        };
+        // The topmost object under the point, which is the one the user can see.
+        return match objects
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, o)| o.contains(x, y))
+            .map(|(i, _)| i)
+        {
+            Some(object) => Pointer::Select { object },
+            None => Pointer::Deselect,
+        };
+    }
+    if released
+        && let Some(drag) = drag
+        && let Some((x, y)) = placement.to_page_clamped(hover)
+    {
+        let dx = x - drag.start.0;
+        let dy = y - drag.start.1;
+        // A click that did not move is a selection, not an edit.
+        if dx.abs() > 1e-6 || dy.abs() > 1e-6 {
+            return Pointer::Move {
+                object: drag.object,
+                dx,
+                dy,
+            };
+        }
+    }
+    Pointer::Idle
+}
+
+#[cfg(test)]
+mod tests {
+    // Tests state their expectations with `expect` and `unwrap`, which is what a test is for;
+    // the panic-free rule is about what the product does with a file, not about tests.
+    // `single_range_in_vec_init` fires on a one-element range list, and here that list *is* the
+    // subject: an object's spans are a list of byte ranges, which is one element when the object
+    // is one operation.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::single_range_in_vec_init
+    )]
+
+    use super::*;
+    use mangle_content::Matrix;
+    use mangle_edit::Summary;
+
+    /// A letter page drawn at one pixel per point, so a window point is a page point.
+    fn placement() -> crate::canvas::PagePlacement {
+        crate::canvas::PagePlacement::new(
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(612.0, 792.0)),
+            (612, 792),
+            Matrix::new(1.0, 0.0, 0.0, -1.0, 0.0, 792.0),
+        )
+    }
+
+    fn object(index: usize, x0: f64, y0: f64, x1: f64, y1: f64) -> Summary {
+        let _ = index;
+        Summary {
+            kind: mangle_edit::Kind::Image,
+            bounds: mangle_content::state::ClipBounds { x0, y0, x1, y1 },
+            spans: vec![0..4],
+            form: None,
+            line_break: None,
+        }
+    }
+
+    /// A click on an object selects it — and the topmost one, because that is what a user can
+    /// see and click.
+    #[test]
+    fn a_click_on_an_object_selects_the_topmost() {
+        let low = object(0, 0.0, 0.0, 100.0, 100.0);
+        let high = object(1, 0.0, 0.0, 100.0, 100.0);
+        let p = placement();
+        let got = pointer_outcome(&[low, high], None, &p, egui::pos2(50.0, 742.0), true, false);
+        assert_eq!(got, Pointer::Select { object: 1 });
+    }
+
+    /// A click on the paper, away from everything, drops the selection.
+    #[test]
+    fn a_click_on_the_paper_drops_the_selection() {
+        let only = object(0, 0.0, 0.0, 10.0, 10.0);
+        let p = placement();
+        let got = pointer_outcome(&[only], None, &p, egui::pos2(600.0, 10.0), true, false);
+        assert_eq!(got, Pointer::Deselect);
+    }
+
+    /// A drag moves by the distance it travelled, in the page's own coordinates — which is why
+    /// the arithmetic goes through the placement rather than being the raw pointer delta.
+    #[test]
+    fn a_drag_moves_by_its_distance_in_page_points() {
+        let target = object(0, 100.0, 300.0, 200.0, 400.0);
+        let p = placement();
+        let drag = Drag {
+            start: (110.0, 310.0),
+            object: 0,
+        };
+        // Down and right by 40 in the window is down and right by 40 on the page.
+        let got = pointer_outcome(
+            &[target],
+            Some(drag),
+            &p,
+            egui::pos2(150.0, 462.0),
+            false,
+            true,
+        );
+        match got {
+            Pointer::Move { object, dx, dy } => {
+                assert_eq!(object, 0);
+                // The tolerance is a hundredth of a point, not a float epsilon: the drag went
+                // through an inverse and a forward transform, and what is being asserted is the
+                // distance, not the last bit of it. A tenth of a point is what GOAL.md §4.1's
+                // fidelity law asks a position to be right to, so a hundredth is comfortably
+                // inside it and still catches a real error.
+                assert!((dx - 40.0).abs() < 1e-2, "dx was {dx}");
+                assert!((dy - 20.0).abs() < 1e-2, "dy was {dy}");
+            }
+            other => panic!("a drag should be a move, was {other:?}"),
+        }
+    }
+
+    /// A click that did not move is a selection, not an edit — otherwise every click would ask
+    /// the worker to move the object by nothing.
+    #[test]
+    fn a_click_that_did_not_move_is_not_an_edit() {
+        let target = object(0, 100.0, 300.0, 200.0, 400.0);
+        let p = placement();
+        let drag = Drag {
+            start: (110.0, 310.0),
+            object: 0,
+        };
+        let got = pointer_outcome(
+            &[target],
+            Some(drag),
+            &p,
+            egui::pos2(110.0, 482.0),
+            false,
+            true,
+        );
+        assert_eq!(
+            got,
+            Pointer::Idle,
+            "a click that did not travel is not an edit"
+        );
+    }
+}
