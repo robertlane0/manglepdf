@@ -22,9 +22,11 @@
 
 pub mod shell;
 pub mod theme;
+pub mod worker;
 
 pub use shell::{App, LeftPanel, Region, RightPanel, State};
 pub use theme::{Metrics, Spacing, Theme};
+pub use worker::{Job, JobResult, Supervisor};
 
 /// Parse the command line the way the acceptance harness expects.
 ///

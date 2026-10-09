@@ -286,7 +286,12 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   This is how "what does ManglePDF think of this file?" is asked without a window.
 - **`mangle-ui`** — the window shell and the design tokens. Six regions, one grid, one
   stroke weight, a light and a dark theme, and a contrast test that both themes must
-  pass.
+  pass. **It now opens a document**: a worker thread parses and rasterizes off the UI
+  thread, and the canvas paints the page it sends back, at the page's own `/MediaBox`
+  size rather than a letter-shaped rectangle. The one non-obvious thing it had to get
+  right is that egui calls `ui` only when something asks for a repaint, so a window that
+  had drawn its chrome and was waiting on the worker would never look at the channel
+  again — it polls.
 - **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
 - **Docs** — architecture, status, development, testing, PDF quirks, dependencies,
   icons, and the decision records.

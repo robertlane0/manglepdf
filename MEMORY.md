@@ -186,7 +186,19 @@ because the mapped rectangle is not axis-aligned under a rotation. `tests/edits_
 both halves of "non-destructive": the clip lands, and taking the wrapper back out returns the
 original stream exactly.
 
-**Next after that, in order:** the UI wiring (the `mangle-ui` window shell), then §4.4's Text
+**The UI wiring has started**: `mangle-ui/src/worker.rs` (a `Supervisor` over a worker thread and
+two channels) opens a document and rasterizes pages off the UI thread, and `shell.rs`'s canvas
+paints them at the page's own `/MediaBox` size. `--open a.pdf` works and the Open button asks the
+native dialog. **Verified with a screenshot** — the corpus's `sp800-88` page 1 draws, table and all.
+
+**The bug worth remembering: egui calls `ui()` only when something asks for a repaint.** A window
+that had drawn its chrome and was waiting on the worker never pumped the channel again, so the
+finished page sat unread and the window looked *exactly* like a working one in a screenshot. The
+fix is `request_repaint_after(33ms)`. Instrumented via the worker's CPU (stopped at one page's
+render) and `/proc/<pid>/task/*/wchan`, not by looking.
+
+**Next after that, in order:** the widgets — selection + drag-to-move on the canvas, the panel
+controls mapped onto `Change`/`Arrange`, undo/redo on the keys, then §4.4's Text
 Properties panel and layout (recompute positions / `Tw` inside the edited block's original width,
 keeping untouched lines' operators byte-identical).
 

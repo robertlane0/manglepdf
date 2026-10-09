@@ -13,11 +13,15 @@
 // clearer, which is the opposite of what a naming rule is for.
 #![allow(clippy::many_single_char_names)]
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use eframe::egui;
 // A short alias for the painter, so a drawing call reads as a drawing call.
 use eframe::egui::Painter;
 
 use crate::theme::{Size, Theme};
+use crate::worker::{Job, JobResult, Supervisor};
 
 /// The six regions of the window, in the layout the mockup describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +69,12 @@ pub struct State {
     pub file_name: Option<String>,
     pub page_count: usize,
     pub page_index: usize,
+    /// Each page's size in points, by index, once the worker has said.
+    ///
+    /// A `/MediaBox` is not always letter, and a canvas that assumed 612×792 would place a page of
+    /// the wrong shape in a rectangle of the right one — which is invisible on every fixture that
+    /// *is* letter.
+    pub page_points: Vec<(f64, f64)>,
     pub zoom: f32,
     pub left: Option<LeftPanel>,
     pub right: RightPanel,
@@ -87,12 +97,61 @@ impl State {
 }
 
 /// The application.
-#[derive(Debug)]
+/// The pixels of each page, as textures, by index.
+///
+/// `Debug` by hand rather than derived: a texture handle is a GPU resource that says nothing
+/// useful when printed, and the application is `Debug` because a window nobody can print is a
+/// window nobody can test.
+#[derive(Default)]
+pub struct Pages {
+    /// The pixels of each page, by index.
+    pub textures: HashMap<usize, egui::TextureHandle>,
+}
+
+impl std::fmt::Debug for Pages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pages")
+            .field("drawn", &self.textures.len())
+            .finish()
+    }
+}
+
+/// The application: the theme, the state, the worker and the pages it has drawn.
+///
+/// `Debug` by hand rather than derived: a `Supervisor` holds a channel to a thread and a `Pages`
+/// holds texture handles, and the useful thing to print is what the window knows, not the handles
+/// it draws them with.
 pub struct App {
     theme: Theme,
     state: State,
     /// The document's page rectangles, in window points, recomputed each frame.
     pages: Vec<egui::Rect>,
+    /// The worker that opens documents and rasterizes pages.
+    worker: Supervisor,
+    /// The pixels of each page.
+    pages_pixels: Pages,
+    /// Why a page was not fully drawn, to show the user rather than to swallow.
+    notes: Vec<String>,
+    /// The toolbar's Open button was pressed and the dialog has not answered yet.
+    pending_open: bool,
+}
+
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Every field is named rather than elided with `..`: a `Debug` that prints some fields
+        // and hides the rest with a dot is a `Debug` that lies about what the window knows. The
+        // theme and the page rectangles are the two that say nothing useful about a window and
+        // are both trivially small, so they are printed rather than dropped.
+        f.debug_struct("App")
+            .field("theme", &self.theme)
+            .field("state", &self.state)
+            .field("pages", &self.pages.len())
+            .field("worker", &self.worker)
+            .field("drawn", &self.pages_pixels.textures.len())
+            .field("notes", &self.notes)
+            .field("pending_open", &self.pending_open)
+            .finish()
+    }
 }
 
 impl App {
@@ -105,6 +164,87 @@ impl App {
             theme,
             state: State::new(),
             pages: Vec::new(),
+            worker: Supervisor::start(),
+            pages_pixels: Pages::default(),
+            notes: Vec::new(),
+            pending_open: false,
+        }
+    }
+
+    /// Ask the worker to open a file. The shell fills in from the messages it gets
+    /// back, so this returns before anything has been read.
+    pub fn open(&mut self, path: impl Into<PathBuf>) {
+        self.state.file_name = None;
+        self.state.page_count = 0;
+        self.state.page_points.clear();
+        self.state.page_index = 0;
+        self.state.bookmarks.clear();
+        self.pages_pixels.textures.clear();
+        self.notes.clear();
+        self.worker.ask(Job::Open(path.into()));
+    }
+
+    /// Ask the worker for a page at a new zoom.
+    ///
+    /// The pixels are thrown away rather than scaled: a buffer drawn at twice its width is a
+    /// buffer that is blurry at any zoom but the one it was made for, and the whole point of a
+    /// vector page is that it can be re-drawn sharp.
+    pub fn set_zoom(&mut self, zoom: f32) {
+        self.state.zoom = zoom.clamp(0.25, 4.0);
+        self.pages_pixels.textures.clear();
+        for i in 0..self.state.page_count {
+            self.worker.ask(Job::Page(i, f64::from(self.state.zoom)));
+        }
+    }
+
+    /// Take whatever the worker has sent.
+    pub fn pump(&mut self, ctx: &egui::Context) {
+        for result in self.worker.drain() {
+            match result {
+                JobResult::Opened {
+                    name,
+                    pages,
+                    bookmarks,
+                } => {
+                    self.state.file_name = Some(name);
+                    self.state.page_count = pages;
+                    self.state.page_index = 0;
+                    self.state.bookmarks = bookmarks;
+                    self.state.page_points = vec![(612.0, 792.0); pages];
+                }
+                JobResult::Page {
+                    index,
+                    rgba,
+                    width,
+                    height,
+                    points,
+                    notes,
+                } => {
+                    if let Some(slot) = self.state.page_points.get_mut(index) {
+                        *slot = points;
+                    }
+                    // Notes are the reason a page is not all there: they are shown, because a
+                    // blank region the user cannot account for is worse than a line of text
+                    // explaining it.
+                    for note in notes {
+                        if !self.notes.contains(&note) {
+                            self.notes.push(note);
+                        }
+                    }
+                    let handle = ctx.load_texture(
+                        format!("page-{index}"),
+                        egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.pages_pixels.textures.insert(index, handle);
+                    // The canvas is stale until this frame is redrawn, and a message arriving
+                    // from another thread is exactly the case where nothing else would ask.
+                    ctx.request_repaint();
+                }
+                JobResult::Failed { reason } => {
+                    self.tell(reason);
+                }
+            }
         }
     }
 
@@ -153,6 +293,19 @@ fn install_fonts(ctx: &egui::Context, theme: &Theme) {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // The worker's answers arrive first, so the regions below draw the page that came in
+        // rather than the one from the frame before.
+        self.pump(ui.ctx());
+        // The file dialog is a windowing thing, so it opens outside the regions and the answer
+        // comes back as a path. `rfd` is the native dialog, which is what a user expects of a
+        // desktop program.
+        if std::mem::take(&mut self.pending_open)
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("PDF", &["pdf"])
+                .pick_file()
+        {
+            self.open(path);
+        }
         let t = self.theme.clone();
         let screen = ui.max_rect();
         let p = ui.painter().clone();
@@ -170,6 +323,15 @@ impl eframe::App for App {
         if let Some(notice) = self.state.notice.clone() {
             Self::notice_bar(ui, &p, &t, screen, &notice);
         }
+
+        // **Ask for the next frame.** egui calls `ui` only when something wants a repaint, so a
+        // window that has drawn its chrome and is waiting on a worker would otherwise never call
+        // `pump` again — and the page the worker finishes would sit in the channel with nothing
+        // reading it. Polling at a fixed cadence is what makes the message loop run at all; a
+        // page that arrives asks for a repaint straight away, so the poll is only a ceiling on
+        // how long the window takes to notice, not the latency.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(33));
     }
 }
 
@@ -203,6 +365,11 @@ impl App {
                 egui::vec2(width, t.metrics.toolbar_height),
             );
             hoverable(ui, p, r, t);
+            // The Open button is real: it asks the file dialog, and the dialog's answer goes to
+            // the worker. Save and Print stay inert, which is the honest state of the product.
+            if label == "Open" && ui.ctx().input(|i| i.pointer.any_released()) && hovered(ui, r) {
+                self.pending_open = true;
+            }
             p.text(
                 r.center(),
                 egui::Align2::CENTER_CENTER,
@@ -363,11 +530,20 @@ impl App {
         );
         p.rect_filled(rect, 0.0, t.canvas);
 
-        let page_size = egui::vec2(612.0, 792.0) * self.state.zoom;
         let spacing = s.page_gap;
         let mut y = rect.top() + spacing;
         self.pages.clear();
         for i in 0..self.state.page_count {
+            // The page is as large as the file says it is, and only as wide as the zoom makes
+            // it. A page of a different shape gets its own rectangle, not a letter-shaped one
+            // with its content squeezed into a corner.
+            let (pw, ph) = self
+                .state
+                .page_points
+                .get(i)
+                .copied()
+                .unwrap_or((612.0, 792.0));
+            let page_size = egui::vec2(pw as f32, ph as f32) * self.state.zoom;
             let r = egui::Rect::from_min_size(
                 egui::pos2(rect.center().x - page_size.x / 2.0, y),
                 page_size,
@@ -384,6 +560,16 @@ impl App {
                 egui::Stroke::new(1.0, t.page_border),
                 egui::StrokeKind::Middle,
             );
+            // The page itself, once the worker has rasterized it. Until then the paper is what
+            // there is, which is the honest state of a page that has not arrived.
+            if let Some(texture) = self.pages_pixels.textures.get(&i) {
+                p.image(
+                    texture.id(),
+                    r,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
             // The label under the page, as every viewer shows it.
             p.text(
                 r.left_center() + egui::vec2(-s.item_gap, 0.0),

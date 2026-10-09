@@ -1193,4 +1193,23 @@ object count was unchanged would have failed a correct edit, so the text propert
 matching the run **by its string** and reading the value back out of the interpreter, and the
 grouping is left to be what it is.
 
-What is left in M4 is the UI wiring.
+## The UI wiring, and the frame loop that hides
+
+The window now opens a document. `mangle-ui` gained a `worker` module: `Supervisor` owns a thread
+and two channels, the thread parses and rasterizes, and the UI thread turns the pixels it sends
+back into a texture. The canvas draws that texture at the page's own `/MediaBox` size rather than
+a letter-shaped rectangle — which is invisible on every fixture that *is* letter.
+
+The bug that took the longest was nothing to do with PDFs. **egui calls `ui` only when something
+asks for a repaint.** A window that had drawn its chrome and was then waiting on a worker never
+called `pump` again, so the page the worker finished sat in the channel with nothing reading it —
+and the UI was idle in `epoll_wait` looking, to a screenshot, exactly like a working window.* The
+fix is one line: ask for the next frame at a fixed cadence. A page that arrives still asks for a
+repaint immediately, so the poll is a ceiling on noticing, not the latency.
+
+*(Found by instrumenting the worker and watching its CPU stop at one page's worth of rendering
+while the channel held the answer. A screenshot proved the window drew; only the thread states
+showed it had stopped asking.)*
+
+What is left in M4 is the rest of the wiring: selection and the drag-to-move gesture, the panel
+controls mapped onto the `Change`/`Arrange` types, and undo/redo bound to the keys.

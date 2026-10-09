@@ -33,9 +33,18 @@ fn main() -> eframe::Result<()> {
     // physical pixels a logical point covers, which is what HiDPI means.
     let _ = scale;
 
+    // A file named on the command line is opened before the first frame, so `manglepdf a.pdf`
+    // shows `a.pdf` rather than an empty window that then fills in.
+    let open = options.open.clone();
     eframe::run_native(
         "ManglePDF",
         native_options,
-        Box::new(|cc| Ok(Box::new(mangle_ui::App::new(cc)))),
+        Box::new(move |cc| {
+            let mut app = mangle_ui::App::new(cc);
+            if let Some(path) = open.clone() {
+                app.open(path);
+            }
+            Ok(Box::new(app))
+        }),
     )
 }
