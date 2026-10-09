@@ -20,6 +20,7 @@ use eframe::egui;
 // A short alias for the painter, so a drawing call reads as a drawing call.
 use eframe::egui::Painter;
 
+use crate::panel::{self, PanelRow, stepped};
 use crate::theme::{Size, Theme};
 use crate::worker::{EditRequest, Job, JobResult, Supervisor};
 
@@ -285,6 +286,10 @@ impl App {
                     // worker, which is where an edit is applied.
                     if index == self.state.page_index {
                         self.objects = objects;
+                        // The indices are this page's, so a selection carried over from another
+                        // page would now point at whatever happens to be at the same number. It
+                        // goes rather than being silently reinterpreted.
+                        self.select(self.selected.filter(|at| *at < self.objects.len()));
                     }
                     // Notes are the reason a page is not all there: they are shown, because a
                     // blank region the user cannot account for is worse than a line of text
@@ -458,6 +463,20 @@ impl App {
             return;
         }
 
+        // **The page answers for the page, and for nothing else.** A click on a stepper in the
+        // right-hand panel used to arrive here first, miss the paper, and take the selection
+        // away — so the panel redrew itself with nothing selected, its controls were never
+        // drawn, and the click that was meant to nudge a size did nothing at all. A press off
+        // the paper is the panel's business, not the canvas's.
+        //
+        // A drag that has already begun is the one thing this still finishes out here: the
+        // pointer may leave the paper while the user is still holding the button, and the move
+        // has to be measured to where they got to rather than abandoned.
+        let on_page = page_rect.contains(hover);
+        if !on_page && self.drag.is_none() {
+            return;
+        }
+
         let pressed = ui.ctx().input(|i| i.pointer.any_pressed());
         let released = ui.ctx().input(|i| i.pointer.any_released());
         // The decision is pure and tested below; only the acting on it is here.
@@ -471,21 +490,21 @@ impl App {
         ) {
             Pointer::Idle => {}
             Pointer::Deselect => {
-                self.selected = None;
                 self.drag = None;
+                self.select(None);
             }
             Pointer::Select { object } => {
-                self.selected = Some(object);
                 self.drag = Some(Drag {
                     start: placement.to_page(hover).unwrap_or((0.0, 0.0)),
                     object,
                 });
+                self.select(Some(object));
             }
             Pointer::Move { object, dx, dy } => {
                 // A click that did not move is a selection, not an edit; the decision above
                 // makes that distinction and this is where the edit is asked for.
-                self.selected = Some(object);
                 self.drag = None;
+                self.select(Some(object));
                 self.worker.ask(Job::Edit {
                     page: i,
                     object,
@@ -493,6 +512,17 @@ impl App {
                 });
             }
         }
+    }
+
+    /// Select an object, and open the panel that object is contextual to.
+    ///
+    /// The two are one method because they are one fact: the panel is *about* the selection, and
+    /// a window that updated one without the other would show a text panel for a photograph.
+    /// Setting the selection directly is what left the panel on "Document Properties" while a
+    /// box was drawn around a run of text.
+    fn select(&mut self, object: Option<usize>) {
+        self.selected = object;
+        self.state.right = panel::panel_for(object.and_then(|i| self.objects.get(i)));
     }
 
     fn top_bar(&mut self, ui: &egui::Ui, p: &Painter, t: &Theme, screen: egui::Rect) {
@@ -815,7 +845,20 @@ impl App {
         );
         y += t.metrics.tab_height;
 
-        for row in rows_for(self.state.right) {
+        // The selected object's own text state, which is what every value in this panel is read
+        // out of. Read from the model rather than held by the window: a panel that remembered a
+        // value would be showing the wrong number the moment an edit landed.
+        let text = self
+            .selected
+            .and_then(|i| self.objects.get(i))
+            .and_then(|o| o.text.as_ref());
+
+        // What a stepper was clicked by, applied after the loop rather than inside it. The loop
+        // holds a borrow of the selected object to read its values, and the edit ends what that
+        // borrow began — so the click is remembered here and acted on after the loop.
+        let mut clicked: Option<(mangle_edit::TextProperty, f64)> = None;
+
+        for (row, name) in rows_for(self.state.right).into_iter().enumerate() {
             let r = egui::Rect::from_min_size(
                 egui::pos2(rect.left() + s.window_inset, y),
                 egui::vec2(width - s.window_inset * 2.0, t.metrics.row_height),
@@ -825,9 +868,9 @@ impl App {
             }
             hoverable(ui, p, r, t);
             p.text(
-                r.left_center() + egui::vec2(0.0, 0.0),
+                r.left_center(),
                 egui::Align2::LEFT_CENTER,
-                row,
+                name,
                 t.type_scale.font_id(Size::Row),
                 t.text_muted,
             );
@@ -837,17 +880,95 @@ impl App {
                 r.right_center() + egui::vec2(-s.item_gap, 0.0),
                 egui::vec2(r.width() * 0.5, r.height() - s.item_gap * 2.0),
             );
+            let enabled = text.is_some();
             p.rect_stroke(
                 field,
                 s.field_radius,
                 egui::Stroke::new(1.0, t.border),
                 egui::StrokeKind::Middle,
             );
-            if hovered(ui, field) {
+            if enabled && hovered(ui, field) {
                 p.rect_filled(field, s.field_radius, t.hover);
+            }
+            let ink = if enabled { t.text } else { t.text_muted };
+            let which = panel::panel_row(self.state.right, row, text);
+            match which {
+                PanelRow::Empty => {}
+                PanelRow::Value(value) => {
+                    p.text(
+                        field.center(),
+                        egui::Align2::CENTER_CENTER,
+                        value,
+                        t.type_scale.font_id(Size::Row),
+                        ink,
+                    );
+                }
+                PanelRow::Stepper {
+                    shown,
+                    step,
+                    property,
+                } => {
+                    // The value in the middle of the field, with the two halves of the stepper
+                    // inside it — so the whole control is one rectangle a user can aim at, and
+                    // the number is not pushed somewhere else by the buttons beside it.
+                    let quarter = field.width() / 4.0;
+                    p.text(
+                        field.center(),
+                        egui::Align2::CENTER_CENTER,
+                        shown,
+                        t.type_scale.font_id(Size::Row),
+                        ink,
+                    );
+                    for (by, label, left) in [
+                        (-step, "−", field.left()),
+                        (step, "+", field.right() - quarter),
+                    ] {
+                        let part = egui::Rect::from_min_size(
+                            egui::pos2(left, field.top()),
+                            egui::vec2(quarter, field.height()),
+                        );
+                        p.text(
+                            part.center(),
+                            egui::Align2::CENTER_CENTER,
+                            label,
+                            t.type_scale.font_id(Size::Row),
+                            t.text_muted,
+                        );
+                        if hovered(ui, part) && ui.ctx().input(|i| i.pointer.any_released()) {
+                            clicked = Some((property, by));
+                        }
+                    }
+                }
             }
             y += t.metrics.row_height;
         }
+
+        if let Some((property, by)) = clicked {
+            self.step_text(property, by);
+        }
+    }
+
+    /// One click of a stepper: set the selected object's property to what it has, plus `by`.
+    ///
+    /// The value it has is read out of the object's own text state rather than out of the panel,
+    /// so a click after an undo moves from where the object really is and not from where the
+    /// window last remembered it.
+    fn step_text(&mut self, property: mangle_edit::TextProperty, by: f64) {
+        // The decision is pure and tested in `panel`; only the asking for the edit is here.
+        let Some((object, next)) = self
+            .selected
+            .and_then(|at| self.objects.get(at))
+            .and_then(|o| o.text.as_ref())
+            .and_then(|state| stepped(property, state, by))
+            .map(|next| (self.selected.unwrap_or(0), next))
+        else {
+            return;
+        };
+        self.worker.ask(Job::Edit {
+            page: self.state.page_index,
+            object,
+            request: EditRequest::Text(next),
+        });
     }
 
     fn bottom_bar(&mut self, _ui: &egui::Ui, p: &Painter, t: &Theme, screen: egui::Rect) {
@@ -982,18 +1103,9 @@ fn panel_title(panel: RightPanel) -> &'static str {
 
 fn rows_for(panel: RightPanel) -> Vec<&'static str> {
     match panel {
-        RightPanel::Text => vec![
-            "Font",
-            "Style",
-            "Size",
-            "Colour",
-            "Alignment",
-            "Line Spacing",
-            "Character Spacing",
-            "Baseline Shift",
-            "Render Mode",
-            "Rotation",
-        ],
+        // The names live in `panel`, beside the indices of the rows that are steppers: a row
+        // inserted here without one there is a row that silently stops being a control.
+        RightPanel::Text => panel::TEXT_ROWS.to_vec(),
         RightPanel::Colour => vec!["Fill", "Stroke", "Line Width", "Opacity", "Blend Mode"],
         RightPanel::Arrange => vec![
             "Bring to Front",
@@ -1132,6 +1244,7 @@ mod tests {
             spans: vec![0..4],
             form: None,
             line_break: None,
+            text: None,
         }
     }
 

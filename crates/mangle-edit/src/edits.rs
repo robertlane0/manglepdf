@@ -56,7 +56,7 @@ use std::ops::Range;
 
 use mangle_content::interp::{Mark, PageContent};
 use mangle_content::matrix::Matrix;
-use mangle_content::state::{ClipBounds, Colour, ColourSpace, Rgba};
+use mangle_content::state::{ClipBounds, Colour, ColourSpace, Rgba, TextState};
 use mangle_content::tokens::{ContentStream, Operation};
 
 use crate::page_objects::{Kind, PageObject};
@@ -188,6 +188,60 @@ impl TextProperty {
             Self::RenderMode(_) => "render mode",
         }
     }
+
+    /// The same property, holding `value` instead of the one it holds.
+    ///
+    /// This is the join between the two halves of a stepper, and the reason there are two halves
+    /// at all: the *edit* is absolute (`52 Tc`), because that is what the operator takes, and the
+    /// *gesture* is relative (one click more). The current number is read out of the object's own
+    /// text state by [`text_value`] — not remembered by the window — and this puts the two
+    /// together. `None` for the one property that is not a number.
+    #[must_use]
+    pub fn with_value(&self, value: f64) -> Option<Self> {
+        Some(match self {
+            Self::CharacterSpacing(_) => Self::CharacterSpacing(value),
+            Self::WordSpacing(_) => Self::WordSpacing(value),
+            Self::HorizontalScale(_) => Self::HorizontalScale(value),
+            Self::Leading(_) => Self::Leading(value),
+            Self::BaselineShift(_) => Self::BaselineShift(value),
+            Self::Size(_) => Self::Size(value),
+            Self::RenderMode(_) => return None,
+        })
+    }
+}
+
+/// The value `state` holds for `property`, if it is one of the properties that is a number.
+///
+/// This is the read-out half of [`TextProperty::written`], and it exists for one reason: a stepper
+/// writes an **absolute** value — `52 Tc`, not "two more" — so the panel has to know what is there
+/// now. Reading it from the state rather than keeping it in the window is what stops the read-out
+/// going stale the moment an edit lands.
+#[must_use]
+pub fn text_value(state: &TextState, property: TextProperty) -> Option<f64> {
+    match property {
+        TextProperty::CharacterSpacing(_) => Some(state.char_spacing),
+        TextProperty::WordSpacing(_) => Some(state.word_spacing),
+        TextProperty::HorizontalScale(_) => Some(state.horizontal_scale),
+        TextProperty::Leading(_) => Some(state.leading),
+        TextProperty::BaselineShift(_) => Some(state.rise),
+        TextProperty::Size(_) => Some(state.size),
+        TextProperty::RenderMode(_) => None,
+    }
+}
+
+/// The line spacing as a panel shows it: a **multiple of the size**, not the leading in points.
+///
+/// `TL` is a distance and "Line Spacing 1.4" is a ratio, and one of the two has to convert. It is
+/// this one, because the ratio is what a designer moves and the distance is what the file stores.
+/// `None` when the run declares no size, since the ratio would be a division by zero dressed up as
+/// a number.
+#[must_use]
+pub fn line_spacing(state: &TextState) -> Option<f64> {
+    let size = state.size;
+    if size.abs() < f64::EPSILON {
+        return None;
+    }
+    Some(state.leading / size)
 }
 
 impl Change {

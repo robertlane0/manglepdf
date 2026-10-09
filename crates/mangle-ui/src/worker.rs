@@ -74,6 +74,12 @@ pub enum EditRequest {
     },
     /// Remove it.
     Delete,
+    /// Set one text property of a run of glyphs, to this value.
+    ///
+    /// The absolute value is what makes this one edit: a stepper nudges a number it read out of
+    /// the object's own text state, so the value that arrives here is already the answer and the
+    /// worker is not asked to know what a click meant.
+    Text(mangle_edit::TextProperty),
 }
 
 /// What came back.
@@ -231,6 +237,7 @@ impl Worker {
         let change = match request {
             EditRequest::Move { dx, dy } => mangle_edit::Change::move_by(*dx, *dy),
             EditRequest::Delete => mangle_edit::Change::Delete,
+            EditRequest::Text(property) => mangle_edit::Change::Text(*property),
         };
         if let Err(e) = editor.apply(object, &change) {
             let _ = outbox.send(JobResult::Failed {
@@ -558,16 +565,204 @@ mod tests {
         });
         let mut saved = None;
         let mut redrawn = None;
+        let mut after = None;
         for result in collect(&supervisor, 3) {
             match result {
                 JobResult::Saved { bytes, objects } => saved = Some((bytes, objects)),
-                JobResult::Page { index, .. } => redrawn = Some(index),
+                JobResult::Page { index, objects, .. } => {
+                    redrawn = Some(index);
+                    after = Some(objects);
+                }
                 JobResult::Failed { reason } => panic!("the edit failed: {reason}"),
                 JobResult::Opened { .. } => {}
             }
         }
         assert!(saved.is_some(), "the edit was saved");
         assert_eq!(redrawn, Some(0), "and the page was drawn again");
+        // **And the object actually moved.** A test that only checked a page came back would
+        // pass on an edit that silently did nothing, which is precisely the failure mode this
+        // whole loop exists to prevent.
+        //
+        // The expected position is read through the object's own CTM, because a move is in the
+        // stream's *user space* while the box is in *device* space. On this page the object is
+        // drawn inside a `cm` scaled by about 106, so nine points there is nine hundred here —
+        // and asserting "+9" would have "proved" the edit wrong when it was right.
+        let after = after.expect("the page came back with what is on it");
+        let before_bounds = objects.first().map(|o| o.bounds).expect("a page");
+        let after_bounds = after.first().map(|o| o.bounds).expect("still there");
+        let travelled = after_bounds.x0 - before_bounds.x0;
+        assert!(
+            travelled > 1.0,
+            "the move is in user space and this page scales it up: 9 points became {travelled}"
+        );
+        assert!(
+            (after_bounds.y0 - before_bounds.y0).abs() < 1e-6
+                && ((after_bounds.x1 - after_bounds.x0) - (before_bounds.x1 - before_bounds.x0))
+                    .abs()
+                    < 1e-6,
+            "and it moved straight across, without changing size: {before_bounds:?} -> \
+             {after_bounds:?}"
+        );
+    }
+
+    /// A stepper's edit reaches the file, which is the only place it counts.
+    ///
+    /// The worker re-opens what it just saved and redraws *that*, so the read-out a window shows
+    /// after a click is the document's rather than a model's — and this walks the whole way
+    /// round: edit, save, re-open, re-summarise. An edit that stopped in memory would leave the
+    /// window drawing something the file does not have, and a test that stopped in memory would
+    /// call that working.
+    #[test]
+    fn a_text_edit_reaches_the_file_and_comes_back_in_the_readout() {
+        let path = PathBuf::from("../../corpus/wild/gov__irs-f1040.pdf");
+        if !path.exists() {
+            eprintln!("skipped: the corpus file is not fetched");
+            return;
+        }
+        let supervisor = Supervisor::start();
+        supervisor.ask(Job::Open(path));
+        let objects = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => Some(objects),
+                _ => None,
+            })
+            .expect("a page");
+        // A run whose size the page actually states. Some runs inherit theirs from an enclosing
+        // form and the record carries `0`, which is the honest answer for "not set here" — and
+        // exactly the kind of object a stepper must not be offered, because there is no number
+        // to nudge. `panel_row` already shows those rows empty.
+        let (index, before) = objects
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| {
+                o.text
+                    .as_ref()
+                    .filter(|t| t.size > 0.0)
+                    .map(|t| (i, t.size))
+            })
+            .expect("a page with text drawn at a stated size");
+
+        // The size to set has to be one the page does not already draw at, or "some object is now
+        // drawn at this size" would be true before the edit as well and would prove nothing. The
+        // search is bounded because a page cannot draw at two hundred different sizes and still
+        // have a run left to look at.
+        let target = (1..200u32)
+            .map(|k| before + f64::from(k))
+            .find(|t| {
+                !objects
+                    .iter()
+                    .any(|o| o.text.as_ref().is_some_and(|s| (s.size - t).abs() < 1e-6))
+            })
+            .expect("a size this page does not already draw at");
+
+        supervisor.ask(Job::Edit {
+            page: 0,
+            object: index,
+            request: EditRequest::Text(mangle_edit::TextProperty::Size(target)),
+        });
+        let mut after = None;
+        for result in collect(&supervisor, 4) {
+            match result {
+                JobResult::Page { objects, .. } => after = Some(objects),
+                JobResult::Failed { reason } => panic!("the text edit failed: {reason}"),
+                _ => {}
+            }
+        }
+        let after = after.expect("the page came back");
+        // Matched by size rather than by index: a bigger size makes a taller box, the box
+        // changes how the run groups, and which index the run ends up at is the grouping's
+        // business. What must not change is that the page still draws it, at the new size.
+        let found = after
+            .iter()
+            .filter(|o| {
+                o.text
+                    .as_ref()
+                    .is_some_and(|t| (t.size - target).abs() < 1e-6)
+            })
+            .count();
+        assert!(
+            found > 0,
+            "the page now draws a run at {target}, which it did not before the edit"
+        );
+    }
+
+    /// A stepper's click reaches the file, by the same arithmetic the panel does.
+    ///
+    /// This is the whole gesture, assembled the way `panel::stepped` assembles it: read the
+    /// object's own text state, add the step, ask the worker to write the absolute value. The
+    /// value that goes in the request is computed by the same function the panel calls, so this
+    /// test is the join between the two halves — a row that drew the wrong number and a worker
+    /// that wrote the right one would pass the panel tests and the corpus tests alone.
+    #[test]
+    fn a_stepper_click_asks_for_the_value_the_panel_read_out() {
+        let path = PathBuf::from("../../corpus/wild/gov__irs-f1040.pdf");
+        if !path.exists() {
+            eprintln!("skipped: the corpus file is not fetched");
+            return;
+        }
+        let supervisor = Supervisor::start();
+        supervisor.ask(Job::Open(path));
+        let objects = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => Some(objects),
+                _ => None,
+            })
+            .expect("a page");
+        let (index, state) = objects
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| o.text.as_ref().filter(|t| t.size > 0.0).map(|t| (i, t)))
+            .expect("a run drawn at a stated size");
+
+        // The size row: one click of "+", which is one point.
+        let step = mangle_edit::TextProperty::Size(state.size);
+        let asked = crate::panel::stepped(step, state, 1.0).expect("a size is a number");
+        assert_eq!(
+            asked,
+            mangle_edit::TextProperty::Size(state.size + 1.0),
+            "one click of the size stepper is one point"
+        );
+        // The line-spacing row: one click of "+", which is a tenth of a multiple of the size.
+        let spacing = mangle_edit::TextProperty::Leading(state.leading);
+        let widened = crate::panel::stepped(spacing, state, 0.1).expect("a leading is a number");
+        // A tenth of a multiple of the size, which is a tenth of the size in points.
+        assert!(
+            match widened {
+                mangle_edit::TextProperty::Leading(points) => {
+                    (points - (state.leading + state.size * 0.1)).abs() < 1e-6
+                }
+                other => panic!("a line spacing writes a leading, was {other:?}"),
+            },
+            "a tenth of a multiple of {} is {} points, was {widened:?}",
+            state.size,
+            state.size * 0.1
+        );
+
+        // And the whole thing through the worker, so the join is real and not just arithmetic.
+        let target = state.size + 1.0;
+        supervisor.ask(Job::Edit {
+            page: 0,
+            object: index,
+            request: EditRequest::Text(asked),
+        });
+        let mut after = None;
+        for result in collect(&supervisor, 4) {
+            match result {
+                JobResult::Page { objects, .. } => after = Some(objects),
+                JobResult::Failed { reason } => panic!("the stepper edit failed: {reason}"),
+                _ => {}
+            }
+        }
+        let after = after.expect("the page came back");
+        assert!(
+            after.iter().any(|o| o
+                .text
+                .as_ref()
+                .is_some_and(|t| (t.size - target).abs() < 1e-6)),
+            "the page now draws a run at {target}, which it did not before the click"
+        );
     }
 
     /// An object the page does not have is answered with a reason rather than a panic.

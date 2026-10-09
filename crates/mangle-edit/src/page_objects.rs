@@ -260,10 +260,11 @@ impl PageModel {
 /// window that kept them all to draw a selection box would keep the whole document in memory to
 /// show one rectangle.
 ///
-/// So a worker sends these instead. They carry the three facts a canvas uses — what it is, where it
-/// is, which bytes it covers — and the marks stay where they can be edited. `summarise` is the
-/// bridge, and the spans are kept because a *move* written back over them is the same edit either
-/// way: the summary says what to move, and the worker's own document says what to rewrite.
+/// So a worker sends these instead. They carry the four facts a window uses — what it is, where it
+/// is, which bytes it covers, and what text state it was drawn with — and the marks stay where they
+/// can be edited. `summarise` is the bridge, and the spans are kept because a *move* written back
+/// over them is the same edit either way: the summary says what to move, and the worker's own
+/// document says what to rewrite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Summary {
     /// What it is, for a panel to label and a tool to switch on.
@@ -276,6 +277,16 @@ pub struct Summary {
     pub form: Option<String>,
     /// Why a run was left out of its line, if it was.
     pub line_break: Option<LineBreak>,
+    /// The text state this was drawn with, for a text object.
+    ///
+    /// This is what lets a panel *show* "48 pt" instead of remembering it. Every `Record` carries
+    /// what it was drawn with — a `Tj` names no font, no size and no spacing — so the value costs
+    /// nothing to produce and is the file's own rather than a copy the window holds and lets go
+    /// stale. `None` for anything that is not text, which is the honest answer for a picture.
+    ///
+    /// A block of several lines has one state to show and several to choose from; this is the
+    /// first run's, which is the one the eye reads first and the one a size stepper nudges.
+    pub text: Option<mangle_content::state::TextState>,
 }
 
 impl Summary {
@@ -296,6 +307,7 @@ pub fn summarise(object: &PageObject) -> Summary {
         spans: object.spans.clone(),
         form: object.form.clone(),
         line_break: object.line_break,
+        text: object.records.first().map(|r| r.text.clone()),
     }
 }
 

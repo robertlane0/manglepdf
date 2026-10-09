@@ -27,7 +27,8 @@ pub mod writeback;
 
 pub use arrange::{Arrange, ArrangeError, ArrangeRefusal, apply_arrange, arrange_patches, extent};
 pub use edits::{
-    Change, ChangeError, Channel, Refusal, TextProperty, apply_change, map_point, verify,
+    Change, ChangeError, Channel, Refusal, TextProperty, apply_change, line_spacing, map_point,
+    text_value, verify,
 };
 pub use history::{Edit, History, HistoryError, Snapshot};
 pub use page_objects::{

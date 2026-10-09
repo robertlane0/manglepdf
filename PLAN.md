@@ -1211,8 +1211,45 @@ repaint immediately, so the poll is a ceiling on noticing, not the latency.
 while the channel held the answer. A screenshot proved the window drew; only the thread states
 showed it had stopped asking.)*
 
-What is left in M4 is the rest of the wiring: the panel controls mapped onto the `Change` and
-`Arrange` types, and text editing (§4.4). Selection and drag-to-move are done, and three things
+What is left in M4 is the rest of the wiring: text editing (§4.4), and the panel's own controls
+mapped onto the `Arrange` type. The Text Properties panel now **shows the numbers the file has**
+and lets a click move them.
+
+**A stepper is only as honest as the value it reads from.** The four numbers that are steppers —
+size, line spacing, character spacing, baseline shift — are all read out of the object's own
+`TextState`, which the interpreter puts on every `Record` because a `Tj` names no font, no size and
+no spacing. A value the window remembers instead would be a value that goes stale the moment an
+edit lands, and a stepper built on it would move the object from the wrong place. So `Summary`
+gained the text state, and the read-out is `text_value` over it — the exact inverse of
+`TextProperty::written`, in one place, so the units cannot disagree.
+
+**Line spacing is the one row whose step is not in the file's own units.** The panel shows a
+multiple, because that is what a designer moves; the file stores `TL` in points. The conversion is
+in `stepped` and nowhere else, and this is where it had to go: the first version had the row carry
+the value a click *would* write, so a second click of the same button compounded from the
+already-advanced value and moved it by twice the step. The row now carries what the object has,
+`stepped` computes the next value, and the object's state is re-read every frame — so it cannot
+drift.
+
+**The panel follows the selection.** `select` is one method that sets both the selection and which
+panel is contextual to it, because they are one fact: a text object opens Text Properties, a
+picture opens Colour, nothing selected goes back to Document Properties. Setting the selection
+directly — as the pointer handler did — left the panel on "Document Properties" while a box was
+drawn around a run of text, so the numbers were there and unreachable.
+
+**The canvas answers for the page and for nothing else.** A click on a stepper in the right-hand
+panel used to arrive at `pointer()` first, miss the paper, and take the selection away: the panel
+redrew itself with nothing selected, its controls were never drawn, and the click meant to nudge a
+size did nothing at all. The handler now returns early unless the press is on the page — the one
+exception being a drag that began on the paper and has left it, which has to be finished rather
+than abandoned.
+
+**What is not here, and is not pretended.** The mockup's Text panel has ten rows; four are numbers
+the interpreter carries and those four are steppers. Family, style, alignment, colour, render mode
+and rotation need the font layer (what the resource name resolves to, and what weight its
+descriptor declares) and the colour, which a `Record` does not carry. Those rows are
+`PanelRow::Empty`: a field with nothing in it. A panel that invented "Regular" for a style it had
+not read would be a panel that lies.
 about them are worth writing down.
 
 **A click and the pixel have to agree, and the only way to get that is to reuse the renderer's

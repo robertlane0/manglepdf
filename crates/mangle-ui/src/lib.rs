@@ -21,6 +21,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod canvas;
+pub mod panel;
 pub mod shell;
 pub mod theme;
 pub mod worker;

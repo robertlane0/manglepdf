@@ -295,6 +295,12 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   file. The one non-obvious thing it had to get right is that egui calls `ui` only when
   something asks for a repaint, so a window that had drawn its chrome and was waiting on
   the worker would never look at the channel again — it polls.
+- **The Text Properties panel reads the file's own numbers and lets a click move them.** Size,
+  line spacing, character spacing and baseline shift are steppers, and each one is read out of the
+  object's own `TextState` — which the interpreter puts on every `Record`, because a `Tj` names no
+  font, no size and no spacing. The panel follows the selection (text opens Text Properties, a
+  picture opens Colour, nothing selected goes back to Document Properties), and the canvas answers
+  for the page alone, so a click on a panel control cannot take the selection away first.
 - **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
 - **Docs** — architecture, status, development, testing, PDF quirks, dependencies,
   icons, and the decision records.
