@@ -853,10 +853,11 @@ impl App {
             .and_then(|i| self.objects.get(i))
             .and_then(|o| o.text.as_ref());
 
-        // What a stepper was clicked by, applied after the loop rather than inside it. The loop
+        // What a control was clicked by, applied after the loop rather than inside it. The loop
         // holds a borrow of the selected object to read its values, and the edit ends what that
-        // borrow began — so the click is remembered here and acted on after the loop.
+        // borrow began — so the clicks are remembered here and acted on after the loop.
         let mut clicked: Option<(mangle_edit::TextProperty, f64)> = None;
+        let mut clicked_do: Option<panel::Do> = None;
 
         for (row, name) in rows_for(self.state.right).into_iter().enumerate() {
             let r = egui::Rect::from_min_size(
@@ -893,7 +894,31 @@ impl App {
             let ink = if enabled { t.text } else { t.text_muted };
             let which = panel::panel_row(self.state.right, row, text);
             match which {
-                PanelRow::Empty => {}
+                // A button is filled, not outlined: it is a thing to press rather than a thing
+                // to read, and the difference has to be visible before anyone touches it.
+                PanelRow::Button(do_) if enabled => {
+                    p.rect_filled(field, s.field_radius, t.hover);
+                    p.rect_stroke(
+                        field,
+                        s.field_radius,
+                        egui::Stroke::new(1.0, t.border),
+                        egui::StrokeKind::Middle,
+                    );
+                    p.text(
+                        field.center(),
+                        egui::Align2::CENTER_CENTER,
+                        name,
+                        t.type_scale.font_id(Size::Row),
+                        t.text,
+                    );
+                    if hovered(ui, field) && ui.ctx().input(|i| i.pointer.any_released()) {
+                        clicked_do = Some(do_);
+                    }
+                }
+                // A button with nothing selected to move is drawn as a field and does nothing:
+                // the arrange rows have no value to show, and without a selection there is no
+                // object for them to move.
+                PanelRow::Button(_) | PanelRow::Empty => {}
                 PanelRow::Value(value) => {
                     p.text(
                         field.center(),
@@ -945,6 +970,23 @@ impl App {
 
         if let Some((property, by)) = clicked {
             self.step_text(property, by);
+        }
+        if let Some(do_) = clicked_do {
+            self.act(do_);
+        }
+    }
+
+    /// Do what a panel button asks, on the selected object.
+    fn act(&mut self, do_: panel::Do) {
+        let Some(object) = self.selected else {
+            return;
+        };
+        match do_ {
+            panel::Do::Arrange(arrange) => self.worker.ask(Job::Arrange {
+                page: self.state.page_index,
+                object,
+                arrange,
+            }),
         }
     }
 
@@ -1107,16 +1149,9 @@ fn rows_for(panel: RightPanel) -> Vec<&'static str> {
         // inserted here without one there is a row that silently stops being a control.
         RightPanel::Text => panel::TEXT_ROWS.to_vec(),
         RightPanel::Colour => vec!["Fill", "Stroke", "Line Width", "Opacity", "Blend Mode"],
-        RightPanel::Arrange => vec![
-            "Bring to Front",
-            "Bring Forward",
-            "Send Backward",
-            "Send to Back",
-            "Align",
-            "Distribute",
-            "Group",
-            "Ungroup",
-        ],
+        // The names live in `panel`, beside which of them is a button: a row inserted here
+        // without one there is a row that silently stops being one.
+        RightPanel::Arrange => panel::ARRANGE_ROWS.to_vec(),
         RightPanel::Organize => vec![
             "Rotate",
             "Crop",

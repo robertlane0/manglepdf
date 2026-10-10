@@ -43,7 +43,34 @@ pub enum PanelRow {
     },
     /// A row with nothing to say yet: a field with no value in it.
     Empty,
+    /// A button, which does something rather than showing something.
+    Button(Do),
 }
+
+/// What a panel control does when it is clicked.
+///
+/// A verb rather than a value: there is no number to read out and none to nudge, and drawing an
+/// arrange as though it were a stepper would be a control that looks editable and is not.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Do {
+    /// Move the selected object in the z-order.
+    Arrange(mangle_edit::Arrange),
+}
+
+/// The names of the Arrange panel's rows, in the order the mockup draws them.
+///
+/// Beside [`arrange_of`], which says which of them is a button and which way it moves: a row
+/// inserted here without one there is a row that silently stops being one.
+pub const ARRANGE_ROWS: [&str; 8] = [
+    "Bring to Front",
+    "Bring Forward",
+    "Send Backward",
+    "Send to Back",
+    "Align",
+    "Distribute",
+    "Group",
+    "Ungroup",
+];
 
 /// The names of the rows, in the order the mockup draws them.
 ///
@@ -96,7 +123,12 @@ pub fn panel_row(panel: RightPanel, row: usize, text: Option<&TextState>) -> Pan
         return PanelRow::Empty;
     }
     let step = TEXT_STEPS.iter().find(|(r, _)| *r == row).map(|(_, s)| *s);
+    let button = arrange_of(panel, row);
     let Some(step) = step else {
+        // An arrange is a verb, so its rows are buttons rather than fields.
+        if let Some(do_) = button {
+            return PanelRow::Button(do_);
+        }
         // The font's resource name is the one thing a panel can show without the font layer,
         // and it is the name as the stream wrote it — `/F3`, not a family.
         return if row == 0 {
@@ -138,7 +170,29 @@ pub fn panel_row(panel: RightPanel, row: usize, text: Option<&TextState>) -> Pan
     }
 }
 
-/// What one click of a stepper asks the worker to write.
+/// What row `row` of the Arrange panel does, if the row is a button.
+///
+/// Only the four z-order rows are, because only the four z-order rows have an edit behind them:
+/// `Arrange` moves bytes and re-materialises the state at the destination. **Align, Distribute,
+/// Group and Ungroup are `None` and drawn as buttons that do nothing yet** — FINISH.md's S2.12
+/// wants a multi-select for align and distribute, and a group is a change to the object model
+/// rather than to a stream. A button that is drawn but silent is honest about what is missing; a
+/// button that is not drawn at all would pretend the feature does not exist.
+#[must_use]
+pub fn arrange_of(panel: RightPanel, row: usize) -> Option<Do> {
+    if panel != RightPanel::Arrange {
+        return None;
+    }
+    Some(Do::Arrange(match row {
+        0 => mangle_edit::Arrange::ToFront,
+        1 => mangle_edit::Arrange::Forward,
+        2 => mangle_edit::Arrange::Backward,
+        3 => mangle_edit::Arrange::ToBack,
+        _ => return None,
+    }))
+}
+
+/// What one click of a stepper asks the worker to write./// What one click of a stepper asks the worker to write.
 ///
 /// `property` carries the value the object has *now*, and `by` is the click's direction and size —
 /// so this is the whole of "nudge the size by one point", read as two plain values rather than as
@@ -406,6 +460,45 @@ mod tests {
             })),
             RightPanel::Colour
         );
+    }
+
+    /// Which arrange rows are buttons, and which way they move.
+    ///
+    /// The four z-order rows are; Align, Distribute, Group and Ungroup are not, because they have
+    /// no edit behind them yet. A row that is drawn but silent is honest about what is missing,
+    /// and this is the check that keeps the two halves of that sentence together.
+    #[test]
+    fn the_four_z_order_rows_are_buttons_and_the_rest_are_not() {
+        let ways = [
+            mangle_edit::Arrange::ToFront,
+            mangle_edit::Arrange::Forward,
+            mangle_edit::Arrange::Backward,
+            mangle_edit::Arrange::ToBack,
+        ];
+        for (row, way) in ways.iter().enumerate() {
+            assert_eq!(
+                arrange_of(RightPanel::Arrange, row),
+                Some(Do::Arrange(*way)),
+                "row {row} should move {way}"
+            );
+        }
+        for (row, name) in ARRANGE_ROWS.iter().enumerate().skip(4) {
+            assert_eq!(
+                arrange_of(RightPanel::Arrange, row),
+                None,
+                "row {row} ({name}) has no edit behind it yet"
+            );
+        }
+    }
+
+    /// A button belongs to its own panel: the Text panel's second row is a size, not a bring to
+    /// front, and a control that answered for every panel would be a control that lied about
+    /// which panel it was in.
+    #[test]
+    fn an_arrange_button_belongs_to_the_arrange_panel() {
+        assert_eq!(arrange_of(RightPanel::Text, 0), None);
+        assert_eq!(arrange_of(RightPanel::Colour, 0), None);
+        assert_eq!(arrange_of(RightPanel::Properties, 0), None);
     }
 
     /// A number that came back to nothing reads as zero, not as a minus sign.

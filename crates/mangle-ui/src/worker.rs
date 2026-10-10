@@ -50,6 +50,15 @@ pub enum Job {
         /// What to do to it.
         request: EditRequest,
     },
+    /// Move an object of a page in the z-order.
+    Arrange {
+        /// Which page, from zero.
+        page: usize,
+        /// Which of the page's objects, by index.
+        object: usize,
+        /// Which way.
+        arrange: mangle_edit::Arrange,
+    },
     /// Undo the last edit on this page.
     Undo(usize),
     /// Redo the last undone edit on this page.
@@ -202,6 +211,36 @@ impl Worker {
         });
     }
 
+    /// The edit session for `page`, opened if this worker does not have one yet.
+    ///
+    /// The session is rebuilt when the page changes, so a second edit on the same page keeps the
+    /// first one's history. **It is opened on demand rather than on the first edit**, because an
+    /// arrange is often the very first thing asked of a page — moving an object nobody has edited
+    /// — and a worker that refused until something had been edited would refuse the most ordinary
+    /// request it gets. Returns `false` after sending the reason if it could not be opened.
+    fn session_for(&mut self, outbox: &Sender<JobResult>, page: usize) -> bool {
+        if self.session.as_ref().is_none_or(|e| e.page().index != page) {
+            let (Some(page_dict), Some(page_resources)) =
+                (self.pages.get(page), self.resources.get(page))
+            else {
+                let _ = outbox.send(JobResult::Failed {
+                    reason: format!("this document has no page {}", page + 1),
+                });
+                return false;
+            };
+            match mangle_edit::Editor::open(Arc::clone(&self.doc), page_dict, page_resources) {
+                Ok(editor) => self.session = Some(editor),
+                Err(e) => {
+                    let _ = outbox.send(JobResult::Failed {
+                        reason: e.to_string(),
+                    });
+                    return false;
+                }
+            }
+        }
+        self.session.is_some()
+    }
+
     /// Apply an edit, save it, and draw the file as saved.
     fn edit(
         &mut self,
@@ -210,26 +249,8 @@ impl Worker {
         object: usize,
         request: &EditRequest,
     ) {
-        // The session is rebuilt when the page changes, so a second edit on the same page keeps
-        // the first one's history.
-        if self.session.as_ref().is_none_or(|e| e.page().index != page) {
-            let (Some(page_dict), Some(page_resources)) =
-                (self.pages.get(page), self.resources.get(page))
-            else {
-                let _ = outbox.send(JobResult::Failed {
-                    reason: format!("this document has no page {}", page + 1),
-                });
-                return;
-            };
-            match mangle_edit::Editor::open(Arc::clone(&self.doc), page_dict, page_resources) {
-                Ok(editor) => self.session = Some(editor),
-                Err(e) => {
-                    let _ = outbox.send(JobResult::Failed {
-                        reason: e.to_string(),
-                    });
-                    return;
-                }
-            }
+        if !self.session_for(outbox, page) {
+            return;
         }
         let Some(editor) = self.session.as_mut() else {
             return;
@@ -245,14 +266,52 @@ impl Worker {
             });
             return;
         }
-        let saved = match editor.save() {
-            Ok(save) => save,
-            Err(e) => {
+        self.save_and_redraw(outbox, page);
+    }
+
+    /// Move an object in the z-order, save it, and draw the file as saved.
+    ///
+    /// This is the one edit that is not a `q … Q` wrapper: arranging *moves bytes* from one place
+    /// in the stream to another and re-materialises the state at the destination, so the object
+    /// is drawn by the same operators in a different position rather than by the same operators
+    /// under a different matrix.
+    fn arrange(
+        &mut self,
+        outbox: &Sender<JobResult>,
+        page: usize,
+        object: usize,
+        arrange: mangle_edit::Arrange,
+    ) {
+        if !self.session_for(outbox, page) {
+            return;
+        }
+        let Some(editor) = self.session.as_mut() else {
+            return;
+        };
+        if let Err(e) = editor.arrange(object, arrange) {
+            let _ = outbox.send(JobResult::Failed {
+                reason: e.to_string(),
+            });
+            return;
+        }
+        self.save_and_redraw(outbox, page);
+    }
+
+    /// Save the session, then re-open what it wrote and draw *that*.
+    ///
+    /// Every mutating job ends here, and deliberately so: the canvas draws the file, not the
+    /// model in memory, so the two cannot disagree. A save that failed is answered with its own
+    /// reason rather than silently falling back to the unsaved page.
+    fn save_and_redraw(&mut self, outbox: &Sender<JobResult>, page: usize) {
+        let saved = match self.session.as_ref().map(mangle_edit::Editor::save) {
+            Some(Ok(save)) => save,
+            Some(Err(e)) => {
                 let _ = outbox.send(JobResult::Failed {
                     reason: e.to_string(),
                 });
                 return;
             }
+            None => return,
         };
         let _ = outbox.send(JobResult::Saved {
             bytes: saved.bytes.len(),
@@ -426,6 +485,19 @@ fn run(inbox: Receiver<Job>, outbox: Sender<JobResult>) {
                     continue;
                 };
                 worker.edit(&outbox, page, object, &request);
+            }
+            Job::Arrange {
+                page,
+                object,
+                arrange,
+            } => {
+                let Some(worker) = &mut open else {
+                    let _ = outbox.send(JobResult::Failed {
+                        reason: "no document is open".to_string(),
+                    });
+                    continue;
+                };
+                worker.arrange(&outbox, page, object, arrange);
             }
             Job::Undo(page) => {
                 let Some(worker) = &mut open else {
@@ -762,6 +834,59 @@ mod tests {
                 .as_ref()
                 .is_some_and(|t| (t.size - target).abs() < 1e-6)),
             "the page now draws a run at {target}, which it did not before the click"
+        );
+    }
+
+    /// An arrange reaches the file, on the first thing asked of a page.
+    ///
+    /// The session is opened on demand, so this is also the check that an arrange does not need
+    /// something to have been edited first: it is often the *first* thing a user asks of a page,
+    /// and a worker that refused until then would refuse the most ordinary request it gets.
+    ///
+    /// What is asserted is that the object still exists and the page still has the same number of
+    /// objects — an arrange moves bytes, it does not remove anything, so a lost object would mean
+    /// the move had dropped it. The order itself is verified by `mangle-edit`'s own arrange tests,
+    /// which assert the operator positions directly.
+    #[test]
+    fn an_arrange_reaches_the_file_without_anything_edited_first() {
+        let path = PathBuf::from("../../corpus/wild/gov__nist-sp800-88.pdf");
+        if !path.exists() {
+            eprintln!("skipped: the corpus file is not fetched");
+            return;
+        }
+        let supervisor = Supervisor::start();
+        supervisor.ask(Job::Open(path));
+        let before = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => Some(objects),
+                _ => None,
+            })
+            .expect("a page");
+        assert!(!before.is_empty(), "the page has something on it");
+        let last = before.len() - 1;
+
+        supervisor.ask(Job::Arrange {
+            page: 0,
+            object: last,
+            arrange: mangle_edit::Arrange::ToFront,
+        });
+        let mut saved = None;
+        let mut after = None;
+        for result in collect(&supervisor, 4) {
+            match result {
+                JobResult::Saved { bytes, objects } => saved = Some((bytes, objects)),
+                JobResult::Page { objects, .. } => after = Some(objects),
+                JobResult::Failed { reason } => panic!("the arrange failed: {reason}"),
+                JobResult::Opened { .. } => {}
+            }
+        }
+        assert!(saved.is_some(), "the arrange was saved");
+        let after = after.expect("the page was drawn again");
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "an arrange moves bytes, it does not remove anything"
         );
     }
 
