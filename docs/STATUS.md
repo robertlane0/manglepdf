@@ -301,12 +301,12 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   font, no size and no spacing. The panel follows the selection (text opens Text Properties, a
   picture opens Colour, nothing selected goes back to Document Properties), and the canvas answers
   for the page alone, so a click on a panel control cannot take the selection away first.
-- **The Arrange panel's z-order rows work.** Bring to Front, Bring Forward, Send Backward and
-  Send to Back move the selected object through the worker's arrange path — the one edit that
-  moves bytes and re-materialises the state at the destination rather than wrapping it in a `q …
-  Q`. The edit session is opened on demand, so an arrange works as the first thing asked of a
-  page. Align, Distribute, Group and Ungroup are drawn and silent, which is what a feature with
-  no edit behind it should look like.
+- **Arrange works, as a section under the panel's properties.** Bring to Front, Bring Forward,
+  Send Backward and Send to Back move the selected object through the worker's arrange path — the
+  one edit that moves bytes and re-materialises the state at the destination rather than wrapping
+  it in a `q … Q`. The edit session is opened on demand, so an arrange works as the first thing
+  asked of a page. Align, Distribute, Group and Ungroup are not drawn at all, because they have no
+  edit behind them and a button that pretends is worse than a gap.
 - **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
 - **Docs** — architecture, status, development, testing, PDF quirks, dependencies,
   icons, and the decision records.

@@ -894,31 +894,7 @@ impl App {
             let ink = if enabled { t.text } else { t.text_muted };
             let which = panel::panel_row(self.state.right, row, text);
             match which {
-                // A button is filled, not outlined: it is a thing to press rather than a thing
-                // to read, and the difference has to be visible before anyone touches it.
-                PanelRow::Button(do_) if enabled => {
-                    p.rect_filled(field, s.field_radius, t.hover);
-                    p.rect_stroke(
-                        field,
-                        s.field_radius,
-                        egui::Stroke::new(1.0, t.border),
-                        egui::StrokeKind::Middle,
-                    );
-                    p.text(
-                        field.center(),
-                        egui::Align2::CENTER_CENTER,
-                        name,
-                        t.type_scale.font_id(Size::Row),
-                        t.text,
-                    );
-                    if hovered(ui, field) && ui.ctx().input(|i| i.pointer.any_released()) {
-                        clicked_do = Some(do_);
-                    }
-                }
-                // A button with nothing selected to move is drawn as a field and does nothing:
-                // the arrange rows have no value to show, and without a selection there is no
-                // object for them to move.
-                PanelRow::Button(_) | PanelRow::Empty => {}
+                PanelRow::Empty => {}
                 PanelRow::Value(value) => {
                     p.text(
                         field.center(),
@@ -974,9 +950,21 @@ impl App {
         if let Some(do_) = clicked_do {
             self.act(do_);
         }
+
+        // **Arrange is a section of this panel, not a panel of its own** — the mockup puts its
+        // four buttons under the properties, and a right-hand side that swapped its whole
+        // composition to move an object in the z-order would be a side that forgot what it was
+        // showing. It is drawn for whatever is selected, because anything on a page has an order
+        // in it; with nothing selected there is nothing to move, so the section is not drawn.
+        if self.selected.is_some() {
+            arrange_section(ui, p, t, rect, &mut y, &mut clicked_do);
+            if let Some(do_) = clicked_do {
+                self.act(do_);
+            }
+        }
     }
 
-    /// Do what a panel button asks, on the selected object.
+    /// Do what a panel control asks, on the selected object.
     fn act(&mut self, do_: panel::Do) {
         let Some(object) = self.selected else {
             return;
@@ -1115,6 +1103,68 @@ fn hovered(ui: &egui::Ui, rect: egui::Rect) -> bool {
         return false;
     };
     rect.contains(pos)
+}
+
+/// The Arrange section: four buttons, two to a row, under the panel's properties.
+///
+/// A free function because it needs nothing from the window but a painter and a place to draw: the
+/// labels and the verbs both come from `panel`, which is what keeps them together, and what the
+/// section is *for* is the selected object, which the caller already knows about. Taking `&mut
+/// self` would have been a signature that promised more than the body reads.
+fn arrange_section(
+    ui: &egui::Ui,
+    p: &Painter,
+    t: &Theme,
+    rect: egui::Rect,
+    y: &mut f32,
+    clicked_do: &mut Option<panel::Do>,
+) {
+    let s = t.spacing;
+    *y += t.metrics.row_height * 0.5;
+    p.text(
+        egui::pos2(rect.left() + s.window_inset, *y),
+        egui::Align2::LEFT_TOP,
+        "Arrange",
+        t.type_scale.font_id(Size::Heading),
+        t.text,
+    );
+    *y += t.metrics.row_height;
+
+    // Two to a row, so the four fit under the properties without the section running off the
+    // bottom of a short window.
+    let cell = egui::vec2(
+        (rect.width() - s.window_inset * 2.0 - s.item_gap) / 2.0,
+        t.metrics.row_height * 2.0,
+    );
+    for (i, name) in panel::ARRANGE_ROWS.iter().enumerate() {
+        let at = egui::pos2(
+            rect.left() + s.window_inset + (i % 2) as f32 * (cell.x + s.item_gap),
+            *y + (i / 2) as f32 * (cell.y + s.item_gap),
+        );
+        let button = egui::Rect::from_min_size(at, cell);
+        if button.bottom() > rect.bottom() {
+            return;
+        }
+        // Filled rather than outlined: a button is a thing to press, and that has to be visible
+        // before anyone touches it.
+        p.rect_filled(button, s.field_radius, t.hover);
+        p.rect_stroke(
+            button,
+            s.field_radius,
+            egui::Stroke::new(1.0, t.border),
+            egui::StrokeKind::Middle,
+        );
+        p.text(
+            button.center(),
+            egui::Align2::CENTER_CENTER,
+            *name,
+            t.type_scale.font_id(Size::Row),
+            t.text,
+        );
+        if hovered(ui, button) && ui.ctx().input(|i| i.pointer.any_released()) {
+            *clicked_do = panel::arrange_of(i);
+        }
+    }
 }
 
 /// A row that reports the pointer, so the window does not feel inert.

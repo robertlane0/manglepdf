@@ -43,8 +43,6 @@ pub enum PanelRow {
     },
     /// A row with nothing to say yet: a field with no value in it.
     Empty,
-    /// A button, which does something rather than showing something.
-    Button(Do),
 }
 
 /// What a panel control does when it is clicked.
@@ -57,19 +55,16 @@ pub enum Do {
     Arrange(mangle_edit::Arrange),
 }
 
-/// The names of the Arrange panel's rows, in the order the mockup draws them.
+/// The labels of the Arrange section's buttons, in the order the mockup draws them.
 ///
-/// Beside [`arrange_of`], which says which of them is a button and which way it moves: a row
-/// inserted here without one there is a row that silently stops being one.
-pub const ARRANGE_ROWS: [&str; 8] = [
+/// Beside [`arrange_of`], which says which way each one moves: a label added here without a verb
+/// there is a button that silently does nothing. Only the four z-order ones are listed, because
+/// those are the only ones with an edit behind them.
+pub const ARRANGE_ROWS: [&str; 4] = [
     "Bring to Front",
     "Bring Forward",
     "Send Backward",
     "Send to Back",
-    "Align",
-    "Distribute",
-    "Group",
-    "Ungroup",
 ];
 
 /// The names of the rows, in the order the mockup draws them.
@@ -123,12 +118,7 @@ pub fn panel_row(panel: RightPanel, row: usize, text: Option<&TextState>) -> Pan
         return PanelRow::Empty;
     }
     let step = TEXT_STEPS.iter().find(|(r, _)| *r == row).map(|(_, s)| *s);
-    let button = arrange_of(panel, row);
     let Some(step) = step else {
-        // An arrange is a verb, so its rows are buttons rather than fields.
-        if let Some(do_) = button {
-            return PanelRow::Button(do_);
-        }
         // The font's resource name is the one thing a panel can show without the font layer,
         // and it is the name as the stream wrote it — `/F3`, not a family.
         return if row == 0 {
@@ -170,19 +160,16 @@ pub fn panel_row(panel: RightPanel, row: usize, text: Option<&TextState>) -> Pan
     }
 }
 
-/// What row `row` of the Arrange panel does, if the row is a button.
+/// What button `row` of the Arrange section does, if it is a button.
 ///
-/// Only the four z-order rows are, because only the four z-order rows have an edit behind them:
-/// `Arrange` moves bytes and re-materialises the state at the destination. **Align, Distribute,
-/// Group and Ungroup are `None` and drawn as buttons that do nothing yet** — FINISH.md's S2.12
-/// wants a multi-select for align and distribute, and a group is a change to the object model
-/// rather than to a stream. A button that is drawn but silent is honest about what is missing; a
-/// button that is not drawn at all would pretend the feature does not exist.
+/// Only the four z-order ones are, because only those have an edit behind them: `Arrange` moves
+/// bytes and re-materialises the state at the destination. **Align, Distribute, Group and Ungroup
+/// return `None`** and are therefore not drawn — FINISH.md's S2.12 wants a multi-select for align
+/// and distribute, and a group is a change to the object model rather than to a stream. A button
+/// that is drawn but silent would be a button that pretends; `None` here draws nothing at all,
+/// which is the honest shape for a feature that does not exist yet.
 #[must_use]
-pub fn arrange_of(panel: RightPanel, row: usize) -> Option<Do> {
-    if panel != RightPanel::Arrange {
-        return None;
-    }
+pub fn arrange_of(row: usize) -> Option<Do> {
     Some(Do::Arrange(match row {
         0 => mangle_edit::Arrange::ToFront,
         1 => mangle_edit::Arrange::Forward,
@@ -462,43 +449,37 @@ mod tests {
         );
     }
 
-    /// Which arrange rows are buttons, and which way they move.
+    /// Which arrange buttons move which way, and that every label has a verb.
     ///
-    /// The four z-order rows are; Align, Distribute, Group and Ungroup are not, because they have
-    /// no edit behind them yet. A row that is drawn but silent is honest about what is missing,
-    /// and this is the check that keeps the two halves of that sentence together.
+    /// The labels and the verbs are two lists in one module, and a label added to one without a
+    /// verb in the other would be a button that silently did nothing — which is the failure this
+    /// test exists to catch, because nothing else would notice.
     #[test]
-    fn the_four_z_order_rows_are_buttons_and_the_rest_are_not() {
+    fn every_arrange_label_has_a_verb_and_each_moves_its_own_way() {
         let ways = [
             mangle_edit::Arrange::ToFront,
             mangle_edit::Arrange::Forward,
             mangle_edit::Arrange::Backward,
             mangle_edit::Arrange::ToBack,
         ];
+        assert_eq!(
+            ARRANGE_ROWS.len(),
+            ways.len(),
+            "every label has a verb, and every verb a label"
+        );
         for (row, way) in ways.iter().enumerate() {
+            let Some(label) = ARRANGE_ROWS.get(row) else {
+                panic!("{ways:?} has more verbs than ARRANGE_ROWS has labels");
+            };
             assert_eq!(
-                arrange_of(RightPanel::Arrange, row),
+                arrange_of(row),
                 Some(Do::Arrange(*way)),
-                "row {row} should move {way}"
+                "{label} should move {way}"
             );
         }
-        for (row, name) in ARRANGE_ROWS.iter().enumerate().skip(4) {
-            assert_eq!(
-                arrange_of(RightPanel::Arrange, row),
-                None,
-                "row {row} ({name}) has no edit behind it yet"
-            );
-        }
-    }
-
-    /// A button belongs to its own panel: the Text panel's second row is a size, not a bring to
-    /// front, and a control that answered for every panel would be a control that lied about
-    /// which panel it was in.
-    #[test]
-    fn an_arrange_button_belongs_to_the_arrange_panel() {
-        assert_eq!(arrange_of(RightPanel::Text, 0), None);
-        assert_eq!(arrange_of(RightPanel::Colour, 0), None);
-        assert_eq!(arrange_of(RightPanel::Properties, 0), None);
+        // And nothing past the end of the list: a section that asks for a fifth button would be
+        // asking for a verb that does not exist.
+        assert_eq!(arrange_of(ways.len()), None);
     }
 
     /// A number that came back to nothing reads as zero, not as a minus sign.

@@ -1251,19 +1251,27 @@ descriptor declares) and the colour, which a `Record` does not carry. Those rows
 `PanelRow::Empty`: a field with nothing in it. A panel that invented "Regular" for a style it had
 not read would be a panel that lies.
 
-**The Arrange panel's four z-order rows are buttons, and the other four are buttons that do
-nothing yet.** An arrange is a verb, not a value — there is no number to read out and none to
-nudge — so it is drawn as a filled control rather than a stepper, and the worker's arrange path is
-the same save-and-redraw every other edit takes. **Align, Distribute, Group and Ungroup are drawn
-and silent**: FINISH.md's S2.12 wants a multi-select for align and distribute, and a group is a
-change to the object model rather than to a stream, so neither has an edit behind it. A button
-that is drawn but silent is honest about what is missing; a button that is not drawn at all would
-pretend the feature does not exist.
+**Arrange is a section of the Text panel, not a panel of its own.** The mockup puts its four
+buttons under the properties, and a right-hand side that swapped its whole composition to move an
+object in the z-order would be a side that forgot what it was showing. An arrange is also a verb,
+not a value — there is no number to read out and none to nudge — so the buttons are filled rather
+than outlined, which has to be visible before anyone touches them.
+
+**Align, Distribute, Group and Ungroup are not drawn at all.** FINISH.md's S2.12 wants a
+multi-select for align and distribute, and a group is a change to the object model rather than to a
+stream, so neither has an edit behind it. A button that was drawn but silent would be a button
+that pretends; `ARRANGE_ROWS` lists only the four with verbs, and a label added to it without a
+verb in `arrange_of` is what the test catches.
 
 **The edit session is opened on demand, not on the first edit.** This fell out of arranging: an
 arrange is often the *first* thing asked of a page, because it moves an object nobody has edited,
 and a worker that refused until something had been edited would refuse the most ordinary request
 it gets. `session_for` is the one place that decides, and every mutating job goes through it.
+
+**Two signatures were corrected by what they promised.** `arrange_section` was written as a method
+and clippy pointed out it read nothing from `self` — it needs a painter and a place to draw, and
+what the section is *for* is the selected object, which the caller already knows. It is a free
+function now, and the signature says what the body reads.
 about them are worth writing down.
 
 **A click and the pixel have to agree, and the only way to get that is to reuse the renderer's
