@@ -133,6 +133,41 @@ Measured comparisons state their tolerance in the test, and say why:
 - Geometry: ±0.01 pt, or ±0.1 pt where font rasterisation is in the path.
 - Colour: ±2/255 per channel for an analytically computed sample.
 
+## Driving the GUI, and what that found
+
+The window is driven by real mouse and keyboard events, not through any test hook in the
+product. That mattered: the two hardest bugs in the interaction layer were found by driving it
+and neither showed in a unit test.
+
+**egui calls `ui` only when something asks for a repaint.** A window that has drawn its chrome
+and is waiting on a worker never asks again, so the worker's answer sits in the channel with
+nothing reading it — and a screenshot looks exactly like a working window. Found by watching the
+worker's CPU stop at one page's worth of rendering while the channel held the answer. Fixed with
+one line: ask for the next frame at a fixed cadence, which is a ceiling on noticing rather than the
+latency.
+
+**The canvas answers for the whole window unless it is told not to.** A click on a stepper in the
+right-hand panel reached the pointer handler first, missed the paper, and took the selection away:
+the panel redrew itself with nothing selected, its controls were never drawn, and the click did
+nothing at all. Found by instrumenting the click's window coordinates and watching the panel go
+back to "Document Properties" on the frame after the click.
+
+**A limitation of this harness, recorded rather than worked around.** Synthetic pointer input
+delivers *clicks* with their positions but does not deliver the *motion* events that egui's
+`hover_pos()` tracks, so the reported pointer position stays where the last real click landed.
+Every control that reads a hover — which is all of them — is therefore unreachable by clicking
+alone, though clicking works for anything that does not need a hover first. The window still has
+to be inspected by eye: `screenshot_capture_window` on the app window, with the working terminal
+dragged off the right-hand panel first, because it sits over it and its own pixels are wrong
+behind it.
+
+**The design consequence, which is the useful part.** Everything a window decides is separated
+from the windowing it is decided in, so it can be tested without a mouse at all: `pointer_outcome`
+decides whether an event is a click or a drag and on what, `panel_row` decides what each panel row
+is, `stepped` decides what one click of a stepper writes, and `panel_for` decides which panel a
+selection opens. A test that needed a real mouse could not have answered any of them, and the
+wired-up path is then checked through the worker against real pages of the Tier-B corpus.
+
 ## Rules that are not negotiable
 
 - **An ignored test is not a silent one.** `#[ignore]` means "do not run this by
