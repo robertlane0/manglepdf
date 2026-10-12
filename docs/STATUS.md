@@ -328,7 +328,13 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   FINISH.md S0.4's four named cases: case-insensitivity works, a ligature word works (because the
   decoder makes the ligature a character), a hyphenated word across a line break does **not** work
   and is recorded as a known gap rather than papered over.
+- **The search field works.** Typed text searches the page's extracted text, the hit count shows
+  beside the field, Enter steps through the hits with the current one marked in amber on the page,
+  and Ctrl+F focuses the field. It is the first real egui widget in a shell that otherwise draws
+  everything itself, and wiring the theme through to it took three passes: a text edit paints its
+  unfocused background from a token that is neither the widget fill nor the panel fill.
 - **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
+
 
 
 

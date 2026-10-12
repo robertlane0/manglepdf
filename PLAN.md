@@ -1294,6 +1294,21 @@ tization` does
 not contain `sanitization`, and each half is findable but not the whole. The test states that as a
 failure rather than hiding it, so the gap is a known one.
 
+**The search field is in the title bar, and typing it searches the page.** The field is a real
+`TextEdit` in an `Area` over the rect the shell measured — a hand-drawn rectangle that accepted no
+typing would be a search field that could not search — and everything around it (the placeholder,
+the hit count, the focus ring) is the shell's own drawing. The current hit is marked on the page in
+amber so a user can see where in a wall of prose the answer is. Enter steps to the next hit and
+shift-enter to the previous, wrapping at the ends.
+
+**The first real widget in a hand-drawn shell is where the theme has to be handed over.** egui's
+default visuals are *dark*, and the shell draws everything itself in its own light tokens, so the
+field painted a black band down the title bar. It took three passes to find every token involved:
+`widgets.*.bg_fill`, then `panel_fill` (the field lives in an `Area`, which is a panel), and finally
+`weak_bg_fill` — which is what a `TextEdit` paints its unfocused background from, and which is
+neither of the other two. The lesson is that a widget is not one colour but a set of them, and
+"set the theme" for a real control means finding all of them or the control is half-drawn.
+
 **The canvas answers for the page and for nothing else.** A click on a stepper in the right-hand
 panel used to arrive at `pointer()` first, miss the paper, and take the selection away: the panel
 redrew itself with nothing selected, its controls were never drawn, and the click meant to nudge a

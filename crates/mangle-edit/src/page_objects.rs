@@ -328,6 +328,46 @@ pub fn summarise(
     }
 }
 
+/// The page's whole text, in the order the file drew it.
+///
+/// Joined from every run on the page, not from the objects: an object's own content is what the
+/// panel shows, and a search has to run over the *page*, because a phrase a user types is a phrase
+/// of prose and prose does not respect where one object's box ends.
+#[must_use]
+pub fn page_text(
+    resources: &mangle_content::Resources,
+    doc: &Document,
+    model: &PageModel,
+) -> String {
+    let runs: Vec<mangle_text::Decoded> = model
+        .objects()
+        .iter()
+        .flat_map(|object| {
+            object.records.iter().filter_map(|r| match &r.mark {
+                Mark::Glyphs {
+                    text,
+                    placements,
+                    size,
+                    ..
+                } => Some(mangle_text::Run {
+                    form: r.form.as_deref(),
+                    font: r.text.font.as_deref(),
+                    text,
+                    origins: placements.iter().map(|m| (m.e, m.f)).collect(),
+                    // The size the reader sees, not the one in the stream.
+                    size: *size
+                        * (r.text_matrix.a * r.text_matrix.d - r.text_matrix.b * r.text_matrix.c)
+                            .abs()
+                            .sqrt(),
+                }),
+                _ => None,
+            })
+        })
+        .filter_map(|run| mangle_text::decode(resources, &|o| doc.resolve_object(o), &run))
+        .collect();
+    mangle_text::text_of(&runs)
+}
+
 /// What one object says, read from its own runs.
 ///
 /// The runs are decoded one at a time and joined by [`mangle_text::text_of`], which is the same

@@ -130,6 +130,13 @@ pub enum JobResult {
         rotate: i32,
         /// What is on the page, in the order the file drew it.
         objects: Vec<mangle_edit::Summary>,
+        /// The page's whole text, in the order the file drew it.
+        ///
+        /// The page's own text rather than the objects' contents joined: an object's content is
+        /// what the *panel* shows for one selection, and a search runs over the page because a
+        /// phrase a user types is a phrase of prose, and prose does not respect where one object's
+        /// box ends.
+        text: String,
         /// Why anything on it was not drawn.
         notes: Vec<String>,
     },
@@ -227,6 +234,11 @@ impl Worker {
                         .map(|o| mangle_edit::summarise(&self.doc, resources, o))
                         .collect()
                 })
+                .unwrap_or_default(),
+            text: self
+                .resources
+                .get(index)
+                .map(|resources| mangle_edit::page_text(resources, &self.doc, &model))
                 .unwrap_or_default(),
             notes: render.notes,
         });

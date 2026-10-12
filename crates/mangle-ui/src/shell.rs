@@ -175,6 +175,8 @@ pub struct App {
     selected: Option<usize>,
     /// Where a drag started on the page, and what the object under it was.
     drag: Option<Drag>,
+    /// What the search field holds, and where the page's text matched it.
+    search: Search,
 }
 
 /// What the bottom bar was asked to do.
@@ -190,6 +192,62 @@ enum Bar {
     ZoomIn,
     /// Back to one hundred per cent.
     ZoomReset,
+}
+
+/// What the search field holds and what the page matched.
+///
+/// The hits are kept rather than recomputed per frame: a search is run when the query changes or
+/// when a new page arrives, and the answer is a small list of positions the field then navigates.
+#[derive(Debug, Default)]
+struct Search {
+    /// What the user typed.
+    query: String,
+    /// Where the page's text matched, with the object each hit is in.
+    hits: Vec<(usize, mangle_text::Hit)>,
+    /// Which hit is current, for the next/previous buttons.
+    at: usize,
+    /// Whether the field has keyboard focus, so Ctrl+F lands where a user expects.
+    focused: bool,
+}
+
+impl Search {
+    /// How many hits, and which one is current, as a field shows it.
+    fn label(&self) -> String {
+        if self.query.is_empty() {
+            return String::new();
+        }
+        if self.hits.is_empty() {
+            return "no matches".to_string();
+        }
+        format!("{} of {}", self.at + 1, self.hits.len())
+    }
+
+    /// Re-run the search over the page's text, keeping the place in the list where it still lands.
+    fn run(&mut self, page: &str, texts: &[String]) {
+        if self.query.is_empty() {
+            self.hits.clear();
+            self.at = 0;
+            return;
+        }
+        self.hits = mangle_text::locate(texts, &mangle_text::find(page, &self.query));
+        self.at = 0;
+    }
+
+    /// Move through the hits, wrapping at the ends because a user pressing next on the last hit
+    /// wants the first, not nothing.
+    fn step(&mut self, by: i64) {
+        if self.hits.is_empty() {
+            return;
+        }
+        let len = self.hits.len() as i64;
+        let next = self.at as i64 + by;
+        self.at = next.rem_euclid(len) as usize;
+    }
+
+    /// The object the current hit is in, which is what a highlight is drawn around.
+    fn current_object(&self) -> Option<usize> {
+        self.hits.get(self.at).map(|(object, _)| *object)
+    }
 }
 
 /// A drag in progress: where the pointer went down, and what it grabbed.
@@ -212,6 +270,7 @@ impl std::fmt::Debug for App {
             .field("objects", &self.objects.len())
             .field("selected", &self.selected)
             .field("drag", &self.drag)
+            .field("search", &self.search)
             .field("state", &self.state)
             .field("pages", &self.pages.len())
             .field("worker", &self.worker)
@@ -228,6 +287,30 @@ impl App {
         let theme = Theme::light();
         // The reference window is 1536x1024 logical; the canvas is what is left over.
         install_fonts(&cc.egui_ctx, &theme);
+        // The shell draws everything itself in its own light theme, but a *real* egui widget —
+        // the search field is the first — brings its own colours, and egui's defaults are dark.
+        // Left unset, the field paints a black box into the middle of a pale title bar. So the
+        // widget visuals are pointed at the shell's tokens once, here, rather than each widget
+        // being corrected at its call site.
+        cc.egui_ctx.all_styles_mut(|v| {
+            v.visuals.widgets.inactive.bg_fill = theme.panel;
+            v.visuals.widgets.hovered.bg_fill = theme.hover;
+            v.visuals.widgets.active.bg_fill = theme.hover;
+            v.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme.border);
+            // A `TextEdit` paints its unfocused background from `weak_bg_fill`, not `bg_fill`, so
+            // the field's own background is a *third* token that has to follow the theme. This is
+            // the complete set of fills a single-line edit can paint; leaving any of them out
+            // leaves a dark band in the title bar.
+            v.visuals.widgets.inactive.weak_bg_fill = theme.panel;
+            v.visuals.widgets.hovered.weak_bg_fill = theme.hover;
+            v.visuals.widgets.active.weak_bg_fill = theme.hover;
+            // A panel and a window are filled from their own token rather than a widget's, and
+            // the search field lives in an `Area` — which is a panel. Left at egui's default
+            // that is dark, and the field paints a black band down the left of the title bar.
+            v.visuals.panel_fill = theme.panel;
+            v.visuals.window_fill = theme.panel;
+            v.visuals.override_text_color = Some(theme.text);
+        });
         Self {
             theme,
             state: State::new(),
@@ -239,6 +322,7 @@ impl App {
             objects: Vec::new(),
             selected: None,
             drag: None,
+            search: Search::default(),
         }
     }
 
@@ -312,6 +396,7 @@ impl App {
                     points,
                     rotate,
                     objects,
+                    text,
                     notes,
                 } => {
                     if let Some(slot) = self.state.page_points.get_mut(index) {
@@ -326,6 +411,14 @@ impl App {
                         // page would now point at whatever happens to be at the same number. It
                         // goes rather than being silently reinterpreted.
                         self.select(self.selected.filter(|at| *at < self.objects.len()));
+                        // A new page is new text, so a search over the last one is stale and is
+                        // re-run rather than left showing hits that are not there.
+                        let texts: Vec<String> = self
+                            .objects
+                            .iter()
+                            .map(|o| o.content.clone().unwrap_or_default())
+                            .collect();
+                        self.search.run(&text, &texts);
                     }
                     // Notes are the reason a page is not all there: they are shown, because a
                     // blank region the user cannot account for is worse than a line of text
@@ -604,6 +697,137 @@ impl App {
             );
             x += width + t.spacing.item_gap;
         }
+
+        self.search_field(ui, p, t, rect, x);
+    }
+
+    /// The search field, with the hit count beside it.
+    ///
+    /// The field is a real `TextEdit` in an area over the rect the shell measured, because a
+    /// hand-drawn rectangle that accepted no typing would be a search field that could not search.
+    /// Everything around it — the placeholder, the count, the focus ring — is the shell's own
+    /// drawing, as the rest of the window is.
+    fn search_field(
+        &mut self,
+        ui: &egui::Ui,
+        p: &Painter,
+        t: &Theme,
+        bar: egui::Rect,
+        after_tools: f32,
+    ) {
+        let s = t.spacing;
+        // Beside the toolbar, and bounded both ways: wide enough for a word a user would type
+        // ("Beautiful") and narrow enough that it does not run over the toolbar or off the bar. A
+        // field that swallowed the rest of the title bar would be a field nobody could aim past.
+        let width = (bar.right() - after_tools - 120.0).clamp(180.0, 280.0);
+        let field = egui::Rect::from_min_size(
+            egui::pos2(after_tools, bar.center().y - t.metrics.toolbar_height / 2.0),
+            egui::vec2(width, t.metrics.toolbar_height),
+        );
+
+        // Focus follows Ctrl+F, which is the key a viewer is expected to answer, and is released
+        // when the field loses it — so the answer goes back to the window's own keys.
+        if ui
+            .ctx()
+            .input(|i| i.modifiers.command && i.key_pressed(egui::Key::F))
+        {
+            self.search.focused = true;
+            ui.ctx()
+                .memory_mut(|m| m.request_focus(egui::Id::new("manglepdf-search")));
+        }
+
+        // The frame: a filled rect with a border, and a ring when it has focus so a user can see
+        // where their typing is going.
+        p.rect_filled(field, s.field_radius, t.panel);
+        p.rect_stroke(
+            field,
+            s.field_radius,
+            egui::Stroke::new(1.0, t.border),
+            egui::StrokeKind::Middle,
+        );
+        if self.search.focused {
+            p.rect_stroke(
+                field.expand(1.0),
+                s.field_radius,
+                egui::Stroke::new(1.5, t.accent),
+                egui::StrokeKind::Middle,
+            );
+        }
+
+        // The placeholder, drawn only while the field is empty — under the text, which is why it
+        // is muted and why a `TextEdit` with no content shows nothing over it.
+        let inner = field.shrink(s.item_gap);
+        if self.search.query.is_empty() {
+            p.text(
+                inner.left_center(),
+                egui::Align2::LEFT_CENTER,
+                "Search (\u{2318}F)",
+                t.type_scale.font_id(Size::Ui),
+                t.text_muted,
+            );
+        }
+        // The count, right-aligned inside the field, which is where a viewer puts it.
+        let count = self.search.label();
+        if !count.is_empty() {
+            p.text(
+                inner.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                count,
+                t.type_scale.font_id(Size::Ui),
+                if self.search.hits.is_empty() {
+                    t.text_muted
+                } else {
+                    t.text
+                },
+            );
+        }
+
+        // The typing itself.
+        // One id for the field, the area it lives in and the focus request, so all three address
+        // the same control.
+        let id = egui::Id::new("manglepdf-search");
+        let area = egui::Area::new(id).order(egui::Order::Middle);
+        let response = area
+            .fixed_pos(field.min)
+            .constrain_to(field)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_size(field.size());
+                let edit = egui::TextEdit::singleline(&mut self.search.query)
+                    .id(id)
+                    .hint_text("")
+                    .vertical_align(egui::Align::Center)
+                    .desired_width(field.width());
+                edit.show(ui)
+            });
+        self.search.focused = response.inner.response.has_focus();
+        if response.inner.response.changed() {
+            self.research();
+        }
+        // Enter steps to the next hit, and shift-enter to the previous, which is the pair a viewer
+        // answers without a mouse.
+        if self.search.focused {
+            let stepped = ui.ctx().input(|i| {
+                if i.key_pressed(egui::Key::Enter) {
+                    Some(if i.modifiers.shift { -1 } else { 1 })
+                } else {
+                    None
+                }
+            });
+            if let Some(by) = stepped {
+                self.search.step(by);
+            }
+        }
+    }
+
+    /// Re-run the search over the current page's text.
+    fn research(&mut self) {
+        let texts: Vec<String> = self
+            .objects
+            .iter()
+            .map(|o| o.content.clone().unwrap_or_default())
+            .collect();
+        let joined = texts.join(" ");
+        self.search.run(&joined, &texts);
     }
 
     fn left_region(&mut self, ui: &egui::Ui, p: &Painter, t: &Theme, screen: egui::Rect) {
@@ -794,6 +1018,35 @@ impl App {
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
+                // The current search hit, marked on the page so a user can see where in a wall of
+                // prose the answer is. A softer fill than the selection's, and drawn before it, so
+                // the selected object still reads as the one that is selected.
+                if i == self.state.page_index
+                    && let Some(object) = self
+                        .search
+                        .current_object()
+                        .and_then(|at| self.objects.get(at))
+                {
+                    let box_ = drawn.placement(r);
+                    let corners = [
+                        (object.bounds.x0, object.bounds.y0),
+                        (object.bounds.x1, object.bounds.y0),
+                        (object.bounds.x1, object.bounds.y1),
+                        (object.bounds.x0, object.bounds.y1),
+                    ];
+                    if let Some(pts) = corners
+                        .iter()
+                        .map(|(x, y)| box_.to_window(*x, *y))
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|v| v.len() == 4)
+                    {
+                        p.add(egui::Shape::convex_polygon(
+                            pts,
+                            egui::Color32::from_rgba_unmultiplied(255, 200, 60, 70),
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(0xC8, 0x8A, 0x10)),
+                        ));
+                    }
+                }
             }
             // The selection, drawn onto the page the way a designer sees it: a box at the
             // object's own bounds, and handles at its corners.
