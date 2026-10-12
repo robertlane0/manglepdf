@@ -881,13 +881,12 @@ impl App {
         );
         y += t.metrics.tab_height;
 
-        // The selected object's own text state, which is what every value in this panel is read
-        // out of. Read from the model rather than held by the window: a panel that remembered a
-        // value would be showing the wrong number the moment an edit landed.
-        let text = self
-            .selected
-            .and_then(|i| self.objects.get(i))
-            .and_then(|o| o.text.as_ref());
+        // The selected object's own text state and content, which are what every value in this
+        // panel is read out of. Read from the model rather than held by the window: a panel that
+        // remembered a value would be showing the wrong number the moment an edit landed.
+        let selected = self.selected.and_then(|i| self.objects.get(i));
+        let text = selected.and_then(|o| o.text.as_ref());
+        let content = selected.and_then(|o| o.content.as_deref());
 
         // What a control was clicked by, applied after the loop rather than inside it. The loop
         // holds a borrow of the selected object to read its values, and the edit ends what that
@@ -928,7 +927,7 @@ impl App {
                 p.rect_filled(field, s.field_radius, t.hover);
             }
             let ink = if enabled { t.text } else { t.text_muted };
-            let which = panel::panel_row(self.state.right, row, text);
+            let which = panel::panel_row(self.state.right, row, text, content);
             match which {
                 PanelRow::Empty => {}
                 PanelRow::Value(value) => {
@@ -1516,6 +1515,7 @@ mod tests {
             form: None,
             line_break: None,
             text: None,
+            content: None,
         }
     }
 

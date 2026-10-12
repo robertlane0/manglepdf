@@ -106,10 +106,10 @@ pub const TEXT_ROWS: [&str; 10] = [
 /// moves a tenth of a multiple. That is what a designer expects from a stepper — a click of
 /// "Character Spacing" that moved it by 0.1 would take a hundred clicks to go from 0 to 10.
 const TEXT_STEPS: [(usize, f64); 4] = [
-    (2, 1.0),
-    (5, LINE_SPACING_STEP),
-    (6, 1.0),
-    (7, BASELINE_STEP),
+    (3, 1.0),
+    (6, LINE_SPACING_STEP),
+    (7, 1.0),
+    (8, BASELINE_STEP),
 ];
 
 /// One click of the line-spacing stepper, as a multiple of the size.
@@ -126,7 +126,12 @@ const BASELINE_STEP: f64 = 1.0;
 /// and not just on the row: the Colour panel's third row is a line width, not a size, and a
 /// stepper that let a user click it as one would be a stepper that lied.
 #[must_use]
-pub fn panel_row(panel: RightPanel, row: usize, text: Option<&TextState>) -> PanelRow {
+pub fn panel_row(
+    panel: RightPanel,
+    row: usize,
+    text: Option<&TextState>,
+    content: Option<&str>,
+) -> PanelRow {
     let Some(state) = text else {
         return PanelRow::Empty;
     };
@@ -137,36 +142,44 @@ pub fn panel_row(panel: RightPanel, row: usize, text: Option<&TextState>) -> Pan
     let Some(step) = step else {
         // The font's resource name is the one thing a panel can show without the font layer,
         // and it is the name as the stream wrote it — `/F3`, not a family.
-        return if row == 0 {
-            PanelRow::Value(
+        return match row {
+            // What the object says, which is the first thing a panel about a selection should
+            // say. Truncated, because a paragraph does not fit in a field: the limit is stated
+            // rather than applied silently, and the whole text is on the summary for anything
+            // that wants it.
+            0 => PanelRow::Value(
+                content
+                    .map(|c| clamped(c, CONTENT_FIELD))
+                    .unwrap_or_else(|| "No text".to_string()),
+            ),
+            1 => PanelRow::Value(
                 state
                     .font
                     .clone()
                     .unwrap_or_else(|| "Not named".to_string()),
-            )
-        } else {
-            PanelRow::Empty
+            ),
+            _ => PanelRow::Empty,
         };
     };
     // What the row shows and what a click writes are the same value, and both come from the
     // object's own state: the panel shows the multiple because that is what a designer moves,
     // and the property holds the leading because that is what the file stores.
     let (shown, property) = match row {
-        2 => (
+        3 => (
             format!("{} pt", number(state.size)),
             TextProperty::Size(state.size),
         ),
         // A leading with no size to divide by is a multiple of nothing, so the row has
         // nothing to show and nothing a click could write.
-        5 => match mangle_edit::line_spacing(state) {
+        6 => match mangle_edit::line_spacing(state) {
             Some(multiple) => (number(multiple), TextProperty::Leading(state.leading)),
             None => return PanelRow::Empty,
         },
-        6 => (
+        7 => (
             number(state.char_spacing),
             TextProperty::CharacterSpacing(state.char_spacing),
         ),
-        7 => (number(state.rise), TextProperty::BaselineShift(state.rise)),
+        8 => (number(state.rise), TextProperty::BaselineShift(state.rise)),
         _ => return PanelRow::Empty,
     };
     PanelRow::Stepper {
@@ -261,6 +274,22 @@ pub fn panel_for(selection: Option<&mangle_edit::Summary>) -> RightPanel {
     }
 }
 
+/// How many characters of an object's text the content field shows.
+const CONTENT_FIELD: usize = 48;
+
+/// `text` cut to `limit` characters, with an ellipsis if anything was dropped.
+///
+/// Cut on a character boundary rather than a byte one, because the text is Unicode and half a
+/// UTF-8 sequence is not a shorter string — it is a broken one.
+#[must_use]
+pub fn clamped(text: &str, limit: usize) -> String {
+    let mut out: String = text.chars().take(limit).collect();
+    if out.chars().count() < text.chars().count() {
+        out.push('\u{2026}');
+    }
+    out
+}
+
 /// A number as a panel shows it: two places at most, and never a negative zero.///
 /// Two places, because a character spacing of 0.03 is a value a file really has and "0.03" is
 /// what the operator says; and never `-0`, because a stepper that has been nudged back to nothing
@@ -308,13 +337,14 @@ mod tests {
             form: None,
             line_break: None,
             text: None,
+            content: None,
         }
     }
 
     /// A size is read out of the state the object was drawn with, in the file's own units.
     #[test]
     fn the_size_row_reads_the_size_the_file_drew() {
-        let row = panel_row(RightPanel::Text, 2, Some(&state()));
+        let row = panel_row(RightPanel::Text, 3, Some(&state()), None);
         match row {
             PanelRow::Stepper {
                 shown,
@@ -333,7 +363,7 @@ mod tests {
     /// edit it writes is a `TL` in points — and the conversion is done in one place.
     #[test]
     fn line_spacing_is_shown_as_a_multiple_and_written_as_points() {
-        match panel_row(RightPanel::Text, 5, Some(&state())) {
+        match panel_row(RightPanel::Text, 6, Some(&state()), None) {
             PanelRow::Stepper {
                 shown,
                 step,
@@ -358,8 +388,8 @@ mod tests {
     /// A row with no state to read is empty, rather than showing a number the file never had.
     #[test]
     fn an_object_that_is_not_text_has_nothing_to_show() {
-        assert_eq!(panel_row(RightPanel::Text, 2, None), PanelRow::Empty);
-        assert_eq!(panel_row(RightPanel::Text, 5, None), PanelRow::Empty);
+        assert_eq!(panel_row(RightPanel::Text, 3, None, None), PanelRow::Empty);
+        assert_eq!(panel_row(RightPanel::Text, 6, None, None), PanelRow::Empty);
     }
 
     /// The font row shows the resource name, which is the only thing that can be shown without
@@ -367,11 +397,11 @@ mod tests {
     #[test]
     fn the_font_row_shows_the_name_the_stream_wrote() {
         assert_eq!(
-            panel_row(RightPanel::Text, 0, Some(&state())),
+            panel_row(RightPanel::Text, 1, Some(&state()), None),
             PanelRow::Value("/F3".to_string())
         );
         assert_eq!(
-            panel_row(RightPanel::Text, 0, Some(&TextState::default())),
+            panel_row(RightPanel::Text, 1, Some(&TextState::default()), None),
             PanelRow::Value("Not named".to_string())
         );
     }
@@ -381,7 +411,9 @@ mod tests {
     #[test]
     fn a_stepper_writes_the_value_it_read_plus_one_step() {
         let s = state();
-        let PanelRow::Stepper { property, .. } = panel_row(RightPanel::Text, 2, Some(&s)) else {
+        let PanelRow::Stepper { property, .. } =
+            panel_row(RightPanel::Text, 3, Some(&state()), None)
+        else {
             panic!("size should be a stepper");
         };
         let nudged = property.with_value(mangle_edit::text_value(&s, property).unwrap() + 1.0);
@@ -398,7 +430,10 @@ mod tests {
             leading: 12.0,
             ..TextState::default()
         };
-        assert_eq!(panel_row(RightPanel::Text, 5, Some(&s)), PanelRow::Empty);
+        assert_eq!(
+            panel_row(RightPanel::Text, 6, Some(&s), None),
+            PanelRow::Empty
+        );
     }
 
     /// One click of a stepper writes a value one step from what the object has.
@@ -410,7 +445,9 @@ mod tests {
     fn a_click_of_a_stepper_writes_one_step_from_what_the_object_has() {
         let s = state();
         // The size row, which shows 48 and moves by a whole point.
-        let PanelRow::Stepper { property, .. } = panel_row(RightPanel::Text, 2, Some(&s)) else {
+        let PanelRow::Stepper { property, .. } =
+            panel_row(RightPanel::Text, 3, Some(&state()), None)
+        else {
             panic!("size should be a stepper");
         };
         let up = stepped(property, &s, 1.0);
@@ -424,7 +461,9 @@ mod tests {
     #[test]
     fn a_click_of_the_line_spacing_row_moves_a_multiple() {
         let s = state();
-        let PanelRow::Stepper { property, .. } = panel_row(RightPanel::Text, 5, Some(&s)) else {
+        let PanelRow::Stepper { property, .. } =
+            panel_row(RightPanel::Text, 6, Some(&state()), None)
+        else {
             panic!("line spacing should be a stepper");
         };
         // The row carries the leading the file stores, which is 1.4 multiples of 48.
@@ -470,7 +509,7 @@ mod tests {
     /// not do is invent a value for an object whose state it does not have.
     #[test]
     fn a_picture_has_no_state_to_step_from() {
-        assert_eq!(panel_row(RightPanel::Text, 2, None), PanelRow::Empty);
+        assert_eq!(panel_row(RightPanel::Text, 3, None, None), PanelRow::Empty);
         // The image kind never reaches `stepped`, because `panel_row` answered Empty first.
         assert_eq!(
             panel_for(Some(&Summary {
@@ -540,6 +579,27 @@ mod tests {
         assert_eq!(action_of(verbs.len()), None, "and nothing past the end");
     }
 
+    /// The content row says what the object says, and is cut to fit the field rather than spilling
+    /// out of it.
+    #[test]
+    fn the_content_row_shows_what_the_object_says() {
+        assert_eq!(
+            panel_row(RightPanel::Text, 0, Some(&state()), Some("Explore")),
+            PanelRow::Value("Explore".to_string())
+        );
+        // Cut on a character boundary, because half a UTF-8 sequence is not a shorter string.
+        let long: String = "Guidelines for Media Sanitization".to_string();
+        let shown = clamped(&long, 12);
+        assert_eq!(shown, "Guidelines f\u{2026}");
+        assert!(shown.chars().count() <= 12 + 1);
+        // And a run with nothing to say says so rather than showing an empty field.
+        assert_eq!(
+            panel_row(RightPanel::Text, 0, Some(&state()), None),
+            PanelRow::Value("No text".to_string())
+        );
+    }
+
+    /// A number that came back to nothing reads as zero, not as a minus sign.
     /// A number that came back to nothing reads as zero, not as a minus sign.    /// A number that came back to nothing reads as zero, not as a minus sign.
     #[test]
     fn a_number_that_is_nothing_reads_as_zero() {

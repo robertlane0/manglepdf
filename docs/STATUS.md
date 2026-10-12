@@ -319,7 +319,12 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   scan all rest on. What real pages taught it: the size in the `Tf` is not the size the reader sees
   when a file scales its glyphs with a text matrix, and a `Tj` names no space, so word breaks come
   from the geometry rather than from the bytes.
+- **The panel's content field reads the object's own text.** Selecting a run of text shows what
+  it says, read by the same decoder and joiner the page's text goes through — so the panel and a
+  search over the page agree by construction. On the NIST page a click on "Publication Date(s):
+  September 2006" shows exactly that in the Content row.
 - **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
+
 
 
 - **Docs** — architecture, status, development, testing, PDF quirks, dependencies,

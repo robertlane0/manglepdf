@@ -47,6 +47,7 @@ use std::ops::Range;
 
 use mangle_content::interp::{Mark, Record};
 use mangle_content::state::ClipBounds;
+use mangle_syntax::document::Document;
 
 /// What kind of thing an object is, which is what a tool switches on and what a panel labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +288,13 @@ pub struct Summary {
     /// A block of several lines has one state to show and several to choose from; this is the
     /// first run's, which is the one the eye reads first and the one a size stepper nudges.
     pub text: Option<mangle_content::state::TextState>,
+    /// What the object says, read from its own runs.
+    ///
+    /// `None` for anything that is not text — a picture says nothing — and for a run whose font
+    /// cannot be read this way, which is every composite font: its codes are CIDs and not glyph
+    /// selectors. This is the same read-out the joiner produces, so the panel's content field and
+    /// a search over the page agree by construction.
+    pub content: Option<String>,
 }
 
 impl Summary {
@@ -299,8 +307,16 @@ impl Summary {
 }
 
 /// The summary of an object.
+///
+/// `resources` and `doc` are here for one field: an object's *content* can only be read against
+/// the font its runs named, and the font's dictionary is an indirect reference away. Everything
+/// else on the summary is geometry the object already carries.
 #[must_use]
-pub fn summarise(object: &PageObject) -> Summary {
+pub fn summarise(
+    doc: &Document,
+    resources: &mangle_content::Resources,
+    object: &PageObject,
+) -> Summary {
     Summary {
         kind: object.kind,
         bounds: object.bounds,
@@ -308,7 +324,53 @@ pub fn summarise(object: &PageObject) -> Summary {
         form: object.form.clone(),
         line_break: object.line_break,
         text: object.records.first().map(|r| r.text.clone()),
+        content: content(resources, doc, object),
     }
+}
+
+/// What one object says, read from its own runs.
+///
+/// The runs are decoded one at a time and joined by [`mangle_text::text_of`], which is the same
+/// path a page's text goes through — so the panel's content field and a search over the page agree
+/// by construction rather than by two implementations that happen to match.
+///
+/// `None` for an object with no text in it, which is the honest answer for a photograph.
+#[must_use]
+pub fn content(
+    resources: &mangle_content::Resources,
+    doc: &Document,
+    object: &PageObject,
+) -> Option<String> {
+    let runs: Vec<mangle_text::Decoded> = object
+        .records
+        .iter()
+        .filter_map(|r| match &r.mark {
+            Mark::Glyphs {
+                text,
+                placements,
+                size,
+                ..
+            } => Some(mangle_text::Run {
+                form: r.form.as_deref(),
+                font: r.text.font.as_deref(),
+                text,
+                origins: placements.iter().map(|m| (m.e, m.f)).collect(),
+                // The size the reader sees, not the one in the stream: a file may set its glyphs
+                // at one point and stretch them with a text matrix, and a gap measured against
+                // the stream's number is a gap measured against nothing.
+                size: *size
+                    * (r.text_matrix.a * r.text_matrix.d - r.text_matrix.b * r.text_matrix.c)
+                        .abs()
+                        .sqrt(),
+            }),
+            _ => None,
+        })
+        .filter_map(|run| mangle_text::decode(resources, &|o| doc.resolve_object(o), &run))
+        .collect();
+    if runs.is_empty() {
+        return None;
+    }
+    Some(mangle_text::text_of(&runs))
 }
 
 /// What one object is made of, written out for a person to read.

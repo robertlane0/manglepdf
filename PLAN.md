@@ -1267,6 +1267,16 @@ apart comes out joined, and a page that kerns its letters far apart comes out wi
 words. The test asserts the *property* (words are separated, lines are separated) rather than a
 quoted phrase, because asserting the phrase would be asserting the heuristic is perfect.
 
+**The panel's content field reads the object's own text.** `Summary` gained a `content` field,
+filled by the same decoder and joiner the page's text goes through, so the panel and a search over
+the page agree by construction rather than by two implementations that happen to match. It is cut
+at 48 characters on a *character* boundary — half a UTF-8 sequence is not a shorter string, it is a
+broken one — and the limit is a named constant rather than a `48` buried in a draw call.
+
+`summarise` now takes the document and the resources it needs for that one field. Everything else
+on a summary is geometry the object already carries; a signature that asked for a document to fill
+in a box would have been a signature that lied about what it reads.
+
 **The canvas answers for the page and for nothing else.** A click on a stepper in the right-hand
 panel used to arrive at `pointer()` first, miss the paper, and take the selection away: the panel
 redrew itself with nothing selected, its controls were never drawn, and the click meant to nudge a

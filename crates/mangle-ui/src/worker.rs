@@ -217,7 +217,17 @@ impl Worker {
             height: render.image.height,
             points: page.inherited.displayed_size(),
             rotate: page.inherited.rotation(),
-            objects: model.objects().iter().map(mangle_edit::summarise).collect(),
+            objects: self
+                .resources
+                .get(index)
+                .map(|resources| {
+                    model
+                        .objects()
+                        .iter()
+                        .map(|o| mangle_edit::summarise(&self.doc, resources, o))
+                        .collect()
+                })
+                .unwrap_or_default(),
             notes: render.notes,
         });
     }

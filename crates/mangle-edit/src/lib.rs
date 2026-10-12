@@ -32,7 +32,7 @@ pub use edits::{
 };
 pub use history::{Edit, History, HistoryError, Snapshot};
 pub use page_objects::{
-    Kind, LineBreak, PageModel, PageObject, Provenance, Summary, provenance_of, summarise,
+    Kind, LineBreak, PageModel, PageObject, Provenance, Summary, content, provenance_of, summarise,
 };
 pub use session::{Editor, OpenError, Reason, SessionError};
 pub use surgery::{Applied, EditError, Patch};
