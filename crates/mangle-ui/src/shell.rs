@@ -1194,6 +1194,9 @@ fn section(
         (rect.width() - s.window_inset * 2.0 - s.item_gap * (columns - 1) as f32) / columns as f32,
         t.metrics.row_height,
     );
+    // The rows this section will actually draw, which is a whole number of them even when the
+    // last is partial — a three-button section has two rows, not one and a half.
+    let drawn_rows = labels.len().div_ceil(columns);
     for (i, name) in labels.iter().enumerate() {
         let at = egui::pos2(
             rect.left() + s.window_inset + (i % columns) as f32 * (cell.x + s.item_gap),
@@ -1223,6 +1226,12 @@ fn section(
             *clicked_do = verb_of(i, title);
         }
     }
+    // **Advance `y` past the rows that were drawn.** Without this the section leaves the cursor
+    // where it started, so the next section draws its heading and its buttons on top of this
+    // one's second row — which is exactly what happened: Arrange drew "Bring to Front" and "Bring
+    // Forward", and then Actions drew over the two buttons that should have been under them. The
+    // two sections were stacked in the same place and only one of them was usable.
+    *y += drawn_rows as f32 * (cell.y + s.item_gap);
 }
 
 /// Which verb a button of a titled section carries.

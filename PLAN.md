@@ -1272,7 +1272,24 @@ it gets. `session_for` is the one place that decides, and every mutating job goe
 and clippy pointed out it read nothing from `self` — it needs a painter and a place to draw, and
 what the section is *for* is the selected object, which the caller already knows. It is a free
 function now, and the signature says what the body reads.
-about them are worth writing down.
+
+**Rotate and Delete are in the Actions section, beside Arrange.** A rotation is
+`Change::rotate_about` — the same constructor shape as `scale_about`, because a rotation about the
+origin sweeps the object round the page and a user who clicked "rotate 90°" wanted the opposite
+corner to stay put. Two rotations, ninety degrees either way, and a delete. **Replace is not
+drawn**, because it needs a file dialog and a new XObject rather than an operator. A rotation also
+finishes any drag in progress: the object has just turned, so the drag that selected it can no
+longer be measured against the box it started on.
+
+**Arrange and Actions are one function taking a verb lookup, because they differ only in that.**
+The second was written as a copy of the first, which is how the real bug got in: `section` computed
+where its buttons were drawn but never advanced the cursor past them, so Actions drew its heading
+and its buttons *on top of* Arrange's second row. On screen that looked like Arrange having only
+two buttons — which is exactly what a section that has been overpainted looks like, and it took a
+full-resolution capture to see that the two sections were stacked in one place. The fix is one
+line, advance `y` by the rows that were drawn, and the shape of the mistake is worth writing down:
+**a layout function that takes a cursor has to move it, or the next thing drawn lands on top of
+it.**
 
 **A click and the pixel have to agree, and the only way to get that is to reuse the renderer's
 placement.** The arithmetic is *not* "subtract the corner, flip the y, divide by the zoom" — that is
