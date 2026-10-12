@@ -957,7 +957,31 @@ impl App {
         // showing. It is drawn for whatever is selected, because anything on a page has an order
         // in it; with nothing selected there is nothing to move, so the section is not drawn.
         if self.selected.is_some() {
-            arrange_section(ui, p, t, rect, &mut y, &mut clicked_do);
+            section(
+                ui,
+                p,
+                t,
+                rect,
+                &mut y,
+                "Arrange",
+                &panel::ARRANGE_ROWS,
+                &mut clicked_do,
+            );
+            if let Some(do_) = clicked_do {
+                self.act(do_);
+            }
+            // Actions is the other section the mockup puts under the properties: the things a
+            // user does *to* an object rather than the things they read about it.
+            section(
+                ui,
+                p,
+                t,
+                rect,
+                &mut y,
+                "Actions",
+                &panel::ACTION_ROWS,
+                &mut clicked_do,
+            );
             if let Some(do_) = clicked_do {
                 self.act(do_);
             }
@@ -975,6 +999,30 @@ impl App {
                 object,
                 arrange,
             }),
+            panel::Do::Delete => self.worker.ask(Job::Edit {
+                page: self.state.page_index,
+                object,
+                request: EditRequest::Delete,
+            }),
+            panel::Do::Rotate { degrees } => {
+                // About the object's own centre, in page space. The box is what the window holds
+                // — the worker has the records, and its own copy of the box would be a second
+                // answer to a question that already has one.
+                let Some(summary) = self.objects.get(object) else {
+                    return;
+                };
+                let b = summary.bounds;
+                let about = (f64::midpoint(b.x0, b.x1), f64::midpoint(b.y0, b.y1));
+                self.worker.ask(Job::Edit {
+                    page: self.state.page_index,
+                    object,
+                    request: EditRequest::Rotate { degrees, about },
+                });
+                // A rotation is not a move, so the object does not stay under the pointer for a
+                // drag that follows: the drag that selected it is finished here rather than
+                // left to be measured against a box that has just turned.
+                self.drag = None;
+            }
         }
     }
 
@@ -1105,18 +1153,23 @@ fn hovered(ui: &egui::Ui, rect: egui::Rect) -> bool {
     rect.contains(pos)
 }
 
-/// The Arrange section: four buttons, two to a row, under the panel's properties.
+/// A titled section of buttons under the panel's properties.
 ///
-/// A free function because it needs nothing from the window but a painter and a place to draw: the
-/// labels and the verbs both come from `panel`, which is what keeps them together, and what the
-/// section is *for* is the selected object, which the caller already knows about. Taking `&mut
-/// self` would have been a signature that promised more than the body reads.
-fn arrange_section(
+/// Arrange and Actions are the two the mockup puts there, and they differ only in which verbs
+/// their labels map to — so they are one function taking that mapping, and a section that drew its
+/// own buttons would be a second copy of the same layout to keep in step.
+///
+/// A free function because it needs nothing from the window but a painter and a place to draw:
+/// the labels and the verbs both come from `panel`, which is what keeps them together, and what
+/// the section is *for* is the selected object, which the caller already knows about.
+fn section(
     ui: &egui::Ui,
     p: &Painter,
     t: &Theme,
     rect: egui::Rect,
     y: &mut f32,
+    title: &str,
+    labels: &[&str],
     clicked_do: &mut Option<panel::Do>,
 ) {
     let s = t.spacing;
@@ -1124,22 +1177,27 @@ fn arrange_section(
     p.text(
         egui::pos2(rect.left() + s.window_inset, *y),
         egui::Align2::LEFT_TOP,
-        "Arrange",
+        title,
         t.type_scale.font_id(Size::Heading),
         t.text,
     );
     *y += t.metrics.row_height;
 
-    // Two to a row, so the four fit under the properties without the section running off the
-    // bottom of a short window.
+    // Two to a row, so the section does not run wider than the panel it is in. The cells are
+    // **one row high, not two**: a section of two-row cells pushed the last button of Actions off
+    // the bottom of a short window, and the overflow guard then dropped it silently — which is how
+    // a Delete button came to be invisible on the default 1536x1024 window. Dropping it is the
+    // right thing to do when it genuinely will not fit; it is the wrong thing to do because the
+    // buttons were drawn twice as tall as they needed to be.
+    let columns = 2;
     let cell = egui::vec2(
-        (rect.width() - s.window_inset * 2.0 - s.item_gap) / 2.0,
-        t.metrics.row_height * 2.0,
+        (rect.width() - s.window_inset * 2.0 - s.item_gap * (columns - 1) as f32) / columns as f32,
+        t.metrics.row_height,
     );
-    for (i, name) in panel::ARRANGE_ROWS.iter().enumerate() {
+    for (i, name) in labels.iter().enumerate() {
         let at = egui::pos2(
-            rect.left() + s.window_inset + (i % 2) as f32 * (cell.x + s.item_gap),
-            *y + (i / 2) as f32 * (cell.y + s.item_gap),
+            rect.left() + s.window_inset + (i % columns) as f32 * (cell.x + s.item_gap),
+            *y + (i / columns) as f32 * (cell.y + s.item_gap),
         );
         let button = egui::Rect::from_min_size(at, cell);
         if button.bottom() > rect.bottom() {
@@ -1162,8 +1220,21 @@ fn arrange_section(
             t.text,
         );
         if hovered(ui, button) && ui.ctx().input(|i| i.pointer.any_released()) {
-            *clicked_do = panel::arrange_of(i);
+            *clicked_do = verb_of(i, title);
         }
+    }
+}
+
+/// Which verb a button of a titled section carries.
+///
+/// The title is what ties a label to its mapping, and it is the reason the two lists are looked
+/// up by name rather than by position: a section that shifted its buttons by one would otherwise
+/// move the wrong object in the z-order.
+fn verb_of(row: usize, title: &str) -> Option<panel::Do> {
+    match title {
+        "Arrange" => panel::arrange_of(row),
+        "Actions" => panel::action_of(row),
+        _ => None,
     }
 }
 

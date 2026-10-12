@@ -264,6 +264,21 @@ impl Change {
         )
     }
 
+    /// Rotate the object about its own centre by `degrees`.
+    ///
+    /// About a point, not the origin — a rotation about the origin sweeps the object round the
+    /// page, which is the last thing a user who clicked "rotate 90°" wanted. The centre comes from
+    /// the caller because that is where the object's box is, and a diagonal flip is the same
+    /// variant with the matrix the flip needs.
+    #[must_use]
+    pub fn rotate_about(cx: f64, cy: f64, degrees: f64) -> Self {
+        Self::Transform(
+            Matrix::translate(cx, cy)
+                .concat(Matrix::rotate(degrees))
+                .concat(Matrix::translate(-cx, -cy)),
+        )
+    }
+
     /// Change the fill colour.
     #[must_use]
     pub fn recolour(colour: Rgba) -> Self {
@@ -1246,6 +1261,22 @@ mod tests {
         clippy::indexing_slicing,
         clippy::single_range_in_vec_init
     )]
+
+    #[test]
+    fn rotating_about_a_point_leaves_that_point_where_it_was() {
+        // A rotation about (10, 20) must not move (10, 20): that is the whole of "about a point".
+        let m = Change::rotate_about(10.0, 20.0, 90.0)
+            .matrix()
+            .expect("a rotation is a transform");
+        let (x, y) = m.apply(10.0, 20.0);
+        assert!((x - 10.0).abs() < 1e-9, "x was {x}");
+        assert!((y - 20.0).abs() < 1e-9, "y was {y}");
+        // And a quarter turn about it takes (11, 20) to (10, 21) — a quarter turn
+        // counter-clockwise, which is the direction the specification's matrix names.
+        let (x, y) = m.apply(11.0, 20.0);
+        assert!((x - 10.0).abs() < 1e-9, "x was {x}");
+        assert!((y - 21.0).abs() < 1e-9, "y was {y}");
+    }
 
     use std::sync::Arc;
 

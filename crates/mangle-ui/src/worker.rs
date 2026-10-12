@@ -83,6 +83,17 @@ pub enum EditRequest {
     },
     /// Remove it.
     Delete,
+    /// Turn it about the given point, in degrees counter-clockwise.
+    ///
+    /// The point is decided by the window, which is the only side that knows the object's box in
+    /// page space — the arithmetic of "about its own centre" needs that box, and a worker that
+    /// was handed a rotation with no centre would have to look one up.
+    Rotate {
+        /// How far, in degrees counter-clockwise.
+        degrees: f64,
+        /// The centre to turn about, in page space.
+        about: (f64, f64),
+    },
     /// Set one text property of a run of glyphs, to this value.
     ///
     /// The absolute value is what makes this one edit: a stepper nudges a number it read out of
@@ -258,6 +269,9 @@ impl Worker {
         let change = match request {
             EditRequest::Move { dx, dy } => mangle_edit::Change::move_by(*dx, *dy),
             EditRequest::Delete => mangle_edit::Change::Delete,
+            EditRequest::Rotate { degrees, about } => {
+                mangle_edit::Change::rotate_about(about.0, about.1, *degrees)
+            }
             EditRequest::Text(property) => mangle_edit::Change::Text(*property),
         };
         if let Err(e) = editor.apply(object, &change) {
@@ -887,6 +901,85 @@ mod tests {
             after.len(),
             before.len(),
             "an arrange moves bytes, it does not remove anything"
+        );
+    }
+
+    /// A rotation and a delete both reach the file, on a page nobody has edited.
+    ///
+    /// Same shape as the stepper and arrange checks: the values are the ones the panel computes,
+    /// and what is asserted is that the page comes back without the object, or with it turned.
+    /// The order of the operators is `mangle-edit`'s own business and is asserted there.
+    #[test]
+    fn a_rotation_and_a_delete_reach_the_file() {
+        let path = PathBuf::from("../../corpus/wild/gov__nist-sp800-88.pdf");
+        if !path.exists() {
+            eprintln!("skipped: the corpus file is not fetched");
+            return;
+        }
+        let supervisor = Supervisor::start();
+        supervisor.ask(Job::Open(path));
+        let before = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => Some(objects),
+                _ => None,
+            })
+            .expect("a page");
+        let Some(last) = before.len().checked_sub(1) else {
+            panic!("the page has something on it");
+        };
+        let Some(bounds) = before.get(last).map(|o| o.bounds) else {
+            panic!("the page has an object at {last}");
+        };
+        // About the object's own centre, in page space — the same arithmetic the panel does,
+        // which is the point: this checks the join, not a second opinion about where the middle
+        // of a box is.
+        let about = (
+            f64::midpoint(bounds.x0, bounds.x1),
+            f64::midpoint(bounds.y0, bounds.y1),
+        );
+
+        supervisor.ask(Job::Edit {
+            page: 0,
+            object: last,
+            request: EditRequest::Rotate {
+                degrees: 90.0,
+                about,
+            },
+        });
+        let mut turned = None;
+        for result in collect(&supervisor, 4) {
+            match result {
+                JobResult::Page { objects, .. } => turned = Some(objects),
+                JobResult::Failed { reason } => panic!("the rotation failed: {reason}"),
+                _ => {}
+            }
+        }
+        let turned = turned.expect("the page came back");
+        assert_eq!(
+            turned.len(),
+            before.len(),
+            "a rotation turns an object, it does not remove one"
+        );
+
+        // And the delete takes it away, which is the one edit with an obvious result.
+        supervisor.ask(Job::Edit {
+            page: 0,
+            object: last,
+            request: EditRequest::Delete,
+        });
+        let mut after = None;
+        for result in collect(&supervisor, 4) {
+            match result {
+                JobResult::Page { objects, .. } => after = Some(objects),
+                JobResult::Failed { reason } => panic!("the delete failed: {reason}"),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            after.expect("the page came back").len(),
+            before.len() - 1,
+            "the deleted object is gone"
         );
     }
 

@@ -47,12 +47,20 @@ pub enum PanelRow {
 
 /// What a panel control does when it is clicked.
 ///
-/// A verb rather than a value: there is no number to read out and none to nudge, and drawing an
-/// arrange as though it were a stepper would be a control that looks editable and is not.
+/// A verb rather than a value: there is no number to read out and none to nudge, and drawing a
+/// delete as though it were a stepper would be a control that looks editable and is not.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Do {
     /// Move the selected object in the z-order.
     Arrange(mangle_edit::Arrange),
+    /// Take the selected object out of the stream.
+    Delete,
+    /// Turn the selected object about its own centre.
+    Rotate {
+        /// Which way, in degrees: a positive number is counter-clockwise, as the
+        /// specification's rotation matrix has it.
+        degrees: f64,
+    },
 }
 
 /// The labels of the Arrange section's buttons, in the order the mockup draws them.
@@ -66,6 +74,14 @@ pub const ARRANGE_ROWS: [&str; 4] = [
     "Send Backward",
     "Send to Back",
 ];
+
+/// The labels of the Actions section's buttons, in the order the mockup draws them.
+///
+/// Beside [`action_of`], which says what each one does: a label added here without a verb there
+/// would be a button that silently did nothing. **Rotate and Delete are here; Replace is not**,
+/// because replacing an image needs a file dialog and a new XObject, and a button that opened
+/// nothing would be worse than one that was never drawn.
+pub const ACTION_ROWS: [&str; 3] = ["Rotate -90\u{b0}", "Rotate 90\u{b0}", "Delete"];
 
 /// The names of the rows, in the order the mockup draws them.
 ///
@@ -179,7 +195,23 @@ pub fn arrange_of(row: usize) -> Option<Do> {
     }))
 }
 
-/// What one click of a stepper asks the worker to write./// What one click of a stepper asks the worker to write.
+/// What button `row` of the Actions section does.
+///
+/// Two rotations, ninety degrees either way, and a delete. A quarter turn each way rather than a
+/// dial: a rotation is an edit like any other, and the two directions cover what a user does with
+/// a scanned page or an upside-down figure. **Replace is absent**, because it needs a file dialog
+/// and a new XObject rather than an operator.
+#[must_use]
+pub fn action_of(row: usize) -> Option<Do> {
+    Some(match row {
+        0 => Do::Rotate { degrees: -90.0 },
+        1 => Do::Rotate { degrees: 90.0 },
+        2 => Do::Delete,
+        _ => return None,
+    })
+}
+
+/// What one click of a stepper asks the worker to write./// What one click of a stepper asks the worker to write./// What one click of a stepper asks the worker to write.
 ///
 /// `property` carries the value the object has *now*, and `by` is the click's direction and size —
 /// so this is the whole of "nudge the size by one point", read as two plain values rather than as
@@ -482,7 +514,33 @@ mod tests {
         assert_eq!(arrange_of(ways.len()), None);
     }
 
-    /// A number that came back to nothing reads as zero, not as a minus sign.
+    /// Every action label has a verb, and each does what it says.
+    ///
+    /// Two rotations either way and a delete. The pair is deliberate: a quarter turn each way
+    /// covers what a user does with an upside-down figure or a scanned page, and a single
+    /// direction would leave them to click it three times.
+    #[test]
+    fn every_action_label_has_a_verb() {
+        let verbs = [
+            Do::Rotate { degrees: -90.0 },
+            Do::Rotate { degrees: 90.0 },
+            Do::Delete,
+        ];
+        assert_eq!(
+            ACTION_ROWS.len(),
+            verbs.len(),
+            "every label has a verb, and every verb a label"
+        );
+        for (row, verb) in verbs.iter().enumerate() {
+            let Some(label) = ACTION_ROWS.get(row) else {
+                panic!("{verbs:?} has more verbs than ACTION_ROWS has labels");
+            };
+            assert_eq!(action_of(row), Some(*verb), "{label} should carry {verb:?}");
+        }
+        assert_eq!(action_of(verbs.len()), None, "and nothing past the end");
+    }
+
+    /// A number that came back to nothing reads as zero, not as a minus sign.    /// A number that came back to nothing reads as zero, not as a minus sign.
     #[test]
     fn a_number_that_is_nothing_reads_as_zero() {
         assert_eq!(number(0.0), "0");
