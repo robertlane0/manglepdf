@@ -185,7 +185,24 @@ wired-up path is then checked through the worker against real pages of the Tier-
 - **Every historical crash gets a regression test** in `tests/regressions/`, and the
   mutation fuzzer must not rediscover it.
 
-## Running everything
+## Memory, and why the runs are bounded
+
+This project is developed on a machine with less memory than a full parallel build wants, and an
+out-of-memory kill takes the agent with it — so every command here is bounded, and bounding them is
+not a concession it is the only way the work survives.
+
+- **The GUI binary holds a few hundred megabytes while it is open.** It is killed the moment a
+  screenshot has been taken, not left running while something else builds.
+- **Builds run under a virtual-memory limit and one job at a time.** `ulimit -v` plus
+  `CARGO_BUILD_JOBS=1` turns an OOM kill into a compile error, which is a failure that says so
+  instead of one that kills the session. `cargo clean` between gate runs is not needed and is not
+  done.
+- **The gate is run detached**, in its own session, so a long run cannot be cut in half by a tool
+  timeout: `setsid nohup bash -c 'ulimit -v …; CARGO_BUILD_JOBS=2 cargo xtask policy' > log &`.
+  Cargo releases the target-directory lock when compilation finishes, so clippy and the ordinary
+  test suite can run alongside a gate run rather than queueing behind it.
+
+## Running everything## Running everything
 
 ```sh
 cargo test --workspace            # unit and round trip
