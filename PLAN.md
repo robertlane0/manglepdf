@@ -1237,6 +1237,14 @@ picture opens Colour, nothing selected goes back to Document Properties. Setting
 directly — as the pointer handler did — left the panel on "Document Properties" while a box was
 drawn around a run of text, so the numbers were there and unreachable.
 
+**The bottom bar has the two controls a viewer is expected to have.** Zoom − / 100% / + and
+page ‹ 1 of N ›. `set_zoom` already threw the pixels away and re-asked for every page — a buffer
+drawn at twice its width is a blurry buffer at any zoom but the one it was made for — so the zoom
+buttons only had to exist. `goto_page` is new and does the same for navigation: it asks the worker
+for the page rather than hoping the window already has it, drops the selection (the indices were the
+old page's, so keeping one would point at whatever happens to be at the same number), and ignores a
+navigate past the end rather than clamping — "next page" on the last page is not "stay here".
+
 **The canvas answers for the page and for nothing else.** A click on a stepper in the right-hand
 panel used to arrive at `pointer()` first, miss the paper, and take the selection away: the panel
 redrew itself with nothing selected, its controls were never drawn, and the click meant to nudge a

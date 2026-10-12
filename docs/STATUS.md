@@ -309,7 +309,12 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   works as the first thing asked of a page. Align, Distribute, Group, Ungroup and Replace are not
   drawn at all, because they have no edit behind them and a button that pretends is worse than a
   gap.
+- **The bottom bar has the two controls a viewer is expected to have.** Zoom − / 100% / + and
+  page ‹ 1 of N ›, both wired to the worker: a page navigated to is asked for rather than hoped
+  for, and a zoom throws the pixels away and re-draws them sharp. A navigate past the end is
+  ignored rather than clamped, because "next page" on the last page is not "stay here".
 - **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
+
 - **Docs** — architecture, status, development, testing, PDF quirks, dependencies,
   icons, and the decision records.
 

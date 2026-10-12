@@ -177,6 +177,21 @@ pub struct App {
     drag: Option<Drag>,
 }
 
+/// What the bottom bar was asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bar {
+    /// The page before this one.
+    Previous,
+    /// The page after this one.
+    Next,
+    /// Zoom out by a step.
+    ZoomOut,
+    /// Zoom in by a step.
+    ZoomIn,
+    /// Back to one hundred per cent.
+    ZoomReset,
+}
+
 /// A drag in progress: where the pointer went down, and what it grabbed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Drag {
@@ -251,6 +266,27 @@ impl App {
         for i in 0..self.state.page_count {
             self.worker.ask(Job::Page(i, f64::from(self.state.zoom)));
         }
+    }
+
+    /// Show the page at `index`, asking the worker to draw it.
+    ///
+    /// A page the window has not drawn is asked for rather than skipped to: `page_index` is the
+    /// page the user is on, and the only thing that makes it more than a number is that the
+    /// worker has been asked for that page's pixels. Navigating past the end is ignored rather
+    /// than clamped to it, because "next page" on the last page is not "stay here" — it is
+    /// nothing, and a viewer that silently stayed would look broken.
+    pub fn goto_page(&mut self, index: usize) {
+        if index >= self.state.page_count {
+            return;
+        }
+        if index == self.state.page_index {
+            return;
+        }
+        self.state.page_index = index;
+        // The selection is this page's, so it goes with the page.
+        self.select(None);
+        self.worker
+            .ask(Job::Page(index, f64::from(self.state.zoom)));
     }
 
     /// Take whatever the worker has sent.
@@ -1078,13 +1114,83 @@ impl App {
             t.type_scale.font_id(Size::Caption),
             t.text_muted,
         );
-        p.text(
-            rect.right_center() + egui::vec2(-s.window_inset, 0.0),
-            egui::Align2::RIGHT_CENTER,
-            format!("{:.0}%", self.state.zoom * 100.0),
-            t.type_scale.font_id(Size::Caption),
-            t.text_muted,
-        );
+        // Page navigation on the left, zoom on the right, as every viewer has them. The two are
+        // separate controls over separate state, and the clicks are collected and applied after
+        // the drawing for the same reason the panel's are: the borrow of the state that draws them
+        // is still live while they are being drawn.
+        let small = t.type_scale.font_id(Size::Caption);
+        let step = (rect.height() * 0.6).max(16.0);
+        let mut click: Option<Bar> = None;
+
+        // ‹ n of N › — the page selector, which is the pair a user looks for first.
+        let pages = rect.left_center() + egui::vec2(180.0, 0.0);
+        for (i, (label, which)) in [("<", Bar::Previous), (">", Bar::Next)]
+            .into_iter()
+            .enumerate()
+        {
+            let cell = egui::Rect::from_center_size(
+                pages + egui::vec2((i as f32) * (step + s.item_gap), 0.0),
+                egui::vec2(step, step),
+            );
+            p.rect_filled(cell, s.field_radius, t.panel);
+            p.text(
+                cell.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                small.clone(),
+                t.text_muted,
+            );
+            if hovered(_ui, cell) && _ui.ctx().input(|i| i.pointer.any_released()) {
+                click = Some(which);
+            }
+        }
+
+        // zoom - 100% +, which is the other pair and lives on the other side.
+        let zoom = rect.right_center() + egui::vec2(-110.0, 0.0);
+        for (i, (label, which)) in [
+            ("-", Bar::ZoomOut),
+            (&*format!("{:.0}%", self.state.zoom * 100.0), Bar::ZoomReset),
+            ("+", Bar::ZoomIn),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let cell = egui::Rect::from_center_size(
+                zoom + egui::vec2((i as f32 - 1.0) * 44.0, 0.0),
+                egui::vec2(if i == 1 { 40.0 } else { step }, step),
+            );
+            p.rect_filled(cell, s.field_radius, t.panel);
+            p.text(
+                cell.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                small.clone(),
+                if i == 1 { t.text } else { t.text_muted },
+            );
+            if hovered(_ui, cell) && _ui.ctx().input(|i| i.pointer.any_released()) {
+                click = Some(which);
+            }
+        }
+
+        if let Some(what) = click {
+            self.bar(what);
+        }
+    }
+
+    /// Do what the bottom bar asked.
+    ///
+    /// The page and the zoom are two separate controls over two separate pieces of state, and a
+    /// page the user has navigated to is asked for rather than drawn from a buffer it happens to
+    /// have: `set_zoom` throws the pixels away and re-asks for every page, because a buffer drawn
+    /// at twice its width is a blurry buffer at any zoom but the one it was made for.
+    fn bar(&mut self, what: Bar) {
+        match what {
+            Bar::Previous => self.goto_page(self.state.page_index.saturating_sub(1)),
+            Bar::Next => self.goto_page(self.state.page_index + 1),
+            Bar::ZoomOut => self.set_zoom(self.state.zoom / 1.25),
+            Bar::ZoomIn => self.set_zoom(self.state.zoom * 1.25),
+            Bar::ZoomReset => self.set_zoom(1.0),
+        }
     }
 
     fn thumbnails(&mut self, ui: &egui::Ui, p: &Painter, t: &Theme, screen: egui::Rect) {
