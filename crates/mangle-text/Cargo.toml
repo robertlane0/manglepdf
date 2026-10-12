@@ -20,5 +20,9 @@ mangle-doc.workspace = true
 mangle-font.workspace = true
 mangle-content.workspace = true
 
+[dev-dependencies]
+mangle-doc.workspace = true
+mangle-font.workspace = true
+
 [lints]
 workspace = true

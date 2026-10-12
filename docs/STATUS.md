@@ -313,7 +313,14 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   page ‹ 1 of N ›, both wired to the worker: a page navigated to is asked for rather than hoped
   for, and a zoom throws the pixels away and re-draws them sharp. A navigate past the end is
   ignored rather than clamped, because "next page" on the last page is not "stay here".
+- **Text extraction works.** `mangle-text` was a doc comment; it now decodes a page's runs to
+  text. 47 of the NIST publication's 48 glyph runs read, and the joined text comes out as English
+  with its lines. This is the layer search, copy, the panel's content field and the redaction leak
+  scan all rest on. What real pages taught it: the size in the `Tf` is not the size the reader sees
+  when a file scales its glyphs with a text matrix, and a `Tj` names no space, so word breaks come
+  from the geometry rather than from the bytes.
 - **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
+
 
 - **Docs** — architecture, status, development, testing, PDF quirks, dependencies,
   icons, and the decision records.

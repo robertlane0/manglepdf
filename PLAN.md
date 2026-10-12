@@ -1245,6 +1245,28 @@ for the page rather than hoping the window already has it, drops the selection (
 old page's, so keeping one would point at whatever happens to be at the same number), and ignores a
 navigate past the end rather than clamping — "next page" on the last page is not "stay here".
 
+**Text extraction is built, in the crate that was always meant to hold it.** `mangle-text` was a
+doc comment and nothing else; it now reads a run's bytes as text. The path is the one the
+specification describes — codes, an encoding, a glyph list — and every step of it was already there
+in the font layer. 47 of the NIST page's 48 glyph runs decode, and the joined text reads as English.
+
+Two things only real pages showed, and both are worth writing down.
+
+**The size in the `Tf` is not the size the reader sees.** A design export sets its glyphs at one
+point and stretches them with a text matrix, so the stream says `1` while the glyphs are eleven
+points tall. A gap measured against the stream's number is a gap measured against nothing: the
+threshold came out at a quarter of a point and *every* space in the page looked like a word break.
+The caller has the text matrix, so the caller computes the size — and that is a fact about the file
+that a fixture did not have and a unit test would not have found.
+
+**A `Tj` names no space.** Joining runs with nothing gives `NISTSpecialPublication800-88` and
+joining them all with a space gives `NIS T Special`; both are wrong. The separator comes from the
+geometry — a new baseline is a newline, and a gap of a quarter of the type size on the same
+baseline is a space. It is a threshold and it is stated as one: a page that sets its words a hair
+apart comes out joined, and a page that kerns its letters far apart comes out with spaces inside
+words. The test asserts the *property* (words are separated, lines are separated) rather than a
+quoted phrase, because asserting the phrase would be asserting the heuristic is perfect.
+
 **The canvas answers for the page and for nothing else.** A click on a stepper in the right-hand
 panel used to arrive at `pointer()` first, miss the paper, and take the selection away: the panel
 redrew itself with nothing selected, its controls were never drawn, and the click meant to nudge a
