@@ -207,3 +207,96 @@ impl Placed {
         }
     }
 }
+
+// ---- search ----
+
+/// Where a needle was found, as character offsets into the text that was searched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    /// Where the match starts, in characters from the beginning.
+    pub start: usize,
+    /// Where it ends, exclusive.
+    pub end: usize,
+}
+
+/// Every occurrence of `needle` in `haystack`, compared without regard to case.
+///
+/// Case-insensitive because a user who types "beautiful" means it whatever case the page happens
+/// to have set it in — a title in small caps, a heading in caps — and a search that found nothing
+/// for a word that is plainly on the page would be a search that lied about what was there.
+///
+/// The offsets are **bytes**, because that is what slicing a Rust string needs, and a hit that
+/// could not be sliced back out of the text it was found in would be a hit nobody could show.
+///
+/// Matches may not overlap, and an empty needle finds nothing: every position in a string "matches"
+/// an empty needle, which is an answer that tells a user nothing and would fill a hit list with
+/// the whole page.
+#[must_use]
+pub fn find(haystack: &str, needle: &str) -> Vec<Hit> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    // Lowercased once each rather than per comparison. `char::to_lowercase` can yield more than
+    // one character, so the lowercased text is *not* the same length as the original and a plain
+    // index into it is not a byte offset. Each output character therefore carries the byte offset
+    // in the original where its source began, which is what makes the hit sliceable.
+    let mut text: Vec<char> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
+    for (at, c) in haystack.char_indices() {
+        for lower in c.to_lowercase() {
+            text.push(lower);
+            starts.push(at);
+        }
+    }
+    let want: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    // The window is taken with `get` and the `else` breaks, rather than indexed: this crate denies
+    // indexing, and a search that could panic would be a search that could take the window down
+    // with a page open. The loop condition is what stops it, so the `else` is the guard and not a
+    // second way to say the same thing.
+    // The window is taken with `get` rather than indexed: this crate denies indexing, and a search
+    // that could panic would be a search that could take the window down with a page open.
+    while let Some(window) = text.get(at..at + want.len()) {
+        if window != want.as_slice() {
+            at += 1;
+            continue;
+        }
+        let Some(start) = starts.get(at).copied() else {
+            break;
+        };
+        // The byte offset the character *after* the match began, or the end of the text.
+        let end = starts
+            .get(at + want.len())
+            .copied()
+            .unwrap_or(haystack.len());
+        out.push(Hit { start, end });
+        at += want.len();
+    }
+    out
+}
+
+/// Which object each hit falls in, given the text of each object in order.
+///
+/// A hit is attributed to the object it *starts* in, which is the one a user would point at. A
+/// phrase that runs from the end of one object into the next is still found — it is matched
+/// against the joined text — and is shown against the object where it begins.
+#[must_use]
+pub fn locate(texts: &[String], hits: &[Hit]) -> Vec<(usize, Hit)> {
+    let mut out = Vec::with_capacity(hits.len());
+    for hit in hits {
+        // The running offset is per hit, not per call: it has to start at the beginning of the
+        // first object every time, or the second hit on a page would be measured from wherever
+        // the first one ended and every hit after the first would land in the wrong object.
+        let mut at = 0usize;
+        for (object, text) in texts.iter().enumerate() {
+            let end = at + text.len();
+            if hit.start >= at && hit.start < end {
+                out.push((object, *hit));
+                break;
+            }
+            at = end;
+        }
+    }
+    out
+}

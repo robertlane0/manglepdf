@@ -1277,6 +1277,23 @@ broken one — and the limit is a named constant rather than a `48` buried in a 
 on a summary is geometry the object already carries; a signature that asked for a document to fill
 in a box would have been a signature that lied about what it reads.
 
+**Search exists, over the text extraction just made possible.** `find` takes the joined page text
+and a needle, and compares case-insensitively because a user who types "beautiful" means it
+whatever case the page set it in. The offsets are **bytes**, not characters — because that is what
+slicing a Rust string needs, and a hit that cannot be sliced back out of the text it was found in
+is a hit nobody can show. `char::to_lowercase` can yield more than one character, so the lowercased
+text is not the same length as the original; each output character therefore carries the byte offset
+its source began at, which is what makes the hit sliceable at all.
+
+**Three of FINISH.md's four named search cases work, and the fourth is recorded as missing.** Case
+works. A ligature works — but only because the decoder turned the `fi` glyph into one character, so
+searching the raw bytes for five letters finds nothing and searching the text finds it; normalising
+the ligature to its letters is a step that belongs before the search and is spelled out in the test
+rather than hidden. A **hyphenated word across a line break does not work**: `sani-
+tization` does
+not contain `sanitization`, and each half is findable but not the whole. The test states that as a
+failure rather than hiding it, so the gap is a known one.
+
 **The canvas answers for the page and for nothing else.** A click on a stepper in the right-hand
 panel used to arrive at `pointer()` first, miss the paper, and take the selection away: the panel
 redrew itself with nothing selected, its controls were never drawn, and the click meant to nudge a

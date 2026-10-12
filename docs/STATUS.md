@@ -323,7 +323,13 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   it says, read by the same decoder and joiner the page's text goes through — so the panel and a
   search over the page agree by construction. On the NIST page a click on "Publication Date(s):
   September 2006" shows exactly that in the Content row.
+- **Search exists over the extracted text.** Case-insensitive, with byte offsets so a hit slices
+  back out of the text it was found in, and a hit is attributed to the object it starts in. Of
+  FINISH.md S0.4's four named cases: case-insensitivity works, a ligature word works (because the
+  decoder makes the ligature a character), a hyphenated word across a line break does **not** work
+  and is recorded as a known gap rather than papered over.
 - **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
+
 
 
 
