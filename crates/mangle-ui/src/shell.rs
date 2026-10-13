@@ -312,6 +312,13 @@ impl App {
             v.visuals.widgets.inactive.weak_bg_fill = theme.panel;
             v.visuals.widgets.hovered.weak_bg_fill = theme.hover;
             v.visuals.widgets.active.weak_bg_fill = theme.hover;
+            // And the background a `TextEdit` itself paints is a *fourth* token, and the hardest
+            // to find of the set: `Visuals::text_edit_bg_color`, which is `None` by default and
+            // falls back to `extreme_bg_color` — egui's "black" slot. Neither `bg_fill`,
+            // `weak_bg_fill` nor `panel_fill` has any effect on it, so a field left to its default
+            // paints a solid black rectangle into the middle of a pale title bar and reads as a
+            // rendering crash rather than as a missing token.
+            v.visuals.text_edit_bg_color = Some(theme.panel);
             // A panel and a window are filled from their own token rather than a widget's, and
             // the search field lives in an `Area` — which is a panel. Left at egui's default
             // that is dark, and the field paints a black band down the left of the title bar.

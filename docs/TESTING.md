@@ -202,7 +202,7 @@ not a concession it is the only way the work survives.
   Cargo releases the target-directory lock when compilation finishes, so clippy and the ordinary
   test suite can run alongside a gate run rather than queueing behind it.
 
-## Running everything## Running everything
+## Running everything
 
 ```sh
 cargo test --workspace            # unit and round trip

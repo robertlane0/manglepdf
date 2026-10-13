@@ -26,7 +26,8 @@ part no lint can do.
 
 ## The set
 
-122 icons, drawn to one grid and one stroke weight. `cargo xtask icons gallery` writes a
+129 icons, drawn to one grid and one stroke weight — including the seven tool-tab icons
+(`tab-view`, `tab-edit`, `tab-annotate`, `tab-page`, `tab-form`, `tab-protect`, `tab-more`). `cargo xtask icons gallery` writes a
 contact sheet to `target/xtask/icon-gallery.html`; reviewing them there, as a set, is
 the part no lint can do.
 
@@ -68,5 +69,19 @@ line-spacing, character-spacing, baseline-shift, font-size
 panel-arrange, panel-organize, menu, close, undo, redo, delete, duplicate, settings,
 help, warning, info
 
+**Tool tabs** — tab-view, tab-edit, tab-annotate, tab-page, tab-form, tab-protect,
+tab-more (the seven tabs of the tool-tab row in GOAL §8.2)
+
 The set is reviewed as a set. Adding one icon means drawing the others again if it does
 not belong, which is the point.
+
+## Rendering
+
+Icons are drawn by the in-house SVG-subset renderer in `mangle-render::svg` (GOAL §8.7):
+the icon's shapes become edges and coverage through the same rasterizer a page's paths
+use, and strokes come from the same `stroke_outline` the page uses, so an icon and a
+page cannot disagree about what a line is. The subset is what the set is written in
+(`path`, `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, one colour), and
+anything outside it is a refusal naming the file rather than a best effort. A test
+renders every icon in `assets/icons/` at 16/20/24/32 px and fails on one that is
+refused or blank.

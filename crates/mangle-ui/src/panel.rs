@@ -224,7 +224,7 @@ pub fn action_of(row: usize) -> Option<Do> {
     })
 }
 
-/// What one click of a stepper asks the worker to write./// What one click of a stepper asks the worker to write./// What one click of a stepper asks the worker to write.
+/// What one click of a stepper asks the worker to write.
 ///
 /// `property` carries the value the object has *now*, and `by` is the click's direction and size —
 /// so this is the whole of "nudge the size by one point", read as two plain values rather than as
@@ -290,7 +290,8 @@ pub fn clamped(text: &str, limit: usize) -> String {
     out
 }
 
-/// A number as a panel shows it: two places at most, and never a negative zero.///
+/// A number as a panel shows it: two places at most, and never a negative zero.
+///
 /// Two places, because a character spacing of 0.03 is a value a file really has and "0.03" is
 /// what the operator says; and never `-0`, because a stepper that has been nudged back to nothing
 /// reads as a mistake rather than as a zero.
@@ -600,7 +601,6 @@ mod tests {
     }
 
     /// A number that came back to nothing reads as zero, not as a minus sign.
-    /// A number that came back to nothing reads as zero, not as a minus sign.    /// A number that came back to nothing reads as zero, not as a minus sign.
     #[test]
     fn a_number_that_is_nothing_reads_as_zero() {
         assert_eq!(number(0.0), "0");

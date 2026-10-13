@@ -47,10 +47,12 @@ pub mod fill;
 pub mod image;
 pub mod page;
 pub mod shading;
+pub mod svg;
 
 pub use compare::{Comparison, SsimOptions, compare, ssim};
 pub use coverage::{Coverage, Edge, FillRule, Rect, bounds, footprint, rasterise};
 pub use page::{MAX_SCALE, PageRender, Placement, RenderOptions, effective_scale, render_page};
+pub use svg::{Icon, parse as parse_svg, rasterise as rasterise_svg};
 
 use mangle_content::PathSegment;
 

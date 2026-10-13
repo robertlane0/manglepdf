@@ -673,7 +673,7 @@ turns the first surprise into a permanent red build.
 The measurements and their evidence are in `docs/known-diffs.md`, which records the latest full
 77-file run (**740 pages compared, page median SSIM 0.96020, 164 pages below 0.95**, 73 files
 opened, 4 closed, 16642.40s, 0 panicked) and, entry by entry, what each fix since has moved.
-That run is the first after D30, so it is the first to measure the ICC-header fix against the
+That run is the first after D32, so it is the first to measure the ICC-header fix against the
 oracle across the whole corpus rather than one file at a time; the corpus-wide figures barely
 moved for it, because it closed one page that was not its file's worst. It was also the first to
 compare all **352** pages of `pdfjs__freeculture.pdf`, which is where the move from 738 pages to
@@ -743,20 +743,20 @@ The last full run measured 738 pages with an SSIM and **167 below 0.95**. Of tho
   of one or two pages across a dozen files.
 * **And one page was a genuine missing feature** (`fips197` p1: an `ICCBased` profile carrying no
   `/Alternate`, which D19's route cannot read). **That page is now fixed**
-  ([D30](docs/known-diffs.md)): a profile names the space its components are in at bytes 16–20 of
+  ([D32](docs/known-diffs.md)): a profile names the space its components are in at bytes 16–20 of
   its own header, so a file that omits `/Alternate` has not declined to say — it has said it
   somewhere else. `fips197` page 1 went **0.7564 → 0.9932** and carries no note, and
   `pdfjs__issue10529.pdf` page 1 went **0.9886 → 0.9973** from the same fix. The compressed case is
   the one to remember: `fips197` stores both profiles behind a `/FlateDecode`, so the header is
   behind the filter.
 
-**So the addressable remainder is about 102 pages, four files hold 70 of them, and — after D30 —
+**So the addressable remainder is about 102 pages, four files hold 70 of them, and — after D32 —
 the largest genuinely missing feature left is no longer a colour space.** The re-runs this section
 asked for have been done: the page median went 0.95795 → 0.96020 and the pages below 0.95 went
 254 (34.4%) → 164 (22.2%), a **35% reduction** — **concentrated in a few files rather than spread
 evenly**, with `gov__nist-sp800-88.pdf` alone accounting for 34 of the 90 pages that came back over
 the 0.95 line. **The per-file median moved only 0.9698 → 0.97375** and then stopped moving, because
-a file is scored on its worst page and D30 closed a page that was not one. All three parts of
+a file is scored on its worst page and D32 closed a page that was not one. All three parts of
 Gate 3.1 remain missed, and none is met: per-page ≥ 0.95 (**164 of 740**), median ≥ 0.985
 (**0.96020**, 0.025 short), and ≤ 3% below 0.95 (**22.2%** against a 3% bound, a factor of 7.5).
 
@@ -777,13 +777,13 @@ unembedded font: D6's subject, and this project's stated policy ([D21](docs/know
 **The one genuine missing feature anyone looked for in the corpus is closed.**
 `gov__nist-fips197.pdf` page 1 was drawn entirely in `[/ICCBased …]` spaces whose profiles carry
 **no `/Alternate`** — `/Alternate` occurs zero times in the file — so D19's route had nothing to
-read and 387 of the page's 397 marks were refused. **D30 closed it without writing an ICC
+read and 387 of the page's 397 marks were refused. **D32 closed it without writing an ICC
 transform at all**, which is the useful part: the premise was wrong. A profile states the space its
 components are in at bytes 16–20 of its own header, so this file had said what its components are
 and the code was looking in the one place a producer may omit. Page 1 went **0.7564 → 0.9932**, the
 file's worst page moved 0.7564 → 0.8432, and the file's count below 0.95 fell 25 → 24 — a small
 number for a whole page, because 24 of the 25 were font substitution and stay
-([D30](docs/known-diffs.md), [D24](docs/known-diffs.md)).
+([D32](docs/known-diffs.md), [D24](docs/known-diffs.md)).
 
 **What this changes about the queue is worth stating plainly: no ICC transform is needed, and
 nothing in the corpus is now waiting on one.** The remaining shortfall is the JPX codec
@@ -1118,80 +1118,6 @@ object count was unchanged would have failed a correct edit, so the text propert
 matching the run **by its string** and reading the value back out of the interpreter, and the
 grouping is left to be what it is.
 
-## The page whose bytes mean what follows them
-
-Fixing the inline-image provenance span (B10) exposed something underneath it (B9), and the pair is
-worth writing down together.
-
-`pdfjs__TAMReview.pdf` page 1 has an inline image whose dictionary is
-`/CS [/I/RGB 3 <ECEBEBEC…>]/I true/W 161…`. Our tokeniser reads inline-image entries as key/value
-pairs, and that one is not one — so it fell back to *"`BI` is an ordinary operator"*, which left
-the `BI` with **no data at all** and the image's data read as ordinary content. Two things follow:
-
-- The `BI` operator's span ran to the end of the *following* token, so it covered bytes that were
-  not its own. An edit over it would have replaced another operator's number. Fixed: an operator's
-  span is its own bytes, and a corpus test now asserts that **a span never splits a token** — it
-  must start where a token starts and end where one ends. 1873 spans, all checked.
-- **The page is one where what a byte means depends on what follows it.** Inserting anything beside
-  that `BI` changes how the bytes after it tokenise, and both the change path and the arrange path
-  produced an *unbalanced stream*. This is not fixable by better tokenising: the file is damaged in
-  a way no reader can repair without guessing. So both paths now refuse, by name, with a message
-  that says why and what would make the page editable. On `TAMReview` page 1 that is all 36
-  objects.
-
-The lesson: **the span fix was right and it was not enough.** Making the bytes honest exposed that
-the *page* was not, and the balance assertion was the only thing standing between that and a
-corrupted save. Which is the argument for keeping a `debug_assert` on the invariant rather than
-trusting the code that produces it.
-
-## A crop is a clip, and that is the whole of it
-
-GOAL.md §4.5 asks for "crop as a non-destructive clip (resettable)", and the parenthesis is the
-interesting half: a crop that rewrote the image's bytes would be a crop that could not be undone and
-would have re-encoded a JPEG. So `Change::Crop { keep }` is `q <polygon> W n <the Do> Q` — the only
-edit here whose wrapper is a **clip** rather than a state, and one that adds bytes and removes none.
-
-Two details that were easy to get wrong:
-
-- **The rectangle is in page space, because that is what a crop tool drags**, but a `Do` draws in the
-  space that was current when it ran. So the rectangle is mapped back through the record's own CTM,
-  and the corpus test proves it: an image placed under `cm 106.1 0 0 31.2 …` gets a polygon whose
-  corners are one hundred-and-sixth of the page-space ones.
-- **The clip is a polygon, not a `re`**, because the mapped rectangle is not necessarily axis-aligned.
-  Under a rotated `cm`, a `re` would clip the *bounding box* of the crop and keep a corner the user
-  dragged away. `m l l l h` is exact for any affine transform.
-
-## A stroked line had no box to click on
-
-GOAL.md §4.2 asks for "exact bounds (including stroke width and glyph bounds)". The stroke half was
-missing: `bounds_of` took the path's own geometry and nothing else, so a horizontal rule drawn with
-`2 w S` along `y = 0` had a box of **zero height** — and a click a quarter of a unit above the line,
-square on the ink, missed. `Record::bounds` now grows a stroked path's box by half the *device* width
-on every side, which is where a stroke actually sits, and a filled path's box is still its geometry
-alone because a fill has no width to add. The corpus model's object counts did not move — f1040 page
-1 is still 589 objects, TAMReview 36 — which is the check that this changed the boxes and not the
-grouping.
-
-## Text properties, and the check that had to move
-
-Every control GOAL.md §4.4 lists that is a *text-state* operator is now a `Change`: `Tf`, `Tc`,
-`Tw`, `Tz`, `TL`, `Ts`, `Tr`. Each is a `q … Q` around the run's own `Tj` with the one operator
-inside it, which is what makes it local.
-
-Writing them found **the operand-order bug for the third time**: the text property was emitted as
-`Tc 2` rather than `2 Tc`, which is a `Tc` with no operands followed by a stray number — the property
-was never set and the page drew exactly as it did. The unit test that asserted the patch *text*
-passed. The corpus test that asserted the *value the interpreter reports* caught it. The third
-occurrence is the one that settles the lesson, so it is written on the function that does it.
-
-The verification also had to move, and for an interesting reason. A text property **moves the
-glyphs**: character spacing widens the run, a baseline shift lifts it, and on a page whose text
-matrix is sheared (`0 7 -6.9999 0 41.598 748.001 Tm` on `irs-f1040`) the run spreads *along the
-shear*, so it leaves the line it was in and the model regroups — 589 objects become 656 on one
-character-spacing change. That is the file asking for what it asked for. A check that insisted the
-object count was unchanged would have failed a correct edit, so the text property is verified by
-matching the run **by its string** and reading the value back out of the interpreter, and the
-grouping is left to be what it is.
 
 ## The UI wiring, and the frame loop that hides
 

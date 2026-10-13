@@ -786,7 +786,7 @@ fn decode_samples(
     // 9258) and nearly empty against a photographic page, with an ink fraction of 0.553 where
     // the oracle has 0.471. Measured against `mutool`, drawing that scored **0.4718** where
     // refusing it scored **0.5716**: the page got worse by being drawn. The decode's own verdict
-    // is therefore honoured rather than second-guessed. See [D31].
+    // is therefore honoured rather than second-guessed. See [D33].
     //
     // **A picture only.** A soft mask is judged on its own terms just below — refused for being
     // short, because a hole in the transparency removes part of the picture without saying so —
@@ -1592,7 +1592,7 @@ mod tests {
         // corpus page look like a decoder fault: **T.4 has no code for a white run of two**, so
         // `011` is a valid *prefix* that walks on looking for a longer match and never finds one,
         // and the line comes back reported as damaged. libtiff agrees — encoding this same row
-        // with `tiffcp -c g3:1d` produces `100010011100`. See [D31].
+        // with `tiffcp -c g3:1d` produces `100010011100`. See [D33].
         let (raster, notes) = decode_ok(&fax_image(8, "100010011100"));
         assert_eq!((raster.width, raster.height), (8, 1), "{notes:?}");
         assert_eq!(

@@ -12,7 +12,7 @@ claim.
 
 **The page distribution improved a great deal and the per-file median moved only a little.**
 Against the run before this one: the pages below 0.95 went **165 → 164** on the strength of
-[D30](#d30--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one)
+[D32](#d32--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one)
 alone, and **254 → 164** across the last three runs, a **35% reduction**; the per-page median went
 **0.95795 → 0.96020**. **The per-file median is 0.97375**, unchanged from the last run, because one
 page of one file closing does not move a median taken over the worst page of 68 files — the gain
@@ -32,7 +32,7 @@ versions: `mutool 1.28.5`, `pdftotext` (poppler), `qpdf` (system).
 > 34 of the 77 files could not be opened at all — and every figure in that run, the 460-of-542
 > comparison count, the 0.6929 median and the 94.8%-below-0.95 figure an earlier version of this
 > file carried, described a corpus with a third of it missing. **This is the run after
-> [D30](#d30--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one)**
+> [D32](#d32--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one)**
 > and the first to measure that fix against the oracle across the whole corpus rather than one file
 > at a time. The 740 of 745 is stable across both post-D26 runs, and the two size disagreements are
 > gone. **Of the 73 that open, 67 read their structure as written; 6 needed recovery**
@@ -166,7 +166,7 @@ it belongs to:
 | pages | file | cause |
 |---|---|---|
 | **61** | `gov__nist-nistir7255.pdf` | JPEG 2000 — **out of scope**, see [D22](#d22--jpeg-2000-is-not-decoded-and-the-decision-to-leave-it-that-way-was-measured-rather-than-assumed) |
-| **24** | `gov__nist-fips197.pdf` | **all font substitution** — [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect). The 25th page, the one `ICCBased` gap, is **fixed** — [D30](#d30--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one) reads the space the profile's own header declares, and page 1 went 0.7564 → 0.9932 |
+| **24** | `gov__nist-fips197.pdf` | **all font substitution** — [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect). The 25th page, the one `ICCBased` gap, is **fixed** — [D32](#d32--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one) reads the space the profile's own header declares, and page 1 went 0.7564 → 0.9932 |
 | **22** | `pdfjs__TAMReview.pdf` | median 0.9240; an unembedded font, see D21 and D24 |
 | **14** | `gov__nist-nistir7657.pdf` | **all font substitution** — [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) |
 | 12 | `issue12337` 3, `highlights` 3, `bug1992868` 2, `comments` 2, `ZapfDingbats` 2 | font substitution, as in [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) — *not* tiling, see [D25](#d25--a-tiling-pattern-was-refused-rather-than-tiled) |
@@ -194,7 +194,7 @@ The largest clusters, and what each one actually is:
 | id | file | what is missing | what the renderer says |
 |---|---|---|---|
 | W034 | `gov__nist-nistir7255.pdf` | a **JPEG 2000** decoder (`JPXDecode`) | `a JPEG 2000 image was found but no decoder exists yet`, twice, on **all 66 pages**. Both images the page draws are JPX, and one carries a `JBIG2Decode` `/Mask`. **Refused by name and formally out of scope — see [D22](#d22--jpeg-2000-is-not-decoded-and-the-decision-to-leave-it-that-way-was-measured-rather-than-assumed), where a written decoder is recorded as having six defects and not being shipped.** |
-| W074 | `gov__nist-fips197.pdf` | **nothing — the last real gap is fixed** | 51 of its 52 pages carry one note and one only: the unembedded-font one. **The page that needed an `ICCBased` profile with no `/Alternate` no longer does** — [D30](#d30--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one) reads the space the profile's own header declares, page 1 carries no note at all and scores **0.9932** where it was 0.7564, and the file's worst page is 0.8432. All 24 pages still below 0.95 are the face, not the layout. [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) measures the rest. |
+| W074 | `gov__nist-fips197.pdf` | **nothing — the last real gap is fixed** | 51 of its 52 pages carry one note and one only: the unembedded-font one. **The page that needed an `ICCBased` profile with no `/Alternate` no longer does** — [D32](#d32--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one) reads the space the profile's own header declares, page 1 carries no note at all and scores **0.9932** where it was 0.7564, and the file's worst page is 0.8432. All 24 pages still below 0.95 are the face, not the layout. [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) measures the rest. |
 | W076 | `pdfjs__TAMReview.pdf` | ~~**`Separation`/`DeviceN` tint-transform evaluation`~~ | **PARTLY FIXED — see [D20](#d20--a-separation-was-painted-black-where-the-file-asked-for-a-tint-and-now-its-tint-transform-is-evaluated) and [D21](#d21--a-collection-holds-how-many-items-which-is-a-different-question-from-how-deep-it-nests).** `Cs8` is `[/Separation /Black <ICCBased sRGB> <FunctionType 0, 255 samples>]`, and it is the colour of the entire article body. **The transform is evaluated now: no page of the file reports `could not be converted`, and the six pages that drew 5,937 ink pixels draw 100k–174k. The file's median SSIM went from 0.7692 to 0.8879, then to 0.92395 once the `TJ` truncation was fixed, and this run measures 0.9240.** The 22 pages still below 0.95 are limited by an unembedded font — see D21 and [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect) — and not by colour or by truncation. |
 | W073 | `gov__nist-nistir7657.pdf` | **nothing — this is not a gap** | 46 pages carry only the unembedded-font note. The file has **49 images and no JPX or JBIG2 at all**, so it is not the codec story. See [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect). |
 | ~~W075~~ | ~~`gov__nist-sp800-88.pdf`~~ | ~~**`ICCBased` colour conversion`~~ | **FIXED — see [D19](#d19--an-iccbased-colour-was-refused-where-the-file-named-the-answer-and-a-mask-never-read-was-never-reported).** `CS0` is `[/ICCBased …]` over an sRGB profile carrying `/Alternate /DeviceRGB`, and that alternate is now what the colour is read through. **43 of the file's 44 pages went from zero ink pixels to ink and its median SSIM from 0.7741 to 0.96095; this run measures the median at 0.9648 with 7 pages below 0.95, where there were 41.** |
@@ -242,12 +242,12 @@ corpus is wrong" and not "two thirds of a bad number has been fixed"; it is **fo
 gate, and every one of them is now a documented decision rather than a gap** —
 [D24](#d24--the-two-largest-addressable-clusters-were-both-unembedded-fonts-which-is-this-projects-own-substitution-policy-and-not-a-defect)
 for the fonts and the one page that was a feature gap, now closed by
-[D30](#d30--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one).
+[D32](#d32--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one).
 
 **The comparison with the run before this one, stated as plainly as it can be stated.** Pages below
 0.95 **165 → 164**, and against the run before that **254 → 164**, a **35% reduction** — 90 pages
 came back over the line. Per-page median **0.96015 → 0.96020**. **Per-file median (worst page) is
-0.97375, unchanged from the last run**: a file is scored on its worst page, and the one page D30
+0.97375, unchanged from the last run**: a file is scored on its worst page, and the one page D32
 closed was not a file's worst, so this measure cannot see it at all. That is worth stating plainly
 rather than dressing up — **the corpus-wide numbers barely moved because the fix was one page of
 one file, and the page count under-reports it by design**. The gain is also not spread evenly:
@@ -2753,7 +2753,7 @@ suggested.
 
 > **Since this was written, the one page of the 39 that was a defect is fixed.** The 38 are still
 > font substitution and are still policy; the 39th — `fips197` page 1, the `ICCBased` profile with
-> no `/Alternate` — is [D30](#d30--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one),
+> no `/Alternate` — is [D32](#d32--an-icc-profile-names-its-own-colour-space-and-fips197-omitted-alternate-rather-than-failing-to-declare-one),
 > and it is no longer below 0.95. The measurements below are kept as they were taken, because the
 > point of this entry is what the file looked like before anyone looked at it; the file is now 24
 > pages below 0.95 with a worst page of 0.8432.
@@ -3480,7 +3480,7 @@ behaviour, and reading it as evidence is how a wrong answer survives review.**
 
 ---
 
-## D30 — an ICC profile names its own colour space, and `fips197` omitted `/Alternate` rather than failing to declare one
+## D32 — an ICC profile names its own colour space, and `fips197` omitted `/Alternate` rather than failing to declare one
 
 **Fixed.** `gov__nist-fips197.pdf` page 1 painted its title and a shape in `[/ICCBased …]`, and both
 were refused: `the colour text is painted in the ICCBased space CS0, whose profile names no
@@ -3558,7 +3558,7 @@ question from this one and answering it with an assumption is how the two get co
 
 ---
 
-## D31 — tried and reverted: charging the image bound in bytes drew the corpus's worst page *worse*
+## D33 — tried and reverted: charging the image bound in bytes drew the corpus's worst page *worse*
 
 **Not fixed, and deliberately so. This entry records a change that was measured, found wanting, and
 reverted.** It is here because the reasoning that produced it looks correct, and the only thing

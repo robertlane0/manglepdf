@@ -3015,7 +3015,7 @@ mod tests {
         )
     }
 
-    /// The same, with a height that is not a whole number of points    /// The same, with a height that is not a whole number of points — which is the whole
+    /// The same, with a height that is not a whole number of points — which is the whole
     /// point, since a producer writing a `/MediaBox` as a decimal does not round it.
     fn rect_page_fractional_bytes(points_w: i64, points_h: f64) -> Vec<u8> {
         let mut body: Vec<u8> = Vec::new();

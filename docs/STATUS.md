@@ -25,7 +25,7 @@ number when `C0` is zero, and every fixture in this repository that exercises on
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector | **mostly done** — everything except the Inspector. See "Gaps" below |
 | **M2** | Interpreter, paths/clips/text, tiles, viewer shell | **partly done** — the tokeniser, the operator table, the graphics state and the interpreter exist, and the rasterizer now turns a page's paths, its embedded-TrueType glyphs and its embedded-CFF glyphs into pixels with analytic coverage. Images and shadings draw, a shading pattern used as a fill colour draws per pixel, and **a form XObject executes as a nested content stream with its own `/Matrix`, `/BBox` clip and `/Resources`**. Tiling patterns and `Symbol`/`ZapfDingbats` still draw nothing |
 | **M3** | All fonts, colour spaces, patterns, shadings, transparency, JBIG2/JPX, OCGs | **partly done** — the four PDF function kinds, axial and radial shadings, the device colour spaces and `PatternType 1` tiling patterns paint, and TrueType, composite, CFF and Type 1 outlines all draw. Twelve of the standard fourteen draw from bundled metric-compatible faces when a document names one without embedding it. Type 3, mesh shadings (types 4–6), JBIG2 and JPEG 2000 do not — both `/PaintType 1` and `/PaintType 2` patterns now paint |
-| **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | **started** — the undo/redo history is built (`mangle_edit::History<T>` over `Arc`-shared immutable snapshots, bounded, with the whole-stage structural-equality property FINISH.md S1.16 asks for as a test), and it is now *wired to the edits* through `mangle_edit::Editor`: one session owns the document, the page, the page's resources and the history, an undo restores the content byte for byte and a redo returns it, and a save writes only the streams that changed. the page object model is built (`mangle_edit::PageModel`): glyph runs grouped into lines by baseline, images/shadings/paths one object each, every object carrying the byte spans it covers for write-back, with hit-testing and a documented account of what GOAL §4.2 asks for that is *not* here (the structure tree, real glyph metrics, editable contents). So are the edits (`mangle_edit::edits`: move, scale, delete, recolour, each a `q … Q` wrapper around the object's own operators so those bytes come out untouched), **Arrange** (`mangle_edit::arrange`: the one edit that cannot be a wrapper, because it changes the order operators appear in — and therefore z-order — so the bytes move and the state they were drawn under is re-materialised at the destination), and the first **save→reopen round trip** (`mangle_edit::save_page`, an incremental update that rewrites only the content streams that changed and re-encodes them with the file's own filter — FINISH.md S2's exit criterion, with the untouched image's SHA-256 asserted). What is left is the UI wiring |
+| **M4** | Page objects, select/move/scale/recolour, undo/redo, first save→reopen | **mostly done** — the undo/redo history (`mangle_edit::History<T>` over `Arc`-shared immutable snapshots, bounded, with the whole-stage structural-equality property FINISH.md S1.16 asks for as a test), the **page object model** (`mangle_edit::PageModel`: glyph runs grouped into lines by baseline, images/shadings/paths one object each, every object carrying the byte spans it covers), the **edits** (`edits`: move, scale, delete, recolour, crop and the §4.4 text-state properties, each a `q … Q` wrapper around the object's own operators so those bytes come out untouched), **Arrange** (`arrange`: the one edit that cannot be a wrapper, because it changes the order operators appear in — and therefore z-order — so the bytes move and the state they were drawn under is re-materialised at the destination), the **save→reopen round trip** (`save_page`, an incremental update that rewrites only the content streams that changed and re-encodes them with the file's own filter — FINISH.md S2's exit criterion, with the untouched image's SHA-256 asserted), and the **session** (`Editor`, which owns the document, the page, the resources and the history) are all built and tested against real corpus pages. The window now drives it: a worker thread parses and rasterizes off the UI thread, a click selects through the renderer's own placement matrix, a drag moves in page points, the right-hand panel opens contextual to the selection and its steppers read the object's own `TextState`, Arrange and Rotate/Delete act on it, and after every edit the worker **re-opens what it just wrote and renders that**. Undo/redo are keyed. What is left: thumbnails that navigate, the bookmarks/layers panels, and text *editing* (retyping, reflow), which is M5 |
 | **M5**–**M12** | Text, annotations, flatten, forms, organize, redact, signatures, export, UI polish, gauntlet | not started — though **annotation appearances now render** ([D27](known-diffs.md)), since a page whose ink is annotations is otherwise blank. M5 proper, and every milestone after it, is untouched |
 
 ## What exists
@@ -337,7 +337,10 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   Fit and Full buttons. Fit computes the smaller of the two ratios so the page is entirely visible,
   and is clamped to the zoom range the window accepts so the button can never be a no-op.
   Full-screen holds its own state, because the frame does not answer back when asked to change.
-- **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
+- **129 hand-authored SVG icons**, lint-clean, with a contact sheet — including the
+  seven tool-tab icons — drawn at runtime by the in-house subset renderer in
+  `mangle-render::svg` through the same rasterizer the page uses, with a test that
+  renders every icon at 16/20/24/32 px and fails on one that is refused or blank.
 
 
 
@@ -349,10 +352,10 @@ number when `C0` is zero, and every fixture in this repository that exercises on
 
 ## Tests
 
-792 passing, 1 ignored, none failing, no warnings. The ignored one is the Tier-B wild
-corpus — a two-hour job, run deliberately with
+1120 passing, 1 ignored, none failing, no warnings, over 39 test binaries. The ignored one
+is the Tier-B wild corpus — a two-hour job, run deliberately with
 `cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture`; the two cheap
-tests in the same file check the harness itself and run by default. Ten kinds matter:
+tests in the same file check the harness itself and run by default. These kinds matter:
 
 - **Unit** — one behaviour, stated expectations, including a documented quirk for each.
 - **Round trip** — open a file, change it, write it, open it again, compare. This is
@@ -401,6 +404,12 @@ tests in the same file check the harness itself and run by default. Ten kinds ma
   per-mark reset got wrong. Both are deliberately asymmetric — nothing is mirrored in either
   axis — because a symmetric page scores above 0.99 whether or not the clip is the right
   shape, so a symmetric fixture cannot see an error sitting off the centre.
+- **Edits, on real pages** — the whole write-back loop runs over corpus pages and the result is
+  checked **through the interpreter**, not against the text an edit wrote. This is the kind that
+  found the three operand-order bugs every unit test passed: `Tc 2` where a content stream wants
+  `2 Tc`, and `rg 0.784 0.063 0.18` where it wants the operands first. A test that asserted the
+  patch *string* passed; the test that asserted the *value the interpreter reports* failed. Every
+  such test therefore re-parses the edited stream and reads the property back out.
 - **Fidelity against `mutool`, measured** — the shapes page, the clipped page and the
   diagonal-clip page rendered by `mutool` at 150 DPI (the resolution the acceptance criteria
   name) and compared with SSIM. Shapes **0.99829**, clipped **0.98537**, diagonal clip
@@ -516,7 +525,7 @@ failed or dropped in silence:
 
 ```text
 G0.5  pass  fmt, clippy, tests and release build are clean
-        cargo test: 722 passed, 0 failed, 1 ignored, 0 filtered out over 39 test binaries
+        cargo test: 1120 passed, 0 failed, 1 ignored, 0 filtered out over 39 test binaries
         1 ignored test(s) were not run, so they are excluded from the judgement rather
         than counted as failures: none
 ```
@@ -1059,7 +1068,7 @@ The latest full run: **77 files, 16642.40s, 0 panicked, 73 opened, 4 closed**, 7
 | per-file median (worst page) | 0.97375 | **0.97375 — unchanged** |
 
 **These figures barely moved, and the reason is worth more than the movement.** The only change
-between the two runs is [D30](known-diffs.md), which closed one page — `fips197` page 1, the
+between the two runs is [D32](known-diffs.md), which closed one page — `fips197` page 1, the
 `ICCBased` space whose profile names no `/Alternate` — and that page was not its file's worst, so
 the per-file median cannot see it and the corpus-wide count moves by one. The page itself went
 **0.7564 → 0.9932**. **A corpus summary is built to be insensitive to exactly this kind of fix**,
@@ -1086,7 +1095,7 @@ shortfall is concentrated in a handful of files too:
 | pages | file | what it is |
 |---|---|---|
 | 61 | `gov__nist-nistir7255.pdf` | JPEG 2000 — **formally out of scope** (D22) |
-| 24 | `gov__nist-fips197.pdf` | **all font substitution** (D24). The 25th page, the one real gap, is **fixed** — [D30](known-diffs.md) reads the space the profile's own header declares; page 1 went 0.7564 → 0.9932 |
+| 24 | `gov__nist-fips197.pdf` | **all font substitution** (D24). The 25th page, the one real gap, is **fixed** — [D32](known-diffs.md) reads the space the profile's own header declares; page 1 went 0.7564 → 0.9932 |
 | 22 | `pdfjs__TAMReview.pdf` | the same font-substitution policy |
 | 14 | `gov__nist-nistir7657.pdf` | **diagnosed** (D24): entirely the font-substitution policy |
 | 12 | `issue12337` 3, `highlights` 3, `bug1992868` 2, `comments` 2, `ZapfDingbats` 2 | **font substitution**, like [D24](known-diffs.md) — the diff images show every line doubled and misregistered. *Not* tiling: these files declare patterns and never select one ([D25](known-diffs.md)) |
@@ -1100,7 +1109,7 @@ four files hold 70 of those** — `fips197` 24, `TAMReview` 22, `nistir7657` 14,
 is concentrated in a handful of files rather than spread evenly. The two clusters nobody had
 looked at are now diagnosed (D24) and they turn out to be **38 pages of this project's own
 font-substitution policy**, plus the one page that was a genuinely missing feature — which has since
-been fixed ([D30](known-diffs.md), page 1 of `fips197` at 0.9932 where it was 0.7564), so
+been fixed ([D32](known-diffs.md), page 1 of `fips197` at 0.9932 where it was 0.7564), so
 `fips197` is now policy all the way down. **The largest remaining cause of a page below 0.95 is not
 a missing feature; it is a documented policy, measured.**
 
@@ -1209,7 +1218,7 @@ someone else's. **Roughly 38 of the corpus's 164 pages below 0.95 are this polic
 defect**, which makes it the largest remaining addressable cause — a policy question, not a
 missing feature. It is now the largest cause of *every* page below 0.95 that is not a codec:
 the one remaining page that was a real feature gap was fixed in
-[D30](known-diffs.md).
+[D32](known-diffs.md).
 
 The corpus test asserts nothing and the report is the output — the reasoning is at the top
 of `crates/mangle-render/tests/wild_corpus.rs`. A threshold on a document nobody has read
