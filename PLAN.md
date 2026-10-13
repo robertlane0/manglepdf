@@ -1309,6 +1309,18 @@ field painted a black band down the title bar. It took three passes to find ever
 neither of the other two. The lesson is that a widget is not one colour but a set of them, and
 "set the theme" for a real control means finding all of them or the control is half-drawn.
 
+**Fit is the smaller of the two ratios, and clamped to the range the window accepts.** A page
+that fits one way and overflows the other has fitted nothing, so the answer is the minimum; and a
+page smaller than a huge window would "fit" at a zoom the window refuses, which would make the
+button a no-op, so the answer is clamped at both ends. The margin comes off the canvas first,
+because "fit" means entirely visible with room around it rather than touching three of the four
+edges — and that margin is why a page exactly the canvas size fits at one and not at
+`canvas / page`.
+
+**Full-screen is the one piece of windowing state the shell has to keep.** The toggle is sent to
+the frame with `ViewportCommand::Fullscreen`, and the frame does not answer back, so the button
+would forget which way it was. The state is therefore held and the button's own colour follows it.
+
 **The canvas answers for the page and for nothing else.** A click on a stepper in the right-hand
 panel used to arrive at `pointer()` first, miss the paper, and take the selection away: the panel
 redrew itself with nothing selected, its controls were never drawn, and the click meant to nudge a

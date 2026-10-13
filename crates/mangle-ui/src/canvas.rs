@@ -97,6 +97,33 @@ impl PagePlacement {
     }
 }
 
+/// The zoom at which a page of `page` points fits a canvas of `canvas` points.
+///
+/// The smaller of the two ratios, because a page that fits one way and overflows the other has
+/// fitted nothing. A margin is taken off the canvas first, so "fit" means the page is entirely
+/// visible with room around it rather than touching three of the four edges.
+///
+/// The answer is clamped to the zoom range the window accepts: a page smaller than its canvas would
+/// otherwise "fit" at a zoom smaller than the window allows, and the button would do nothing.
+#[must_use]
+pub fn fit_zoom(page: (f64, f64), canvas: (f32, f32)) -> f32 {
+    const MARGIN: f32 = 24.0;
+    const MIN_ZOOM: f32 = 0.25;
+    const MAX_ZOOM: f32 = 4.0;
+    let (w, h) = page;
+    // A page with no size fits at one: the honest answer, rather than a division by zero.
+    let sized = w.is_finite()
+        && h.is_finite()
+        && w.partial_cmp(&0.0) == Some(std::cmp::Ordering::Greater)
+        && h.partial_cmp(&0.0) == Some(std::cmp::Ordering::Greater);
+    if !sized {
+        return 1.0;
+    }
+    let (cw, ch) = ((canvas.0 - MARGIN).max(1.0), (canvas.1 - MARGIN).max(1.0));
+    let zoom = (cw / w as f32).min(ch / h as f32);
+    zoom.clamp(MIN_ZOOM, MAX_ZOOM)
+}
+
 #[cfg(test)]
 mod tests {
     // Tests state their expectations with `expect` and `unwrap`, which is what a test is for;
@@ -105,6 +132,41 @@ mod tests {
 
     use super::*;
     use mangle_content::Matrix;
+
+    /// A page fits when it is *entirely* visible, which is the smaller of the two ratios and not
+    /// the larger: a page that fits one way and overflows the other has fitted nothing.
+    #[test]
+    fn a_page_fits_on_the_smaller_ratio() {
+        // A letter page in a canvas much wider than it is tall fits on the height.
+        let zoom = fit_zoom((612.0, 792.0), (2000.0, 900.0));
+        assert!(
+            (zoom - (876.0 / 792.0)).abs() < 1e-3,
+            "it fits on the height, was {zoom}"
+        );
+        // And the other way round, it fits on the width.
+        let zoom = fit_zoom((612.0, 792.0), (700.0, 2000.0));
+        assert!(
+            (zoom - (676.0 / 612.0)).abs() < 1e-3,
+            "it fits on the width, was {zoom}"
+        );
+        // A page exactly the size of the space left after the margin fits at one, and twice that
+        // space fits at two — the arithmetic is available / page, in both directions.
+        assert!((fit_zoom((100.0, 100.0), (124.0, 124.0)) - 1.0).abs() < 1e-3);
+        assert!((fit_zoom((100.0, 100.0), (224.0, 224.0)) - 2.0).abs() < 1e-3);
+    }
+
+    /// The answer never leaves the range the window accepts, or the button would be a no-op.
+    #[test]
+    fn a_fit_never_leaves_the_range_the_window_accepts() {
+        // A page smaller than its canvas with a huge window would fit at a zoom the window
+        // refuses, so the answer is clamped up.
+        assert!((fit_zoom((1.0, 1.0), (10_000.0, 10_000.0)) - 4.0).abs() < 1e-6);
+        // And a page larger than any window is clamped down rather than vanishing.
+        assert!((fit_zoom((100_000.0, 100_000.0), (100.0, 100.0)) - 0.25).abs() < 1e-6);
+        // A page with no size at all fits at one, which is the honest answer rather than a
+        // division by zero.
+        assert!((fit_zoom((0.0, 0.0), (800.0, 600.0)) - 1.0).abs() < 1e-6);
+    }
 
     /// A letter page drawn into a rectangle, at one pixel per point.
     fn placement() -> PagePlacement {

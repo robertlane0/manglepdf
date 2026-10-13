@@ -177,6 +177,9 @@ pub struct App {
     drag: Option<Drag>,
     /// What the search field holds, and where the page's text matched it.
     search: Search,
+    /// Whether the window has left the desktop, which is the one piece of windowing state the
+    /// shell has to keep: the toggle is sent to the frame, and the frame does not answer back.
+    full_screen: bool,
 }
 
 /// What the bottom bar was asked to do.
@@ -192,6 +195,10 @@ enum Bar {
     ZoomIn,
     /// Back to one hundred per cent.
     ZoomReset,
+    /// Zoom so the page is entirely visible.
+    Fit,
+    /// Leave the windowed desktop, or come back to it.
+    FullScreen,
 }
 
 /// What the search field holds and what the page matched.
@@ -271,6 +278,7 @@ impl std::fmt::Debug for App {
             .field("selected", &self.selected)
             .field("drag", &self.drag)
             .field("search", &self.search)
+            .field("full_screen", &self.full_screen)
             .field("state", &self.state)
             .field("pages", &self.pages.len())
             .field("worker", &self.worker)
@@ -323,6 +331,7 @@ impl App {
             selected: None,
             drag: None,
             search: Search::default(),
+            full_screen: false,
         }
     }
 
@@ -1337,7 +1346,7 @@ impl App {
         });
     }
 
-    fn bottom_bar(&mut self, _ui: &egui::Ui, p: &Painter, t: &Theme, screen: egui::Rect) {
+    fn bottom_bar(&mut self, ui: &egui::Ui, p: &Painter, t: &Theme, screen: egui::Rect) {
         let s = t.spacing;
         let height = t.metrics.status_height;
         let rect = egui::Rect::from_min_size(
@@ -1392,7 +1401,7 @@ impl App {
                 small.clone(),
                 t.text_muted,
             );
-            if hovered(_ui, cell) && _ui.ctx().input(|i| i.pointer.any_released()) {
+            if hovered(ui, cell) && ui.ctx().input(|i| i.pointer.any_released()) {
                 click = Some(which);
             }
         }
@@ -1419,13 +1428,48 @@ impl App {
                 small.clone(),
                 if i == 1 { t.text } else { t.text_muted },
             );
-            if hovered(_ui, cell) && _ui.ctx().input(|i| i.pointer.any_released()) {
+            if hovered(ui, cell) && ui.ctx().input(|i| i.pointer.any_released()) {
+                click = Some(which);
+            }
+        }
+
+        // Fit and full-screen, the two ways out of a window that cannot show the whole page: one
+        // changes the zoom, the other changes the window. They sit past the zoom group, which is
+        // where the mockup puts them.
+        for (i, (label, which)) in [("Fit", Bar::Fit), ("Full", Bar::FullScreen)]
+            .into_iter()
+            .enumerate()
+        {
+            let cell = egui::Rect::from_center_size(
+                rect.right_center()
+                    + egui::vec2(-s.window_inset - (i as f32) * (step + 34.0) - 17.0, 0.0),
+                egui::vec2(if i == 0 { step + 24.0 } else { step + 16.0 }, step),
+            );
+            p.rect_filled(cell, s.field_radius, t.panel);
+            p.rect_stroke(
+                cell,
+                s.field_radius,
+                egui::Stroke::new(1.0, t.border),
+                egui::StrokeKind::Middle,
+            );
+            p.text(
+                cell.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                small.clone(),
+                if which == Bar::FullScreen && self.full_screen {
+                    t.accent
+                } else {
+                    t.text_muted
+                },
+            );
+            if hovered(ui, cell) && ui.ctx().input(|i| i.pointer.any_released()) {
                 click = Some(which);
             }
         }
 
         if let Some(what) = click {
-            self.bar(what);
+            self.bar(what, ui, t, screen);
         }
     }
 
@@ -1435,13 +1479,41 @@ impl App {
     /// page the user has navigated to is asked for rather than drawn from a buffer it happens to
     /// have: `set_zoom` throws the pixels away and re-asks for every page, because a buffer drawn
     /// at twice its width is a blurry buffer at any zoom but the one it was made for.
-    fn bar(&mut self, what: Bar) {
+    fn bar(&mut self, what: Bar, ui: &egui::Ui, t: &Theme, screen: egui::Rect) {
         match what {
             Bar::Previous => self.goto_page(self.state.page_index.saturating_sub(1)),
             Bar::Next => self.goto_page(self.state.page_index + 1),
             Bar::ZoomOut => self.set_zoom(self.state.zoom / 1.25),
             Bar::ZoomIn => self.set_zoom(self.state.zoom * 1.25),
             Bar::ZoomReset => self.set_zoom(1.0),
+            Bar::Fit => {
+                // The canvas is what the metrics leave between the sidebar, the panel and the
+                // bars, so fitting to anything else would fit the page to a rectangle that is not
+                // on screen.
+                let at = self
+                    .state
+                    .page_index
+                    .min(self.state.page_points.len().max(1) - 1);
+                let page = self
+                    .state
+                    .page_points
+                    .get(at)
+                    .copied()
+                    .unwrap_or((612.0, 792.0));
+                let canvas = (
+                    screen.width() - t.metrics.left_panel_width - t.metrics.right_panel_width,
+                    screen.height() - t.metrics.top_bar_height - t.metrics.status_height,
+                );
+                self.set_zoom(crate::canvas::fit_zoom(page, canvas));
+            }
+            Bar::FullScreen => {
+                // Toggled from what the window is now rather than from a remembered flag, so the
+                // button cannot disagree with the window.
+                let going = !self.full_screen;
+                self.full_screen = going;
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(going));
+            }
         }
     }
 

@@ -333,7 +333,12 @@ number when `C0` is zero, and every fixture in this repository that exercises on
   and Ctrl+F focuses the field. It is the first real egui widget in a shell that otherwise draws
   everything itself, and wiring the theme through to it took three passes: a text edit paints its
   unfocused background from a token that is neither the widget fill nor the panel fill.
+- **The bottom bar is complete against the mockup.** Zoom − / 100% / +, page ‹ 1 of N ›, and
+  Fit and Full buttons. Fit computes the smaller of the two ratios so the page is entirely visible,
+  and is clamped to the zoom range the window accepts so the button can never be a no-op.
+  Full-screen holds its own state, because the frame does not answer back when asked to change.
 - **122 hand-authored SVG icons**, lint-clean, with a contact sheet.
+
 
 
 
