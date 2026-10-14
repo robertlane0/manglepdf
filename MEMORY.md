@@ -10,7 +10,7 @@ acceptance evidence — there is no `docs/acceptance/` directory. Milestone **M4
 (surgical write-back, edits, arrange, session, save→reopen, and the window wired to all of it);
 **M5–M12 are unstarted**.
 
-Test suite: **1172 passing, 0 failing, 1 ignored** over 39 binaries. The ignored one is the
+Test suite: **1175 passing, 0 failing, 1 ignored** over 39 binaries. The ignored one is the
 Tier-B wild-corpus run.
 
 ## Conventions worth reusing
@@ -57,13 +57,14 @@ early unless the press is on the page.
 
 ## What is left, in the order it blocks
 
-1. **M5 text editing** — the own-font rungs have landed (`Change::Retype`: single runs,
-   `TJ` arrays with kerns kept at their gaps, multi-run objects flowing across runs at old
-   boundaries each in its own font; verified through the interpreter, end-to-end on corpus
-   pages, headless via CLI with `qpdf`/`mutool` confirmation, typed through the panel).
-   Still open: reflow inside the block's original width, the font-resolution ladder beyond
-   the own font (same family in the document → bundled/system subset → metric match →
-   per-script fallback, each with its notice), and subset embedding for missing glyphs.
+1. **M5 text editing** — retyping has landed end to end (`Change::Retype` in the run's
+   own font: single runs, `TJ` arrays with kerns kept at their gaps, multi-run objects
+   flowing across runs at old boundaries each in its own font; and a missing glyph falls
+   back to an embedded bundled subset with the notice in the label — verified through
+   the interpreter, on corpus pages, headless via CLI with `qpdf`/`mutool` confirmation,
+   typed through the panel).
+   Still open: reflow inside the block's original width, same-family/system fallbacks,
+   and the panel notice banner (the notice travels in the label today).
 2. **UI breadth** — thumbnails that navigate, bookmarks and layers panels, the tool-tab row.
 3. **Type 3 fonts** — design written in `PLAN.md`, not built. Corpus scope is three files.
 4. **Gate 3.1** — 164 of 740 corpus pages below 0.95; ~62 are JPEG 2000 (declined, D22) and ~38 are

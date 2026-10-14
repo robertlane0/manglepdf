@@ -353,7 +353,7 @@ number when `C0` is zero, and every fixture in this repository that exercises on
 
 ## Tests
 
-1172 passing, 1 ignored, none failing, no warnings, over 39 test binaries. The ignored one
+1175 passing, 1 ignored, none failing, no warnings, over 39 test binaries. The ignored one
 is the Tier-B wild corpus — a two-hour job, run deliberately with
 `cargo test -p mangle-render --test wild_corpus -- --ignored --nocapture`; the two cheap
 tests in the same file check the harness itself and run by default. These kinds matter:
