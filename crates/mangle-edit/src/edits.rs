@@ -165,6 +165,18 @@ pub enum Change {
         /// Each character beside the CID the install gave it.
         cids: Vec<(char, u32)>,
     },
+    /// Replace the run's string with `text` shown in another document font.
+    ///
+    /// The charter's second rung: the same family among the document's other fonts,
+    /// before any bundled face. No embedding is needed — the font is already resourced
+    /// — so the strings are re-encoded in its encoding and switched to with a `Tf`
+    /// wrapper, exactly as an installed font is except in one-byte codes.
+    RetypeFace {
+        /// What the run should say instead.
+        text: String,
+        /// The other font's resource name, as the page's resources hold it.
+        font: String,
+    },
 }
 
 /// One text property, in the units the specification's own operators use.
@@ -673,6 +685,7 @@ pub fn patches_for_with(
         Change::RetypeIn { text, font, cids } => {
             retype_in_patches(stream, object, text, font, cids)
         }
+        Change::RetypeFace { text, font } => retype_face_patches(stream, object, text, fonts, font),
         Change::Delete => delete_patches(stream, object),
     }
 }
@@ -706,13 +719,17 @@ fn retype_patches(
     let operations = ContentStream::parse(stream).operations();
     let mut patches = Vec::new();
     for (record, piece) in object.records.iter().zip(pieces.iter()) {
+        // One byte a glyph: composite runs are refused above, so every piece here is
+        // single-byte by construction rather than by checking afterwards.
         patches.extend(retype_record(
             stream,
             object.kind,
             record,
             piece,
+            1,
             text,
             &operations,
+            None,
         )?);
     }
     Ok(patches)
@@ -744,6 +761,71 @@ fn retype_pieces(
             .unwrap_or_else(|| "(unnamed)".to_string());
         let encoding = retype_encoding(record, fonts, &font)?;
         out.push(encode_simple_text(&encoding, piece, &font)?);
+    }
+    Ok(out)
+}
+
+/// The new text cut into one piece per run, encoded in another document font.
+///
+/// The twin of [`retype_pieces`] for the charter's second rung: the split is the same
+/// shared-boundary rule, but every piece is encoded in `target`'s encoding rather than
+/// in its own run's. A target that is composite or bitmap is refused for what it is —
+/// CIDs need an install, and pictures are not text — and so is a character the target
+/// has no code for, which is what sends the ladder on to a bundled face.
+///
+/// `pub(crate)` because the session probes it: trying every same-family font and
+/// keeping the first that covers the text is the second rung, and the probe and the
+/// patch must agree on what covering means.
+pub(crate) fn retype_face_pieces(
+    object: &PageObject,
+    text: &str,
+    fonts: &Fonts<'_>,
+    target: &str,
+) -> Result<Vec<Vec<u8>>, Refusal> {
+    let pieces = split_counts(object, text)?;
+    let mut out = Vec::with_capacity(pieces.len());
+    for (record, piece) in object.records.iter().zip(pieces.iter()) {
+        let table = match record.form.as_deref() {
+            Some(name) => fonts
+                .resources
+                .form_resources(name)
+                .unwrap_or_else(|| Arc::new(fonts.resources.clone())),
+            None => Arc::new(fonts.resources.clone()),
+        };
+        let found = table.fonts.get(target).ok_or_else(|| Refusal::NoSuchFont {
+            font: target.to_string(),
+        })?;
+        let resolved = (fonts.resolve)(found).unwrap_or_else(|| found.clone());
+        let dict = resolved.as_dict().ok_or_else(|| Refusal::NoEncoding {
+            font: target.to_string(),
+        })?;
+        if dict
+            .get("Subtype")
+            .and_then(|o| o.as_name())
+            .is_some_and(|n| n == b"Type0")
+        {
+            return Err(Refusal::CompositeText {
+                font: target.to_string(),
+            });
+        }
+        if dict
+            .get("Subtype")
+            .and_then(|o| o.as_name())
+            .is_some_and(|n| n == b"Type3")
+        {
+            return Err(Refusal::BitmapFont {
+                font: target.to_string(),
+            });
+        }
+        let encoding = mangle_font::Encoding::from_font_dict(
+            dict,
+            mangle_font::EncodingBase::Standard,
+            fonts.resolve,
+        )
+        .ok_or_else(|| Refusal::NoEncoding {
+            font: target.to_string(),
+        })?;
+        out.push(encode_simple_text(&encoding, piece, target)?);
     }
     Ok(out)
 }
@@ -799,13 +881,20 @@ fn split_counts(object: &PageObject, text: &str) -> Result<Vec<String>, Refusal>
 /// A plain `Tj` — and `'` and `"`, whose line positioning belongs to the operation
 /// rather than to the glyphs — holds one string and no kerns, so the piece replaces it.
 /// A `TJ` array's strings share their operation with kerns, which takes the array path.
+/// Bytes per glyph in `piece`: one for the run's own encoding, two for CIDs.
+///
+/// The split cuts pieces at resolved glyph counts, and only the caller knows which
+/// units its bytes are in — a two-byte CID piece is half as many glyphs as bytes, and
+/// guessing one per byte would put every kern after the first in the wrong gap.
 fn retype_record(
     stream: &[u8],
     kind: Kind,
     record: &mangle_content::interp::Record,
     piece: &[u8],
+    units: usize,
     text: &str,
     operations: &[Operation],
+    wrap: Option<&str>,
 ) -> Result<Vec<Patch>, Refusal> {
     let Mark::Glyphs { text_spans, .. } = &record.mark else {
         return Err(Refusal::NotText { kind });
@@ -824,6 +913,23 @@ fn retype_record(
         .operator()
         .map(|b| String::from_utf8_lossy(b).into_owned())
         .unwrap_or_else(|| "(operatorless)".to_string());
+    // Switching fonts wraps the operation in the `Tf` that names the new one: the
+    // wrapper opens before the operation and closes after it, each carrying its own
+    // separator, so the bytes around it are untouched. One operation, one wrapper —
+    // every record below carries its own.
+    let mut patches = Vec::new();
+    if let Some(font) = wrap {
+        let mut open = Vec::from(b"q /".as_slice());
+        open.extend_from_slice(font.as_bytes());
+        open.push(b' ');
+        open.extend_from_slice(num(record.text.size).as_bytes());
+        open.extend_from_slice(b" Tf ");
+        patches.push(Patch {
+            range: record.span.start..record.span.start,
+            bytes: open,
+            label: format!("retype as {text:?} in {font}"),
+        });
+    }
     // A plain `Tj` — and `'` and `"`, whose line positioning belongs to the operation
     // rather than to the glyphs — holds one string and no kerns, so any replacement is
     // safe. A `TJ` array's strings share their operation with kerns, which takes its own
@@ -841,12 +947,28 @@ fn retype_record(
                 len: stream.len(),
             });
         }
-        return retype_patch(span, piece, text);
+        patches.extend(retype_patch(span, piece, text)?);
+        if wrap.is_some() {
+            patches.push(Patch {
+                range: record.span.end..record.span.end,
+                bytes: b" Q".to_vec(),
+                label: format!("retype as {text:?}"),
+            });
+        }
+        return Ok(patches);
     }
     if op != "TJ" {
         return Err(Refusal::NotPlainShow { op });
     }
-    tj_patches(stream, record, piece, text)
+    patches.extend(tj_patches(stream, record, piece, units, text)?);
+    if wrap.is_some() {
+        patches.push(Patch {
+            range: record.span.end..record.span.end,
+            bytes: b" Q".to_vec(),
+            label: format!("retype as {text:?}"),
+        });
+    }
+    Ok(patches)
 }
 
 /// One replacement of a string token by a literal string holding `bytes`.
@@ -896,30 +1018,30 @@ fn retype_in_patches(
     if object.records.is_empty() {
         return Err(Refusal::NoSpans);
     }
+    // The same split as the own-font path, CID-encoded per run: the wrapper the record
+    // surgery adds switches fonts, so the span surgery underneath is shared rather than
+    // reimplemented — one reader of kerns, one writer of strings.
     let pieces = split_counts(object, text)?;
     let operations = ContentStream::parse(stream).operations();
     let mut patches = Vec::new();
     for (record, piece) in object.records.iter().zip(pieces.iter()) {
         let encoded = encode_cids(cids, piece, font)?;
-        patches.extend(retype_in_record(
+        // Two bytes a CID: the split cuts at twice the glyph counts.
+        patches.extend(retype_record(
             stream,
             object.kind,
             record,
             &encoded,
-            font,
+            2,
             text,
             &operations,
+            Some(font),
         )?);
     }
     Ok(patches)
 }
 
-/// One character string as two-byte CIDs through the install's map.
-///
-/// The map is complete for the request by construction — the install embedded exactly
-/// the characters asked for — so a miss is an internal disagreement rather than a
-/// character to report, but it refuses by name all the same: a CID invented here would
-/// draw whatever glyph sits at that number.
+/// Encode `piece` as two-byte CIDs through the install's map.
 fn encode_cids(cids: &[(char, u32)], piece: &str, font: &str) -> Result<Vec<u8>, Refusal> {
     let mut out = Vec::with_capacity(piece.len() * 2);
     for ch in piece.chars() {
@@ -943,139 +1065,36 @@ fn encode_cids(cids: &[(char, u32)], piece: &str, font: &str) -> Result<Vec<u8>,
     Ok(out)
 }
 
-/// One run's replacement operation, wrapped in the `Tf` that switches fonts.
-///
-/// The range is the whole operation — operands through operator — and the replacement
-/// is complete: `q`, the run's own size with the new font, the new string, the
-/// operator, `Q`. The size is read out of the run rather than handed in, because runs
-/// on one line can be set at different sizes and one number would fit at most one of
-/// them. The state around the operation is untouched, which is what makes the edit
-/// local by the same construction as every wrapper in this module.
-fn retype_in_record(
+/// Emit patches that show `text` in another document font (`Tf` wrapper + 1-byte codes).
+fn retype_face_patches(
     stream: &[u8],
-    kind: Kind,
-    record: &mangle_content::interp::Record,
-    encoded: &[u8],
-    font: &str,
+    object: &PageObject,
     text: &str,
-    operations: &[Operation],
+    fonts: Option<&Fonts<'_>>,
+    target: &str,
 ) -> Result<Vec<Patch>, Refusal> {
-    let Mark::Glyphs { .. } = &record.mark else {
-        return Err(Refusal::NotText { kind });
-    };
-    let found = operations.iter().find(|o| o.span == record.span);
-    let Some(shown) = found else {
-        return Err(Refusal::ForeignSpan {
-            span: record.span.clone(),
-            len: stream.len(),
-        });
-    };
-    let op = shown
-        .operator
-        .operator()
-        .map(|b| String::from_utf8_lossy(b).into_owned())
-        .unwrap_or_else(|| "(operatorless)".to_string());
-    let wrap = |body: &[u8]| -> Vec<u8> {
-        // The run's own size, so the new glyphs come out its size: the wrapper sets
-        // what the operation needs and the `Q` restores what was there.
-        let mut out = Vec::from(b"q /".as_slice());
-        out.extend_from_slice(font.as_bytes());
-        out.push(b' ');
-        out.extend_from_slice(num(record.text.size).as_bytes());
-        out.extend_from_slice(b" Tf ");
-        out.extend_from_slice(body);
-        out.extend_from_slice(b" Q");
-        out
-    };
-    if matches!(op.as_str(), "Tj" | "'" | "\"") {
-        let mut body = Vec::new();
-        mangle_syntax::writer::write_literal_string(&mut body, encoded);
-        body.push(b' ');
-        body.extend_from_slice(op.as_bytes());
-        return Ok(vec![Patch {
-            range: record.span.clone(),
-            bytes: wrap(&body),
-            label: format!("retype as {text:?} in {font}"),
-        }]);
+    let fonts = fonts.ok_or(Refusal::NoFontContext)?;
+    if object.records.is_empty() {
+        return Err(Refusal::NoSpans);
     }
-    if op != "TJ" {
-        return Err(Refusal::NotPlainShow { op });
+    let pieces = retype_face_pieces(object, text, fonts, target)?;
+    let operations = ContentStream::parse(stream).operations();
+    let mut patches = Vec::new();
+    for (record, piece) in object.records.iter().zip(pieces.iter()) {
+        patches.extend(retype_record(
+            stream,
+            object.kind,
+            record,
+            piece,
+            1,
+            text,
+            &operations,
+            Some(target),
+        )?);
     }
-    let Some(array_span) = record_span_single(record) else {
-        return Err(Refusal::NotPlainShow { op });
-    };
-    let array = stream
-        .get(array_span.clone())
-        .ok_or_else(|| Refusal::ForeignSpan {
-            span: array_span.clone(),
-            len: stream.len(),
-        })?;
-    let items = tj_items(array, array_span.start)?;
-    let mut string_count = 0usize;
-    let mut live_kern = false;
-    let mut have = 0usize;
-    for item in &items {
-        match item {
-            TjItem::String(_, resolved) => {
-                string_count += 1;
-                have += resolved.len();
-            }
-            TjItem::Kern(v) => live_kern = live_kern || *v != 0.0,
-        }
-    }
-    if string_count == 0 {
-        return Err(Refusal::NotPlainShow {
-            op: "TJ".to_string(),
-        });
-    }
-    if !live_kern {
-        let mut body = Vec::new();
-        mangle_syntax::writer::write_literal_string(&mut body, encoded);
-        body.extend_from_slice(b" Tj");
-        return Ok(vec![Patch {
-            range: record.span.clone(),
-            bytes: wrap(&body),
-            label: format!("retype as {text:?} in {font}"),
-        }]);
-    }
-    // Glyph counts, not byte lengths: each CID is two bytes, so the split is at twice
-    // the resolved lengths the own-font path cuts at.
-    if encoded.len() / 2 != have {
-        return Err(Refusal::GlyphCountMismatch {
-            want: encoded.len() / 2,
-            have,
-        });
-    }
-    // The array is rebuilt item by item in the order the file wrote it: strings take
-    // the next share of CID bytes at their old lengths, and every kern — leading,
-    // middle or trailing — is re-emitted where it stood, because a kern displaces
-    // whatever follows it and only that.
-    let mut array_body = Vec::from(b"[".as_slice());
-    let mut rest = encoded;
-    for item in &items {
-        match item {
-            TjItem::String(_, resolved) => {
-                let (piece, tail) = rest.split_at(resolved.len() * 2);
-                rest = tail;
-                let mut string = Vec::new();
-                mangle_syntax::writer::write_literal_string(&mut string, piece);
-                array_body.extend_from_slice(&string);
-                array_body.push(b' ');
-            }
-            TjItem::Kern(number) => {
-                array_body.extend_from_slice(num(*number).as_bytes());
-                array_body.push(b' ');
-            }
-        }
-    }
-    array_body.extend_from_slice(b"] TJ");
-    Ok(vec![Patch {
-        range: record.span.clone(),
-        bytes: wrap(&array_body),
-        label: format!("retype as {text:?} in {font}"),
-    }])
+    Ok(patches)
 }
-///
+
 /// A `TJ` array pairs strings with kerns, and the kerns belong to the old glyphs: a kern
 /// displaces whatever follows it, so every kern after a change sits in the wrong gap.
 /// Two shapes are faithful and everything else is refused. When no kern does anything —
@@ -1095,6 +1114,7 @@ fn tj_patches(
     stream: &[u8],
     record: &mangle_content::interp::Record,
     piece: &[u8],
+    units: usize,
     text: &str,
 ) -> Result<Vec<Patch>, Refusal> {
     let refused = || Refusal::NotPlainShow {
@@ -1135,19 +1155,19 @@ fn tj_patches(
         }]);
     }
     let have: usize = strings.iter().map(|(_, resolved)| resolved.len()).sum();
-    if piece.len() != have {
+    if piece.len() != have * units {
         return Err(Refusal::GlyphCountMismatch {
-            want: piece.len(),
+            want: piece.len() / units.max(1),
             have,
         });
     }
     // Each string keeps its span and therefore its kerns: the pieces are cut at the old
-    // resolved lengths, which are glyph counts for a single-byte encoding, so every kern
-    // follows the same glyph it followed before.
+    // resolved lengths times the units, so every kern follows the same glyph it followed
+    // before.
     let mut patches = Vec::with_capacity(strings.len());
     let mut rest = piece;
     for (span, resolved) in &strings {
-        let (piece, tail) = rest.split_at(resolved.len());
+        let (piece, tail) = rest.split_at(resolved.len() * units);
         rest = tail;
         let mut replacement = Vec::new();
         mangle_syntax::writer::write_literal_string(&mut replacement, piece);
@@ -1907,6 +1927,9 @@ pub fn verify_with(
     {
         return verify_retype_in(before, after, object, text, cids, font);
     }
+    if let Change::RetypeFace { text, font } = change {
+        return verify_retype_face(before, after, object, text, font, fonts);
+    }
 
     let expected = match change {
         Change::Delete => old.objects().len().saturating_sub(1),
@@ -1926,7 +1949,7 @@ pub fn verify_with(
         // Dispatched above: the one edit that changes the grouping.
         Change::Text(_) => Ok(()),
         // Dispatched above: checked by its bytes rather than by the geometry.
-        Change::Retype { .. } | Change::RetypeIn { .. } => Ok(()),
+        Change::Retype { .. } | Change::RetypeIn { .. } | Change::RetypeFace { .. } => Ok(()),
         // A crop changes where the image **is not**: it still sits exactly where it was, because
         // a clip cuts what is drawn rather than moving it. So the ordinary checks apply.
         Change::Crop { .. } => Ok(()),
@@ -2155,6 +2178,36 @@ fn verify_retype_in(
         pieces.push(encode_cids(cids, piece, font).map_err(|r| r.to_string())?);
     }
     check_retype_bytes(before, after, target, &pieces)
+}
+
+/// Did a same-family retype write exactly the bytes it should have, and nothing else?
+///
+/// The expected pieces are re-encoded in the target's encoding through the page's own
+/// font table — the same computation the patcher ran, read back out of the file rather
+/// than remembered from the edit.
+fn verify_retype_face(
+    before: &PageContent,
+    after: &PageContent,
+    object: usize,
+    text: &str,
+    target: &str,
+    fonts: Option<&Fonts<'_>>,
+) -> Result<(), String> {
+    use crate::page_objects::PageModel;
+
+    let fonts = fonts.ok_or_else(|| {
+        "a same-family retype cannot be checked without the page's font table".to_string()
+    })?;
+    let old = PageModel::build(&before.records);
+    let Some(target_object) = old.objects().get(object) else {
+        return Err(format!(
+            "object {object} is not one of the page's {} objects",
+            old.objects().len()
+        ));
+    };
+    let pieces =
+        retype_face_pieces(target_object, text, fonts, target).map_err(|r| r.to_string())?;
+    check_retype_bytes(before, after, target_object, &pieces)
 }
 
 /// The shared tail of both retype checks: the record count is unchanged, every old
@@ -3505,10 +3558,12 @@ mod tests {
             .zip(sizes.iter())
             .map(|(op, size)| {
                 let token = op.operands.first().expect("the string");
-                let span = token.span.start + 1..token.span.end - 1;
-                // Two glyphs a record in the fixtures below, no escapes: the span's own
-                // length is the count, which is what the split reads.
-                let glyphs = stream[span.clone()].len();
+                // The token's whole span, delimiters included: a replacement covers the
+                // token it replaces, and the writer adds the delimiters back.
+                let span = token.span.clone();
+                // Two glyphs a record in the fixtures below, no escapes: the span holds
+                // the whole tokens, so the count is read below rather than assumed.
+                let glyphs = 2;
                 let state = mangle_content::state::TextState {
                     font: Some("F1".to_string()),
                     size: *size,
@@ -3569,7 +3624,7 @@ mod tests {
         let applied = apply_change(stream, &model.objects()[at], &change).expect("writable");
         assert_eq!(
             applied.bytes,
-            b"BT /F1 12 Tf q /F7 12 Tf [(\x00\x01\x00\x02) 20 (\x00\x03\x00\x04) ] TJ Q ET"
+            b"BT /F1 12 Tf q /F7 12 Tf [(\x00\x01\x00\x02) 20 (\x00\x03\x00\x04)] TJ Q ET"
                 .as_slice(),
             "the kern stays at its index and the wrapper switches the font"
         );
@@ -3594,6 +3649,95 @@ mod tests {
             matches!(
                 err,
                 ChangeError::Refused(Refusal::GlyphNotEncodable { ch: 'o', .. })
+            ),
+            "{err}"
+        );
+        let _ = before;
+    }
+
+    /// Two WinAnsi faces sharing an encoding, the second remapping A and B: the shape
+    /// a same-family switch reads its codes from.
+    fn swapped_resources() -> mangle_content::Resources {
+        use mangle_syntax::object::{Dict, Name, Object};
+        let mut plain = Dict::new();
+        plain.insert(Name::new("Type"), Object::name("Font"));
+        plain.insert(Name::new("Subtype"), Object::name("Type1"));
+        plain.insert(Name::new("BaseFont"), Object::name("Helvetica"));
+        plain.insert(Name::new("Encoding"), Object::name("WinAnsiEncoding"));
+        let mut swapped = Dict::new();
+        swapped.insert(Name::new("Type"), Object::name("Font"));
+        swapped.insert(Name::new("Subtype"), Object::name("Type1"));
+        swapped.insert(Name::new("BaseFont"), Object::name("Helvetica-Bold"));
+        let mut encoding = Dict::new();
+        encoding.insert(Name::new("BaseEncoding"), Object::name("WinAnsiEncoding"));
+        encoding.insert(
+            Name::new("Differences"),
+            Object::Array(vec![Object::Int(65), Object::name("B"), Object::name("A")]),
+        );
+        swapped.insert(Name::new("Encoding"), Object::Dict(encoding));
+        let mut fonts = Dict::new();
+        fonts.insert(Name::new("F1"), Object::Dict(plain));
+        fonts.insert(Name::new("F2"), Object::Dict(swapped));
+        let mut outer = Dict::new();
+        outer.insert(Name::new("Font"), Object::Dict(fonts));
+        mangle_content::Resources::from_dict(&outer, &|_| None)
+    }
+
+    fn swapped_fonts(resources: &mangle_content::Resources) -> Fonts<'_> {
+        Fonts {
+            resources,
+            resolve: &|_| None,
+        }
+    }
+
+    #[test]
+    fn a_retype_in_another_font_switches_with_a_wrapper() {
+        let stream = b"BT /F1 12 Tf (Hi) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = swapped_resources();
+        let fonts = swapped_fonts(&resources);
+        // B in F2 is code 65: the bytes name F2's codes, not F1's.
+        let change = Change::RetypeFace {
+            text: "Bi".to_string(),
+            font: "F2".to_string(),
+        };
+        let applied = apply_change_with(stream, &model.objects()[at], &change, Some(&fonts))
+            .expect("B and i are both in F2");
+        assert_eq!(
+            applied.bytes,
+            b"BT /F1 12 Tf q /F2 12 Tf (Ai) Tj Q ET".as_slice(),
+            "65 is B in F2, and i is i in both"
+        );
+        let after = run(&ContentStream::parse(&applied.bytes));
+        verify_with(&before, &after, at, &change, Some(&fonts)).expect("the face switched");
+    }
+
+    #[test]
+    fn a_retype_in_a_font_without_the_character_is_refused() {
+        let stream = b"BT /F1 12 Tf (Hi) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = swapped_resources();
+        let fonts = swapped_fonts(&resources);
+        // α is in neither face: the ladder moves on rather than failing here, and the
+        // refusal names the character for the rung that does answer it.
+        let err = apply_change_with(
+            stream,
+            &model.objects()[at],
+            &Change::RetypeFace {
+                text: "Hα".to_string(),
+                font: "F2".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect_err("no alpha anywhere");
+        assert!(
+            matches!(
+                err,
+                ChangeError::Refused(Refusal::GlyphNotEncodable { ch: 'α', .. })
             ),
             "{err}"
         );

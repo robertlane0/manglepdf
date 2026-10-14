@@ -877,16 +877,14 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
         .filter(|d| Path::new(d).extension().is_some_and(|e| e == "md"))
         .map(PathBuf::from)
         .collect();
-    // Everything under `docs/`, **recursively**: the architecture decisions and the design notes
-    // live in subdirectories, and a link into one of those is as breakable as any other. A
-    // walk that stopped at the first level would report success while skipping them, which is
-    // the failure mode this check exists to remove.
     markdown_under(&root.join("docs"), root, &mut out);
-    // Everything at the root as well, because `FINISH.md` and `GOAL.md` are the two documents
-    // most worth keeping honest and neither is in `REQUIRED_DOCS`. The one local file that is
-    // left out is deliberately untracked, so a gate that required it would fail on a fresh
-    // clone; everything the contract asks for is in the repository, which is the property this
-    // check exists to confirm.
+    let ignored: BTreeSet<String> = std::fs::read_to_string(root.join(".gitignore"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.trim_start_matches('/').to_string())
+        .collect();
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -896,7 +894,7 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            if is_markdown && name != "AGENTS.md" {
+            if is_markdown && !ignored.contains(&name) {
                 out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
             }
         }
@@ -1418,22 +1416,20 @@ tests::an_unbalanced_tree_is_rejected: test
     #[test]
     fn a_quoted_key_is_the_same_key() {
         let dir = with_config("[alias]\n\"xtask\" = \"run --package xtask --\"\n");
-        assert!(missing_alias(dir.path()).is_empty());
+        assert_eq!(missing_alias(dir.path()), Vec::<String>::new());
     }
 
     #[test]
     fn a_hash_inside_a_quoted_value_is_not_a_comment() {
-        // The value here is nonsense for cargo, and that is the point: what matters is that
-        // the comment stripper does not truncate the line and lose the key it was reading.
         let dir = with_config("[alias]\nxtask = \"run # not a comment\" # a real one\n");
-        assert!(missing_alias(dir.path()).is_empty());
+        assert_eq!(missing_alias(dir.path()), Vec::<String>::new());
     }
 
     #[test]
     fn a_later_alias_table_is_read_after_an_earlier_one() {
         let dir =
             with_config("[net]\noffline = true\n[alias]\nxtask = \"run --package xtask --\"\n");
-        assert!(missing_alias(dir.path()).is_empty());
+        assert_eq!(missing_alias(dir.path()), Vec::<String>::new());
     }
 
     #[test]

@@ -151,7 +151,13 @@ pub fn widths(name: &str) -> Option<&'static Widths> {
 /// plus, and a trailing `MT` or `PS`, which is how a PostScript font spells the same face.
 /// The family ends at the first hyphen or comma, so both the modern `Helvetica-BoldItalic`
 /// and the older `Helvetica-Bold,Italic` come out as `Helvetica` and `BoldItalic`.
-pub(crate) fn split_name(name: &str) -> Option<(&str, String)> {
+/// Split a `/BaseFont` into its family and style: `ABCDEF+Helvetica-Bold` is
+/// (`Helvetica`, `Bold`), and so is `Helvetica-Bold,Italic` once the comma is gone.
+///
+/// Public because choosing a same-family font — the charter's second rung — needs the
+/// same split the widths and the substitution use: a second parser here would be a
+/// second place for subset prefixes and `MT` suffixes to disagree.
+pub fn split_name(name: &str) -> Option<(&str, String)> {
     // A subset tag is exactly six characters; anything else before a plus is part of the
     // name, and a name with no plus has no tag at all.
     let name = match name.as_bytes().get(6) {
@@ -208,7 +214,13 @@ const FAMILY_ALIASES: &[(&str, &str)] = &[
 /// Applied to the family [`split_name`] produced, which is why `TimesNewRomanPSMT`,
 /// `TimesNewRomanPS-BoldMT` and `TimesNewRoman,Bold` all arrive here as `TimesNewRoman`:
 /// the `PS` and `MT` are already gone by then.
-pub(crate) fn canonical_family(family: &str) -> &str {
+/// The Standard 14 family a name stands in for, or the name itself when it names one.
+///
+/// Applied to the family [`split_name`] produced, which is why `TimesNewRomanPSMT`,
+/// `TimesNewRomanPS-BoldMT` and `TimesNewRoman,Bold` all arrive here as `TimesNewRoman`:
+/// the `PS` and `MT` are already gone by then. Public for the same reason `split_name`
+/// is: one parser for font names, wherever the question is asked.
+pub fn canonical_family(family: &str) -> &str {
     FAMILY_ALIASES
         .iter()
         .find(|(alias, _)| *alias == family)

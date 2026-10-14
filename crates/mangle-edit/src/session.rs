@@ -457,10 +457,83 @@ impl Editor {
             })
             .and_then(|n| String::from_utf8(n).ok())
             .unwrap_or_default();
+        if let Some(outcome) = self.apply_family(object, text, &base_font, missing) {
+            return outcome;
+        }
         let Some((family, program)) = mangle_font::substitute_named(&base_font) else {
             return Err(original());
         };
         self.fallback_to(object, text, program, family, Some((missing, base_font)))
+    }
+
+    /// Retype in a same-family document font when one covers `text` (rung 2).
+    fn apply_family(
+        &mut self,
+        object: &PageObject,
+        text: &str,
+        base_font: &str,
+        missing: char,
+    ) -> Option<Result<Outcome, SessionError>> {
+        let (family, _) = mangle_font::split_name(base_font)?;
+        let want = mangle_font::canonical_family(family);
+        let doc = std::sync::Arc::clone(&self.doc);
+        let resources = self.resources.clone();
+        let fonts = Fonts {
+            resources: &resources,
+            resolve: &|o| doc.resolve_object(o),
+        };
+        let stream = self.stream();
+        let table = match object.records.first().and_then(|r| r.form.as_deref()) {
+            Some(form) => self
+                .resources
+                .form_resources(form)
+                .unwrap_or_else(|| std::sync::Arc::new(self.resources.clone())),
+            None => std::sync::Arc::new(self.resources.clone()),
+        };
+        for name in table.fonts.keys() {
+            let dict = table
+                .fonts
+                .get(name)
+                .and_then(|found| doc.resolve_object(found).or_else(|| Some(found.clone())));
+            let base = dict.as_ref().and_then(|o| o.as_dict()).and_then(|d| {
+                d.get("BaseFont")
+                    .and_then(|o| o.as_name())
+                    .map(|n| n.to_vec())
+            });
+            let base = base.and_then(|n| String::from_utf8(n).ok());
+            let Some((name_family, _)) = base.as_deref().and_then(mangle_font::split_name) else {
+                continue;
+            };
+            if mangle_font::canonical_family(name_family) != want {
+                continue;
+            }
+            if crate::edits::retype_face_pieces(object, text, &fonts, name).is_err() {
+                continue;
+            }
+            let fallback = Change::RetypeFace {
+                text: text.to_string(),
+                font: name.clone(),
+            };
+            let Ok(patches) = patches_for_with(&stream, object, &fallback, Some(&fonts)) else {
+                continue;
+            };
+            let Ok(applied) = apply(&stream, &patches) else {
+                continue;
+            };
+            let label = format!(
+                "retype as {text:?} (in-document {name}: {missing:?} is not in {base_font})"
+            );
+            let notice = format!("{missing:?} is not in {base_font} — set in document font {name}");
+            if self.record(applied.bytes, &patches, label.clone()).is_err() {
+                continue;
+            }
+            return Some(Ok(Outcome {
+                label,
+                change: fallback,
+                notice: Some(notice),
+            }));
+        }
+        None
     }
 
     /// Install `program` for `text` and switch the run to it: the shared tail of the
@@ -850,6 +923,7 @@ fn change_label(change: &Change) -> String {
         }
         Change::Retype { text } => format!("retype as {text:?}"),
         Change::RetypeIn { text, font, .. } => format!("retype as {text:?} in {font}"),
+        Change::RetypeFace { text, font } => format!("retype as {text:?} in {font}"),
     }
 }
 
@@ -1041,7 +1115,7 @@ mod tests {
     fn doc_with_helvetica(part: &str) -> (Document, Page) {
         doc_with_fontdict(
             part,
-            "<</Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding>>",
+            "/F1 <</Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding>>",
         )
     }
 
@@ -1050,13 +1124,24 @@ mod tests {
     fn doc_with_type3(part: &str) -> (Document, Page) {
         doc_with_fontdict(
             part,
-            "<</Type /Font /Subtype /Type3 /Name /T3 /FontBBox [0 0 100 100] \
+            "/F1 <</Type /Font /Subtype /Type3 /Name /T3 /FontBBox [0 0 100 100] \
              /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs <<>> /Resources <<>> \
              /Encoding /WinAnsiEncoding>>",
         )
     }
 
-    fn doc_with_fontdict(part: &str, fontdict: &str) -> (Document, Page) {
+    /// Two Helvetica faces sharing WinAnsi, the second with `α` remapped in: the shape
+    /// the second rung answers without embedding anything.
+    fn doc_with_family(part: &str) -> (Document, Page) {
+        doc_with_fontdict(
+            part,
+            "/F1 <</Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding>> \
+             /F2 <</Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold \
+             /Encoding <</BaseEncoding /WinAnsiEncoding /Differences [225 /alpha]>>>>",
+        )
+    }
+
+    fn doc_with_fontdict(part: &str, fonttable: &str) -> (Document, Page) {
         let mut out = String::from("%PDF-1.7\n");
         let mut offsets = vec![0usize];
         offsets.push(out.len());
@@ -1075,8 +1160,8 @@ mod tests {
         out.push_str(part);
         out.push_str("\nendstream\nendobj\n");
         offsets.push(out.len());
-        out.push_str("5 0 obj\n<</Font <</F1 ");
-        out.push_str(fontdict);
+        out.push_str("5 0 obj\n<</Font <<");
+        out.push_str(fonttable);
         out.push_str(">>>>\nendobj\n");
         assert_eq!(offsets.len(), 6, "one entry per object plus the free head");
         let start_xref = out.len();
@@ -1438,6 +1523,102 @@ mod tests {
             }
         }
         assert!(found, "the page says Hi through an installed font");
+    }
+
+    /// A missing glyph covered by a same-family document font stays in the document:
+    /// no embedding, just a `Tf` switch to the font that has the code.
+    #[test]
+    fn a_missing_glyph_uses_a_same_family_font_first() {
+        let (doc, page) = doc_with_family("BT /F1 12 Tf (Hi) Tj ET");
+        let resources = page
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .unwrap_or_default();
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &resources).expect("editable");
+        let at = editor
+            .model()
+            .objects()
+            .iter()
+            .position(|o| {
+                matches!(
+                    o.kind,
+                    crate::Kind::Line | crate::Kind::Block | crate::Kind::LooseRun
+                )
+            })
+            .expect("a text object");
+        let outcome = editor
+            .apply(
+                at,
+                &Change::Retype {
+                    text: "Hα".to_string(),
+                },
+            )
+            .expect("the sibling font answers");
+        assert!(
+            outcome.label.contains("in-document")
+                && outcome.label.contains("F2")
+                && !outcome.label.contains("fallback"),
+            "the second rung answers before any embedding: {}",
+            outcome.label
+        );
+        // And nothing was installed: the save carries no font objects.
+        let save = editor.save().expect("saves");
+        assert!(
+            save.installed.is_empty(),
+            "no embedding was needed: {:?}",
+            save.installed
+        );
+        let doc2 = Document::open(save.bytes.clone(), OpenOptions::default()).expect("reopens");
+        let cat = doc2.catalog().expect("a catalogue");
+        let root = cat
+            .get("Pages")
+            .and_then(Object::as_ref_id)
+            .expect("a tree");
+        let tree = mangle_doc::PageTree::build(&doc2, root).expect("the walk");
+        let page2 = tree.pages().first().expect("a page").clone();
+        let resources2 = page2
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc2.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc2.resolve_object(o)))
+            .expect("resources");
+        let stream2 = page2.decoded_contents(&doc2);
+        let after = mangle_content::interp::run_with(
+            &mangle_content::ContentStream::parse(&stream2),
+            &resources2,
+        );
+        // F2 shows α at code 225, so the decoded run reads back as "Hα" with no CMap.
+        let mut found = false;
+        for record in &after.records {
+            let mangle_content::interp::Mark::Glyphs { text: raw, .. } = &record.mark else {
+                continue;
+            };
+            if raw.as_slice() == b"H\xe1" {
+                found = true;
+            }
+        }
+        assert!(found, "the run shows H then code 225");
+        // The page's own decoder agrees, which is the check a CMap would have done.
+        let decoded = mangle_text::decode(
+            &resources2,
+            &|o| doc2.resolve_object(o),
+            &mangle_text::Run {
+                form: None,
+                font: Some("F2"),
+                text: b"H\xe1",
+                origins: vec![(0.0, 0.0), (0.0, 0.0)],
+                size: 12.0,
+            },
+        )
+        .expect("readable");
+        assert_eq!(decoded.text, "Hα");
     }
 
     /// One `beginbfchar` block read as CID to character: the reader a Unicode

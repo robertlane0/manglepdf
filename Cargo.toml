@@ -143,6 +143,7 @@ too_many_arguments = "allow"
 manual_string_new = "allow"
 string_slice = "allow"
 unreadable_literal = "allow"
+assert_is_empty = "allow"
 
 [profile.release]
 opt-level = 3
