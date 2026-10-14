@@ -362,12 +362,6 @@ pub enum Refusal {
         /// What kind of thing it is.
         kind: Kind,
     },
-    /// The run holds more than one run of glyphs: replacing the whole string means choosing
-    /// which run keeps it, and that choice is layout rather than editing.
-    MultipleRuns {
-        /// How many runs the object holds.
-        runs: usize,
-    },
     /// The run's codes are two bytes wide: a composite font's codes are CIDs, and neither a
     /// CMap nor a `cmap` is an encoding a character can be looked up in.
     CompositeText {
@@ -445,11 +439,6 @@ impl fmt::Display for Refusal {
             Self::NotText { kind } => write!(
                 f,
                 "a {kind:?} has no shown string to replace: only a run of glyphs can be retyped"
-            ),
-            Self::MultipleRuns { runs } => write!(
-                f,
-                "the object holds {runs} runs of text, and replacing the whole string means \
-                 choosing which run keeps it; retype one run at a time"
             ),
             Self::CompositeText { font } => write!(
                 f,
@@ -672,33 +661,109 @@ fn retype_patches(
     if !matches!(object.kind, Kind::Line | Kind::Block | Kind::LooseRun) {
         return Err(Refusal::NotText { kind: object.kind });
     }
-    let Some(record) = object.records.first() else {
+    if object.records.is_empty() {
         return Err(Refusal::NoSpans);
-    };
-    if object.records.len() != 1 {
-        return Err(Refusal::MultipleRuns {
-            runs: object.records.len(),
-        });
     }
-    let Mark::Glyphs {
-        two_byte,
-        text_spans,
-        ..
-    } = &record.mark
-    else {
-        return Err(Refusal::NotText { kind: object.kind });
-    };
-    let font = record
-        .text
-        .font
-        .clone()
-        .unwrap_or_else(|| "(unnamed)".to_string());
-    if *two_byte {
-        return Err(Refusal::CompositeText { font });
-    }
-    // The operation the record came from, read back out of the stream rather than
-    // remembered: only a plain `Tj` has exactly one string and no kerns.
+    // Every run keeps its glyph count: the new text flows across the runs at the old
+    // boundaries, so each run's kerns, spacing and font still belong to what they are
+    // written over. A different total would put every kern and every run after the
+    // change in the wrong place.
+    let pieces = retype_pieces(object, text, fonts)?;
+    // The operations the records came from, read back out of the stream rather than
+    // remembered: the shape of each operation decides its own surgery below.
     let operations = ContentStream::parse(stream).operations();
+    let mut patches = Vec::new();
+    for (record, piece) in object.records.iter().zip(pieces.iter()) {
+        patches.extend(retype_record(
+            stream,
+            object.kind,
+            record,
+            piece,
+            text,
+            &operations,
+        )?);
+    }
+    Ok(patches)
+}
+
+/// The new text cut into one encoded piece per run.
+///
+/// Every check that depends on the fonts lives here, so the span surgery below works on
+/// bytes alone: each run names its own font and encoding, and each character must have a
+/// code in the run it lands in.
+///
+/// One run takes the whole text at any length — there is no boundary to choose. Several
+/// runs split it at the old glyph counts, so each run's kerns, spacing and font still
+/// belong to what they are written over; a different total would put every kern and
+/// every run after the change in the wrong place, and choosing any other split would be
+/// layout rather than editing.
+fn retype_pieces(
+    object: &PageObject,
+    text: &str,
+    fonts: &Fonts<'_>,
+) -> Result<Vec<Vec<u8>>, Refusal> {
+    let mut counts = Vec::with_capacity(object.records.len());
+    let mut fonts_of = Vec::with_capacity(object.records.len());
+    let mut encodings = Vec::with_capacity(object.records.len());
+    for record in &object.records {
+        let Mark::Glyphs {
+            codes, two_byte, ..
+        } = &record.mark
+        else {
+            return Err(Refusal::NotText { kind: object.kind });
+        };
+        let font = record
+            .text
+            .font
+            .clone()
+            .unwrap_or_else(|| "(unnamed)".to_string());
+        if *two_byte {
+            return Err(Refusal::CompositeText { font });
+        }
+        encodings.push(retype_encoding(record, fonts, &font)?);
+        fonts_of.push(font);
+        counts.push(codes.len());
+    }
+    let have: usize = counts.iter().sum();
+    if counts.len() == 1 {
+        let Some((encoding, font)) = encodings.iter().zip(fonts_of.iter()).next() else {
+            return Err(Refusal::NoSpans);
+        };
+        return Ok(vec![encode_simple_text(encoding, text, font)?]);
+    }
+    let mut chars = text.chars();
+    let mut pieces = Vec::with_capacity(counts.len());
+    for ((encoding, font), count) in encodings.iter().zip(fonts_of.iter()).zip(counts.iter()) {
+        let piece: String = chars.by_ref().take(*count).collect();
+        if piece.chars().count() != *count {
+            return Err(Refusal::GlyphCountMismatch {
+                want: text.chars().count(),
+                have,
+            });
+        }
+        pieces.push(encode_simple_text(encoding, &piece, font)?);
+    }
+    Ok(pieces)
+}
+
+/// The patches for one run's share: the operation's shape decides the surgery.
+///
+/// A plain `Tj` — and `'` and `"`, whose line positioning belongs to the operation
+/// rather than to the glyphs — holds one string and no kerns, so the piece replaces it.
+/// A `TJ` array's strings share their operation with kerns, which takes the array path.
+fn retype_record(
+    stream: &[u8],
+    kind: Kind,
+    record: &mangle_content::interp::Record,
+    piece: &[u8],
+    text: &str,
+    operations: &[Operation],
+) -> Result<Vec<Patch>, Refusal> {
+    let Mark::Glyphs { text_spans, .. } = &record.mark else {
+        return Err(Refusal::NotText { kind });
+    };
+    // The operation the record came from, found among the parsed operations rather
+    // than remembered: the shape of each operation decides its own surgery.
     let found = operations.iter().find(|o| o.span == record.span);
     let Some(shown) = found else {
         return Err(Refusal::ForeignSpan {
@@ -728,15 +793,12 @@ fn retype_patches(
                 len: stream.len(),
             });
         }
-        let encoding = retype_encoding(record, fonts, &font)?;
-        let bytes = encode_simple_text(&encoding, text, &font)?;
-        return retype_patch(span, &bytes, text);
+        return retype_patch(span, piece, text);
     }
     if op != "TJ" {
         return Err(Refusal::NotPlainShow { op });
     }
-    let encoding = retype_encoding(record, fonts, &font)?;
-    tj_patches(stream, record, text, &encoding, &font)
+    tj_patches(stream, record, piece, text)
 }
 
 /// One replacement of a string token by a literal string holding `bytes`.
@@ -790,9 +852,8 @@ fn record_span_single(record: &mangle_content::interp::Record) -> Option<Range<u
 fn tj_patches(
     stream: &[u8],
     record: &mangle_content::interp::Record,
+    piece: &[u8],
     text: &str,
-    encoding: &mangle_font::Encoding,
-    font: &str,
 ) -> Result<Vec<Patch>, Refusal> {
     let refused = || Refusal::NotPlainShow {
         op: "TJ".to_string(),
@@ -810,13 +871,12 @@ fn tj_patches(
     if strings.is_empty() {
         return Err(refused());
     }
-    let bytes = encode_simple_text(encoding, text, font)?;
     if numbers.iter().all(|v| *v == 0.0) {
         // No kern moves anything, so the array is one string wearing brackets: collapse
         // it. The range is the whole operation — operands through operator — and the
         // replacement is a complete `Tj`, so the bytes around it are untouched.
         let mut replacement = Vec::new();
-        mangle_syntax::writer::write_literal_string(&mut replacement, &bytes);
+        mangle_syntax::writer::write_literal_string(&mut replacement, piece);
         replacement.extend_from_slice(b" Tj");
         return Ok(vec![Patch {
             range: record.span.clone(),
@@ -825,9 +885,9 @@ fn tj_patches(
         }]);
     }
     let have: usize = strings.iter().map(|(_, resolved)| resolved.len()).sum();
-    if bytes.len() != have {
+    if piece.len() != have {
         return Err(Refusal::GlyphCountMismatch {
-            want: bytes.len(),
+            want: piece.len(),
             have,
         });
     }
@@ -835,7 +895,7 @@ fn tj_patches(
     // resolved lengths, which are glyph counts for a single-byte encoding, so every kern
     // follows the same glyph it followed before.
     let mut patches = Vec::with_capacity(strings.len());
-    let mut rest = bytes.as_slice();
+    let mut rest = piece;
     for (span, resolved) in &strings {
         let (piece, tail) = rest.split_at(resolved.len());
         rest = tail;
@@ -1783,19 +1843,7 @@ fn verify_retype(
             old.objects().len()
         ));
     };
-    let Some(record) = target.records.first() else {
-        return Err("the object has no records to check".to_string());
-    };
-    let Mark::Glyphs { text: was, .. } = &record.mark else {
-        return Err("the object is not a run of text".to_string());
-    };
-    let font = record
-        .text
-        .font
-        .clone()
-        .unwrap_or_else(|| "(unnamed)".to_string());
-    let encoding = retype_encoding(record, fonts, &font).map_err(|r| r.to_string())?;
-    let expected = encode_simple_text(&encoding, text, &font).map_err(|r| r.to_string())?;
+    let pieces = retype_pieces(target, text, fonts).map_err(|r| r.to_string())?;
 
     // A retype rewrites one operand and adds no operations, so the record count is the same.
     if after.records.len() != before.records.len() {
@@ -1809,6 +1857,10 @@ fn verify_retype(
         Mark::Glyphs { text, .. } => Some(text.clone()),
         _ => None,
     };
+    // The old strings, one per run: each is removed from the before side once, and each
+    // new piece from the after side once, so a page that showed the same string twice
+    // still balances when only one of the two was retyped.
+    let old_raws: Vec<Vec<u8>> = target.records.iter().filter_map(raw).collect();
     // Every other run's bytes are still there: the comparison is a sorted multiset
     // rather than positional, because the replacement may be longer or shorter and every
     // span after it shifts — and a multiset rather than a set, because a page may show
@@ -1817,20 +1869,24 @@ fn verify_retype(
     let mut after_all: Vec<Vec<u8>> = after.records.iter().filter_map(raw).collect();
     before_all.sort();
     after_all.sort();
-    let Some(at) = before_all
-        .iter()
-        .position(|b| b.as_slice() == was.as_slice())
-    else {
-        return Err("the old string was not on the page to begin with".to_string());
-    };
-    before_all.remove(at);
-    let Some(at) = after_all
-        .iter()
-        .position(|b| b.as_slice() == expected.as_slice())
-    else {
-        return Err("the new string is not on the page".to_string());
-    };
-    after_all.remove(at);
+    for was in &old_raws {
+        let Some(at) = before_all
+            .iter()
+            .position(|b| b.as_slice() == was.as_slice())
+        else {
+            return Err("an old string was not on the page to begin with".to_string());
+        };
+        before_all.remove(at);
+    }
+    for want in &pieces {
+        let Some(at) = after_all
+            .iter()
+            .position(|b| b.as_slice() == want.as_slice())
+        else {
+            return Err("a new string is not on the page".to_string());
+        };
+        after_all.remove(at);
+    }
     if before_all != after_all {
         return Err("a run besides the retyped one changed".to_string());
     }
@@ -2936,7 +2992,7 @@ mod tests {
     }
 
     #[test]
-    fn a_retype_of_two_runs_is_refused() {
+    fn a_retype_flows_across_two_runs_at_the_old_boundary() {
         let stream = b"BT /F1 12 Tf (Hi) Tj (Yo) Tj ET";
         let before = run(&ContentStream::parse(stream));
         let model = PageModel::build(&before.records);
@@ -2948,6 +3004,7 @@ mod tests {
             .iter()
             .position(|o| matches!(o.kind, Kind::Line | Kind::Block) && o.records.len() == 2)
             .expect("one two-run line");
+        // Three glyphs cannot split two-and-two: each run keeps its count.
         let err = patches_for_with(
             stream,
             &model.objects()[at],
@@ -2957,8 +3014,19 @@ mod tests {
             Some(&fonts),
         )
         .expect_err("two runs need a share each");
-        assert!(matches!(err, Refusal::MultipleRuns { runs: 2 }), "{err}");
-        let _ = before;
+        assert!(
+            matches!(err, Refusal::GlyphCountMismatch { want: 3, have: 4 }),
+            "{err}"
+        );
+        // Four glyphs flow two and two.
+        let change = Change::Retype {
+            text: "Heyo".to_string(),
+        };
+        let applied = apply_change_with(stream, &model.objects()[at], &change, Some(&fonts))
+            .expect("two and two");
+        assert_eq!(applied.bytes, b"BT /F1 12 Tf (He) Tj (yo) Tj ET");
+        let after = run(&ContentStream::parse(&applied.bytes));
+        verify_with(&before, &after, at, &change, Some(&fonts)).expect("both runs changed");
     }
 
     #[test]
@@ -2986,6 +3054,55 @@ mod tests {
         )
         .expect_err("CIDs are not characters");
         assert!(matches!(err, Refusal::CompositeText { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_retype_encodes_each_run_in_its_own_font() {
+        use mangle_syntax::object::{Dict, Name, Object};
+        // A second font that swaps A and B: the same letter is a different code on each
+        // side of the run boundary, so the bytes prove which table each piece read.
+        let mut differences = Dict::new();
+        differences.insert(Name::new("Type"), Object::name("Font"));
+        differences.insert(Name::new("Subtype"), Object::name("Type1"));
+        differences.insert(Name::new("BaseFont"), Object::name("Swapped"));
+        let mut swapped = Dict::new();
+        swapped.insert(Name::new("BaseEncoding"), Object::name("WinAnsiEncoding"));
+        swapped.insert(
+            Name::new("Differences"),
+            Object::Array(vec![Object::Int(65), Object::name("B"), Object::name("A")]),
+        );
+        differences.insert(Name::new("Encoding"), Object::Dict(swapped));
+        let mut fonts = Dict::new();
+        let mut plain = Dict::new();
+        plain.insert(Name::new("Type"), Object::name("Font"));
+        plain.insert(Name::new("Subtype"), Object::name("Type1"));
+        plain.insert(Name::new("BaseFont"), Object::name("Helvetica"));
+        plain.insert(Name::new("Encoding"), Object::name("WinAnsiEncoding"));
+        fonts.insert(Name::new("F1"), Object::Dict(plain));
+        fonts.insert(Name::new("F2"), Object::Dict(differences));
+        let mut outer = Dict::new();
+        outer.insert(Name::new("Font"), Object::Dict(fonts));
+        let resources = mangle_content::Resources::from_dict(&outer, &|_| None);
+        let fonts = winansi_fonts(&resources);
+
+        let stream = b"BT /F1 12 Tf (Hi) Tj /F2 12 Tf (Yo) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = model
+            .objects()
+            .iter()
+            .position(|o| matches!(o.kind, Kind::Line | Kind::Block) && o.records.len() == 2)
+            .expect("one two-run line");
+        // "Ao" for the second run: A is 65 in F1 and 66 in F2, so the bytes say which
+        // table each piece read — `(Bo)` on the page reads back as "Ao".
+        let change = Change::Retype {
+            text: "HiAo".to_string(),
+        };
+        let applied = apply_change_with(stream, &model.objects()[at], &change, Some(&fonts))
+            .expect("two and two");
+        assert_eq!(applied.bytes, b"BT /F1 12 Tf (Hi) Tj /F2 12 Tf (Bo) Tj ET");
+        let after = run(&ContentStream::parse(&applied.bytes));
+        verify_with(&before, &after, at, &change, Some(&fonts)).expect("both runs changed");
     }
 
     #[test]
