@@ -71,6 +71,7 @@ manglepdf-cli <command> <file.pdf> [options]
                             --ts N                 baseline shift, points
                             --size N               the font size, points
                             --crop x0,y0,x1,y1      keep that part of an image, in page space
+                            --retype TEXT          replace the run's string, in its own font
                             --forward|--backward   arrange it past the object it overlaps
                             --to-front|--to-back   arrange it to the ends of the page
                             -o FILE                where to write (default beside the input)
@@ -304,7 +305,13 @@ fn edit(args: &[String]) -> Result<(), String> {
         Some(_) => {}
         None => {
             let change = change_from_args(args, object)?;
-            match mangle_edit::verify(&run, &after, which, &change) {
+            // The reopened page's own font table checks a retype: the edit never touches
+            // the fonts, so the table is the same one the edit read.
+            let fonts = mangle_edit::Fonts {
+                resources: &resources2,
+                resolve: &|o| reopened.resolve_object(o),
+            };
+            match mangle_edit::verify_with(&run, &after, which, &change, Some(&fonts)) {
                 Ok(()) => {
                     let _ = writeln!(
                         out,
@@ -383,6 +390,12 @@ fn change_from_args(
             return Ok(mangle_edit::Change::text(property));
         }
     }
+    if let Some(text) = value(args, "--retype") {
+        if text.is_empty() {
+            return Err("--retype needs the replacement string".to_string());
+        }
+        return Ok(mangle_edit::Change::Retype { text });
+    }
     if let Some(colour) = value(args, "--colour") {
         let parts: Vec<f64> = colour.split(',').filter_map(|p| p.parse().ok()).collect();
         match (
@@ -403,7 +416,7 @@ fn change_from_args(
     }
     Err(
         "say what to do: --move dx,dy, --scale s, --delete, --colour r,g,b, a text property \
-         (--tc/--tw/--tz/--tl/--ts/--size), --crop x0,y0,x1,y1, or an arrange flag"
+         (--tc/--tw/--tz/--tl/--ts/--size), --crop x0,y0,x1,y1, --retype TEXT, or an arrange flag"
             .to_string(),
     )
 }

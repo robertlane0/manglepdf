@@ -28,6 +28,13 @@ use mangle_edit::TextProperty;
 pub enum PanelRow {
     /// A value the panel shows and does not edit from here.
     Value(String),
+    /// The run's own text, shown in a field the user can type in.
+    ///
+    /// A unit variant rather than a string: the shell reads the full text out of the
+    /// selection when it draws the field, so the row decision carries no copy that could
+    /// go stale — and the field scrolls rather than truncates, because committing a
+    /// truncated buffer would silently lose the text past the cut.
+    Retype,
     /// A number with a minus and a plus either side of it.
     ///
     /// The `property` carries the value the object has now, and a click writes it plus or minus
@@ -143,15 +150,12 @@ pub fn panel_row(
         // The font's resource name is the one thing a panel can show without the font layer,
         // and it is the name as the stream wrote it — `/F3`, not a family.
         return match row {
-            // What the object says, which is the first thing a panel about a selection should
-            // say. Truncated, because a paragraph does not fit in a field: the limit is stated
-            // rather than applied silently, and the whole text is on the summary for anything
-            // that wants it.
-            0 => PanelRow::Value(
-                content
-                    .map(|c| clamped(c, CONTENT_FIELD))
-                    .unwrap_or_else(|| "No text".to_string()),
-            ),
+            // What the object says, in a field the user can retype: the shell draws the
+            // selection's full text there, and committing it asks the worker for a retype.
+            0 => match content {
+                Some(_) => PanelRow::Retype,
+                None => PanelRow::Value("No text".to_string()),
+            },
             1 => PanelRow::Value(
                 state
                     .font
@@ -272,22 +276,6 @@ pub fn panel_for(selection: Option<&mangle_edit::Summary>) -> RightPanel {
         }
         _ => RightPanel::Colour,
     }
-}
-
-/// How many characters of an object's text the content field shows.
-const CONTENT_FIELD: usize = 48;
-
-/// `text` cut to `limit` characters, with an ellipsis if anything was dropped.
-///
-/// Cut on a character boundary rather than a byte one, because the text is Unicode and half a
-/// UTF-8 sequence is not a shorter string — it is a broken one.
-#[must_use]
-pub fn clamped(text: &str, limit: usize) -> String {
-    let mut out: String = text.chars().take(limit).collect();
-    if out.chars().count() < text.chars().count() {
-        out.push('\u{2026}');
-    }
-    out
 }
 
 /// A number as a panel shows it: two places at most, and never a negative zero.
@@ -580,19 +568,14 @@ mod tests {
         assert_eq!(action_of(verbs.len()), None, "and nothing past the end");
     }
 
-    /// The content row says what the object says, and is cut to fit the field rather than spilling
-    /// out of it.
+    /// The content row is a field the user can retype, and a run with nothing to say
+    /// says so rather than showing an empty field.
     #[test]
     fn the_content_row_shows_what_the_object_says() {
         assert_eq!(
             panel_row(RightPanel::Text, 0, Some(&state()), Some("Explore")),
-            PanelRow::Value("Explore".to_string())
+            PanelRow::Retype
         );
-        // Cut on a character boundary, because half a UTF-8 sequence is not a shorter string.
-        let long: String = "Guidelines for Media Sanitization".to_string();
-        let shown = clamped(&long, 12);
-        assert_eq!(shown, "Guidelines f\u{2026}");
-        assert!(shown.chars().count() <= 12 + 1);
         // And a run with nothing to say says so rather than showing an empty field.
         assert_eq!(
             panel_row(RightPanel::Text, 0, Some(&state()), None),

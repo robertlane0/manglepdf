@@ -177,6 +177,8 @@ pub struct App {
     drag: Option<Drag>,
     /// What the search field holds, and where the page's text matched it.
     search: Search,
+    /// What the content field holds while a run's text is being retyped.
+    retype: Retype,
     /// Whether the window has left the desktop, which is the one piece of windowing state the
     /// shell has to keep: the toggle is sent to the frame, and the frame does not answer back.
     full_screen: bool,
@@ -199,6 +201,26 @@ enum Bar {
     Fit,
     /// Leave the windowed desktop, or come back to it.
     FullScreen,
+}
+
+/// What the content field holds while a run's text is being retyped.
+///
+/// The buffer is kept rather than read out of the selection per frame: a field that
+/// re-read the selection on every frame would erase the word being typed the moment an
+/// edit landed anywhere. It is resynced when the selection changes, or when the page
+/// changed under a field that is not being typed in — an undo, a worker answer — and
+/// never while typing, where a resync would eat the word being written.
+#[derive(Debug, Default)]
+struct Retype {
+    /// What the field shows.
+    text: String,
+    /// The selection the buffer belongs to.
+    for_selection: Option<usize>,
+    /// Whether the field has keyboard focus.
+    focused: bool,
+    /// What was last asked of the worker, so Enter followed by a click-away commits once
+    /// rather than twice: the second commit would be a second, identical undo step.
+    sent: String,
 }
 
 /// What the search field holds and what the page matched.
@@ -278,6 +300,7 @@ impl std::fmt::Debug for App {
             .field("selected", &self.selected)
             .field("drag", &self.drag)
             .field("search", &self.search)
+            .field("retype", &self.retype)
             .field("full_screen", &self.full_screen)
             .field("state", &self.state)
             .field("pages", &self.pages.len())
@@ -338,6 +361,7 @@ impl App {
             selected: None,
             drag: None,
             search: Search::default(),
+            retype: Retype::default(),
             full_screen: false,
         }
     }
@@ -1162,6 +1186,10 @@ impl App {
         // borrow began — so the clicks are remembered here and acted on after the loop.
         let mut clicked: Option<(mangle_edit::TextProperty, f64)> = None;
         let mut clicked_do: Option<panel::Do> = None;
+        // Where the content field is, remembered for after the loop: the field needs the
+        // buffer mutable while the loop holds the selection borrowed, and the two cannot
+        // overlap.
+        let mut retype_field: Option<egui::Rect> = None;
 
         for (row, name) in rows_for(self.state.right).into_iter().enumerate() {
             let r = egui::Rect::from_min_size(
@@ -1199,6 +1227,9 @@ impl App {
             let which = panel::panel_row(self.state.right, row, text, content);
             match which {
                 PanelRow::Empty => {}
+                PanelRow::Retype => {
+                    retype_field = Some(field);
+                }
                 PanelRow::Value(value) => {
                     p.text(
                         field.center(),
@@ -1248,11 +1279,67 @@ impl App {
             y += t.metrics.row_height;
         }
 
+        // Owned before the edits below: the loop read the selection to draw its values,
+        // and everything from here on is the worker's answer or the buffer's. Without the
+        // copy the selection's borrow would span the mutable calls and neither would compile.
+        let content_now = content.unwrap_or("").to_string();
         if let Some((property, by)) = clicked {
             self.step_text(property, by);
         }
         if let Some(do_) = clicked_do {
             self.act(do_);
+        }
+
+        // The content field, where a run's text is retyped. Drawn after the loop in a real
+        // `TextEdit` over the rect the loop measured, because a hand-drawn rectangle that
+        // accepted no typing would be a field that could not edit. Single-line for now: a
+        // block's paragraph scrolls sideways rather than wrapping, which the mockup's
+        // multi-line field will want back.
+        if let Some(field) = retype_field {
+            if self.retype.for_selection != self.selected
+                || (!self.retype.focused && self.retype.text != content_now)
+            {
+                self.retype.text.clone_from(&content_now);
+                self.retype.for_selection = self.selected;
+                self.retype.sent.clone_from(&self.retype.text);
+            }
+            // One id for the field, the area it lives in and the focus request, so all
+            // three address the same control — the shape the search field uses.
+            let id = egui::Id::new("manglepdf-retype");
+            let area = egui::Area::new(id).order(egui::Order::Middle);
+            let response = area
+                .fixed_pos(field.min)
+                .constrain_to(field)
+                .show(ui.ctx(), |ui| {
+                    ui.set_min_size(field.size());
+                    let edit = egui::TextEdit::singleline(&mut self.retype.text)
+                        .id(id)
+                        .hint_text("")
+                        .vertical_align(egui::Align::Center)
+                        .desired_width(field.width());
+                    edit.show(ui)
+                });
+            self.retype.focused = response.inner.response.has_focus();
+            // Enter, Escape and click-away all commit, which is what GOAL.md §4.4 asks of a
+            // text edit. A commit whose text is what the page already says, or what was
+            // just asked, sends nothing: the worker would record a no-op undo step.
+            let commit = ui
+                .ctx()
+                .input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape))
+                || response.inner.response.lost_focus();
+            if commit
+                && self.retype.text != content_now
+                && self.retype.text != self.retype.sent
+                && let Some(object) = self.selected
+            {
+                let text = self.retype.text.clone();
+                self.retype.sent.clone_from(&text);
+                self.worker.ask(Job::Edit {
+                    page: self.state.page_index,
+                    object,
+                    request: EditRequest::Retype { text },
+                });
+            }
         }
 
         // **Arrange is a section of this panel, not a panel of its own** — the mockup puts its

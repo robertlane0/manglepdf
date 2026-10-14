@@ -100,6 +100,16 @@ pub enum EditRequest {
     /// the object's own text state, so the value that arrives here is already the answer and the
     /// worker is not asked to know what a click meant.
     Text(mangle_edit::TextProperty),
+    /// Replace the run's shown string with this text, in its own font.
+    ///
+    /// The whole string is what travels, not a diff: the worker owns the session and the
+    /// session owns the font table, so the window hands over what the user typed and the
+    /// refusal names what cannot be written — a missing glyph, a `TJ`'s kerns — in the
+    /// worker's reply rather than in the window.
+    Retype {
+        /// What the run should say instead.
+        text: String,
+    },
 }
 
 /// What came back.
@@ -295,6 +305,7 @@ impl Worker {
                 mangle_edit::Change::rotate_about(about.0, about.1, *degrees)
             }
             EditRequest::Text(property) => mangle_edit::Change::Text(*property),
+            EditRequest::Retype { text } => mangle_edit::Change::Retype { text: text.clone() },
         };
         if let Err(e) = editor.apply(object, &change) {
             let _ = outbox.send(JobResult::Failed {
