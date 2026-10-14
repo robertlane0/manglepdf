@@ -162,8 +162,6 @@ pub enum Change {
         text: String,
         /// The installed font's resource name, as the page's resources hold it.
         font: String,
-        /// The `Tf` size, in points: the run's own, so the new glyphs come out its size.
-        size: f64,
         /// Each character beside the CID the install gave it.
         cids: Vec<(char, u32)>,
     },
@@ -659,12 +657,9 @@ pub fn patches_for_with(
             Ok(wrap_each(stream, object, "", &body))
         }
         Change::Retype { text } => retype_patches(stream, object, text, fonts),
-        Change::RetypeIn {
-            text,
-            font,
-            size,
-            cids,
-        } => retype_in_patches(stream, object, text, font, *size, cids),
+        Change::RetypeIn { text, font, cids } => {
+            retype_in_patches(stream, object, text, font, cids)
+        }
         Change::Delete => delete_patches(stream, object),
     }
 }
@@ -883,7 +878,6 @@ fn retype_in_patches(
     object: &PageObject,
     text: &str,
     font: &str,
-    size: f64,
     cids: &[(char, u32)],
 ) -> Result<Vec<Patch>, Refusal> {
     if object.records.is_empty() {
@@ -900,7 +894,6 @@ fn retype_in_patches(
             record,
             &encoded,
             font,
-            size,
             text,
             &operations,
         )?);
@@ -940,16 +933,17 @@ fn encode_cids(cids: &[(char, u32)], piece: &str, font: &str) -> Result<Vec<u8>,
 /// One run's replacement operation, wrapped in the `Tf` that switches fonts.
 ///
 /// The range is the whole operation — operands through operator — and the replacement
-/// is complete: `q`, the font and size, the new string, the operator, `Q`. The state
-/// around it is untouched, which is what makes the edit local by the same construction
-/// as every wrapper in this module.
+/// is complete: `q`, the run's own size with the new font, the new string, the
+/// operator, `Q`. The size is read out of the run rather than handed in, because runs
+/// on one line can be set at different sizes and one number would fit at most one of
+/// them. The state around the operation is untouched, which is what makes the edit
+/// local by the same construction as every wrapper in this module.
 fn retype_in_record(
     stream: &[u8],
     kind: Kind,
     record: &mangle_content::interp::Record,
     encoded: &[u8],
     font: &str,
-    size: f64,
     text: &str,
     operations: &[Operation],
 ) -> Result<Vec<Patch>, Refusal> {
@@ -969,10 +963,12 @@ fn retype_in_record(
         .map(|b| String::from_utf8_lossy(b).into_owned())
         .unwrap_or_else(|| "(operatorless)".to_string());
     let wrap = |body: &[u8]| -> Vec<u8> {
+        // The run's own size, so the new glyphs come out its size: the wrapper sets
+        // what the operation needs and the `Q` restores what was there.
         let mut out = Vec::from(b"q /".as_slice());
         out.extend_from_slice(font.as_bytes());
         out.push(b' ');
-        out.extend_from_slice(num(size).as_bytes());
+        out.extend_from_slice(num(record.text.size).as_bytes());
         out.extend_from_slice(b" Tf ");
         out.extend_from_slice(body);
         out.extend_from_slice(b" Q");
@@ -3431,6 +3427,49 @@ mod tests {
             .collect()
     }
 
+    /// A text object over hand-picked records: the model groups by geometry, and a
+    /// mixed-size line is two objects to it, so a test that wants one object with two
+    /// sizes builds it rather than asking the grouper for something it refuses.
+    fn hand_object(stream: &[u8], sizes: &[f64]) -> PageObject {
+        let content = ContentStream::parse(stream);
+        let tj: Vec<_> = content
+            .operations()
+            .into_iter()
+            .filter(|o| o.operator.operator() == Some(&b"Tj"[..]))
+            .collect();
+        assert_eq!(tj.len(), sizes.len(), "one Tj per size");
+        let records = tj
+            .into_iter()
+            .zip(sizes.iter())
+            .map(|(op, size)| {
+                let token = op.operands.first().expect("the string");
+                let span = token.span.start + 1..token.span.end - 1;
+                // Two glyphs a record in the fixtures below, no escapes: the span's own
+                // length is the count, which is what the split reads.
+                let glyphs = stream[span.clone()].len();
+                let state = mangle_content::state::TextState {
+                    font: Some("F1".to_string()),
+                    size: *size,
+                    ..Default::default()
+                };
+                let mark = Mark::Glyphs {
+                    font: Some("F1".to_string()),
+                    size: *size,
+                    text: stream[span.clone()].to_vec(),
+                    codes: vec![0; glyphs],
+                    two_byte: false,
+                    fill: Colour::black(),
+                    text_spans: vec![span],
+                    placements: Vec::new(),
+                };
+                let mut record = record(mark, op.span.clone());
+                record.text = state;
+                record
+            })
+            .collect::<Vec<_>>();
+        object(Kind::Line, records)
+    }
+
     #[test]
     fn a_retype_in_an_installed_font_wraps_the_operation() {
         let stream = b"BT /F1 12 Tf (Hi) Tj ET";
@@ -3440,7 +3479,6 @@ mod tests {
         let change = Change::RetypeIn {
             text: "Ho".to_string(),
             font: "F7".to_string(),
-            size: 12.0,
             cids: cids_of("Ho"),
         };
         // H is CID 1, o is CID 2: two bytes each, big-endian. The run's own `Tf`
@@ -3464,7 +3502,6 @@ mod tests {
         let change = Change::RetypeIn {
             text: "Heyo".to_string(),
             font: "F7".to_string(),
-            size: 12.0,
             cids: cids_of("Heyo"),
         };
         let applied = apply_change(stream, &model.objects()[at], &change).expect("writable");
@@ -3488,7 +3525,6 @@ mod tests {
         let change = Change::RetypeIn {
             text: "Ho".to_string(),
             font: "F7".to_string(),
-            size: 12.0,
             cids: vec![('H', 1)],
         };
         let err = apply_change(stream, &model.objects()[at], &change).expect_err("no CID for o");
@@ -3500,5 +3536,24 @@ mod tests {
             "{err}"
         );
         let _ = before;
+    }
+
+    #[test]
+    fn a_retype_in_wrappers_keeps_each_runs_own_size() {
+        let stream = b"BT /F1 12 Tf (Hi) Tj /F1 20 Tf (Yo) Tj ET";
+        let object = hand_object(stream, &[12.0, 20.0]);
+        let change = Change::RetypeIn {
+            text: "Hejo".to_string(),
+            font: "F7".to_string(),
+            cids: cids_of("Hejo"),
+        };
+        let applied = apply_change(stream, &object, &change).expect("writable");
+        // The first wrapper sets 12 and the second 20: one number would fit at most one
+        // of them, and the run that got the wrong size would come out wrong-sized with
+        // nothing anywhere saying so.
+        assert_eq!(
+            applied.bytes,
+            b"BT /F1 12 Tf q /F7 12 Tf (\x00\x01\x00\x02) Tj Q /F1 20 Tf q /F7 20 Tf (\x00\x03\x00\x04) Tj Q ET".as_slice(),
+        );
     }
 }

@@ -430,7 +430,6 @@ impl Editor {
         let fallback = Change::RetypeIn {
             text: text.to_string(),
             font: name.clone(),
-            size: record.text.size,
             cids: embedded.cids.clone(),
         };
         let patches = patches_for_with(&self.stream(), object, &fallback, None)
