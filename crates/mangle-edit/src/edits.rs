@@ -1,4 +1,4 @@
-//! The edits themselves: move, scale, delete and recolour, written as patches.
+//! The edits themselves: move, scale, delete, recolour and retype, written as patches.
 //!
 //! # What this turns a user's intent into
 //!
@@ -53,6 +53,7 @@
 use std::fmt;
 use std::fmt::Write as _;
 use std::ops::Range;
+use std::sync::Arc;
 
 use mangle_content::interp::{Mark, PageContent};
 use mangle_content::matrix::Matrix;
@@ -132,6 +133,22 @@ pub enum Change {
     /// edit local — the surrounding text state is what the file had it as, restored by the
     /// `Q`.
     Text(TextProperty),
+    /// Replace the run's shown string with `text`, encoded in the run's own font.
+    ///
+    /// The one edit that rewrites the object's own bytes rather than wrapping them: there
+    /// is no operator that says "show this other string", so the string operand itself is
+    /// replaced. The replacement is the same token in the same place — a literal string
+    /// where a literal string was — so the bytes around it need no separators added, which
+    /// is the B1 class of defect by construction rather than by checking afterwards.
+    ///
+    /// Only the first rung of GOAL.md §4.4's font ladder is here: every character must
+    /// already have a code in the run's own font and encoding. Anything else — a missing
+    /// glyph, a composite font, a `TJ` array whose kerns belong to the old glyphs — is a
+    /// [`Refusal`] naming what is missing, never a substitution.
+    Retype {
+        /// What the run should say instead.
+        text: String,
+    },
 }
 
 /// One text property, in the units the specification's own operators use.
@@ -340,6 +357,50 @@ pub enum Refusal {
         /// Why not, as a sentence.
         why: &'static str,
     },
+    /// The object is not text: only a run of glyphs has a shown string to replace.
+    NotText {
+        /// What kind of thing it is.
+        kind: Kind,
+    },
+    /// The run holds more than one run of glyphs: replacing the whole string means choosing
+    /// which run keeps it, and that choice is layout rather than editing.
+    MultipleRuns {
+        /// How many runs the object holds.
+        runs: usize,
+    },
+    /// The run's codes are two bytes wide: a composite font's codes are CIDs, and neither a
+    /// CMap nor a `cmap` is an encoding a character can be looked up in.
+    CompositeText {
+        /// The font as the stream named it.
+        font: String,
+    },
+    /// The run was not shown with a plain `Tj`: a `TJ` array's kerns belong to the old
+    /// glyphs, and `'` and `"` carry positioning a rewrite would silently drop.
+    NotPlainShow {
+        /// The operator that showed it, as the stream wrote it.
+        op: String,
+    },
+    /// No font table was given, and the codes a character needs live in the page's fonts.
+    NoFontContext,
+    /// The run names a font the page's resources do not have.
+    NoSuchFont {
+        /// The font as the stream named it.
+        font: String,
+    },
+    /// The font names no encoding this can read: without one a character has no code to be
+    /// written as.
+    NoEncoding {
+        /// The font as the stream named it.
+        font: String,
+    },
+    /// The character has no code in the run's own encoding — neither at its own code point
+    /// nor anywhere else the encoding names that glyph.
+    GlyphNotEncodable {
+        /// The character that would not fit.
+        ch: char,
+        /// The font as the stream named it.
+        font: String,
+    },
 }
 
 impl fmt::Display for Refusal {
@@ -371,6 +432,43 @@ impl fmt::Display for Refusal {
                 f,
                 "the {channel} colour is in {space}, and {why}; change it by hand rather than \
                  have this write a number the file did not ask for"
+            ),
+            Self::NotText { kind } => write!(
+                f,
+                "a {kind:?} has no shown string to replace: only a run of glyphs can be retyped"
+            ),
+            Self::MultipleRuns { runs } => write!(
+                f,
+                "the object holds {runs} runs of text, and replacing the whole string means \
+                 choosing which run keeps it; retype one run at a time"
+            ),
+            Self::CompositeText { font } => write!(
+                f,
+                "the run is shown in {font}, whose codes are two-byte CIDs rather than \
+                 characters in an encoding; retyping it needs a CMap lookup this does not do"
+            ),
+            Self::NotPlainShow { op } => write!(
+                f,
+                "the run is shown with {op}, whose kerns and positioning belong to the old \
+                 glyphs; only a plain Tj can be retyped"
+            ),
+            Self::NoFontContext => write!(
+                f,
+                "retyping needs the page's font table, and none was given"
+            ),
+            Self::NoSuchFont { font } => write!(
+                f,
+                "the run names the font {font}, which the page's resources do not have"
+            ),
+            Self::NoEncoding { font } => write!(
+                f,
+                "the font {font} names no encoding this can read, so a character has no code \
+                 to be written as"
+            ),
+            Self::GlyphNotEncodable { ch, font } => write!(
+                f,
+                "the character {ch:?} has no code in the run's own {font} encoding; a font the \
+                 page does not have would be needed to write it"
             ),
         }
     }
@@ -422,7 +520,21 @@ pub fn apply_change(
     object: &PageObject,
     change: &Change,
 ) -> Result<Applied, ChangeError> {
-    let patches = patches_for(stream, object, change)?;
+    apply_change_with(stream, object, change, None)
+}
+
+/// [`apply_change`] with the page's font table, which only [`Change::Retype`] needs.
+///
+/// A retype encodes its text in the run's own font, and the codes live in the page's font
+/// dictionary — which is an indirect reference away. Every other change is pure geometry over
+/// the stream's own bytes and takes `None`.
+pub fn apply_change_with(
+    stream: &[u8],
+    object: &PageObject,
+    change: &Change,
+    fonts: Option<&Fonts<'_>>,
+) -> Result<Applied, ChangeError> {
+    let patches = patches_for_with(stream, object, change, fonts)?;
     let applied = apply(stream, &patches)?;
     debug_assert!(
         crate::surgery::is_balanced(&applied.bytes),
@@ -431,11 +543,41 @@ pub fn apply_change(
     Ok(applied)
 }
 
+/// What a retype needs beyond the stream: the page's font table and a way to follow
+/// the references inside it.
+///
+/// The codes a character is written as live in the run's font dictionary — its
+/// `/Encoding`, and the `/Differences` that remap it — and that dictionary is usually an
+/// indirect object away. A caller that has the document passes a resolver over it; a
+/// caller with only the stream's bytes passes nothing, and a retype is then refused
+/// rather than guessed at.
+pub struct Fonts<'a> {
+    /// The page's resources, which name the font the run used.
+    pub resources: &'a mangle_content::Resources,
+    /// How to follow an indirect reference, as [`mangle_text::decode`] takes it.
+    pub resolve:
+        &'a dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+}
+
+impl fmt::Debug for Fonts<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Fonts").finish_non_exhaustive()
+    }
+}
+
 /// The patches that carry out `change`, in the order they will be applied.
 ///
 /// Nothing is written here: this is the whole computation, separated so a caller can look at
 /// what an edit *would* touch before letting it, and so a test can assert the byte ranges
 /// directly instead of inferring them from the result.
+pub fn patches_for(
+    stream: &[u8],
+    object: &PageObject,
+    change: &Change,
+) -> Result<Vec<Patch>, Refusal> {
+    patches_for_with(stream, object, change, None)
+}
+
 /// Whether the stream holds an inline image whose dictionary our tokeniser could not read.
 ///
 /// Such an image is left behind as a bare `BI` operator with no data, and its data is then read
@@ -449,10 +591,15 @@ pub(crate) fn has_unreadable_inline_image(stream: &[u8]) -> bool {
         .any(|t| t.operator() == Some(&b"BI"[..]))
 }
 
-pub fn patches_for(
+/// [`patches_for`] with the page's font table, which only [`Change::Retype`] needs.
+///
+/// See [`apply_change_with`] for why the table is separate: every other change is pure
+/// geometry over the stream's own bytes.
+pub fn patches_for_with(
     stream: &[u8],
     object: &PageObject,
     change: &Change,
+    fonts: Option<&Fonts<'_>>,
 ) -> Result<Vec<Patch>, Refusal> {
     // An inline image is a region from `BI` to the `EI` that closes it, and the bytes between them
     // are its data. Where the dictionary does not read as key/value pairs, the tokeniser falls
@@ -490,8 +637,171 @@ pub fn patches_for(
             let body = crop_body(object, *keep)?;
             Ok(wrap_each(stream, object, "", &body))
         }
+        Change::Retype { text } => retype_patches(stream, object, text, fonts),
         Change::Delete => delete_patches(stream, object),
     }
+}
+
+/// The patches that replace one run's shown string with `text`.
+///
+/// The object must hold exactly one run shown with a plain `Tj` in its own simple font.
+/// Everything else is a refusal: a `TJ` array's kerns belong to the old glyphs, a
+/// composite font's codes are CIDs rather than characters, and several runs would each
+/// need a share of the new string — which is layout, not editing.
+fn retype_patches(
+    stream: &[u8],
+    object: &PageObject,
+    text: &str,
+    fonts: Option<&Fonts<'_>>,
+) -> Result<Vec<Patch>, Refusal> {
+    let fonts = fonts.ok_or(Refusal::NoFontContext)?;
+    if !matches!(object.kind, Kind::Line | Kind::Block | Kind::LooseRun) {
+        return Err(Refusal::NotText { kind: object.kind });
+    }
+    let Some(record) = object.records.first() else {
+        return Err(Refusal::NoSpans);
+    };
+    if object.records.len() != 1 {
+        return Err(Refusal::MultipleRuns {
+            runs: object.records.len(),
+        });
+    }
+    let Mark::Glyphs {
+        two_byte,
+        text_spans,
+        ..
+    } = &record.mark
+    else {
+        return Err(Refusal::NotText { kind: object.kind });
+    };
+    let font = record
+        .text
+        .font
+        .clone()
+        .unwrap_or_else(|| "(unnamed)".to_string());
+    if *two_byte {
+        return Err(Refusal::CompositeText { font });
+    }
+    // The operation the record came from, read back out of the stream rather than
+    // remembered: only a plain `Tj` has exactly one string and no kerns.
+    let operations = ContentStream::parse(stream).operations();
+    let found = operations.iter().find(|o| o.span == record.span);
+    let Some(shown) = found else {
+        return Err(Refusal::ForeignSpan {
+            span: record.span.clone(),
+            len: stream.len(),
+        });
+    };
+    let op = shown
+        .operator
+        .operator()
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .unwrap_or_else(|| "(operatorless)".to_string());
+    if op != "Tj" || text_spans.len() != 1 {
+        return Err(Refusal::NotPlainShow { op });
+    }
+    let Some(span) = text_spans.first() else {
+        return Err(Refusal::NotPlainShow { op });
+    };
+    if span.end > stream.len() || span.start > span.end {
+        return Err(Refusal::ForeignSpan {
+            span: span.clone(),
+            len: stream.len(),
+        });
+    }
+    let encoding = retype_encoding(record, fonts, &font)?;
+    let bytes = encode_simple_text(&encoding, text, &font)?;
+    // The replacement is the same token in the same place — a literal string where a
+    // literal string was — so the whitespace around it is the file's own and no separator
+    // has to be added. That is the B1 class of defect, closed by the shape of the patch.
+    let mut replacement = Vec::new();
+    mangle_syntax::writer::write_literal_string(&mut replacement, &bytes);
+    Ok(vec![Patch {
+        range: span.clone(),
+        bytes: replacement,
+        label: format!("retype as {text:?}"),
+    }])
+}
+
+/// The encoding the run's own font reads, for writing back into.
+///
+/// The same path [`mangle_text::decode`] reads through: the form's table when the run was
+/// drawn inside one, else the page's, then the font's dictionary, then its `/Encoding`.
+/// A composite font never reaches here — its codes are refused above — so a Type 0
+/// subtype here is a second lock on the same door rather than a second way through it.
+fn retype_encoding(
+    record: &mangle_content::interp::Record,
+    fonts: &Fonts<'_>,
+    font: &str,
+) -> Result<mangle_font::Encoding, Refusal> {
+    let table = match record.form.as_deref() {
+        Some(name) => fonts
+            .resources
+            .form_resources(name)
+            .unwrap_or_else(|| Arc::new(fonts.resources.clone())),
+        None => Arc::new(fonts.resources.clone()),
+    };
+    let found = table.fonts.get(font).ok_or_else(|| Refusal::NoSuchFont {
+        font: font.to_string(),
+    })?;
+    let resolved = (fonts.resolve)(found).unwrap_or_else(|| found.clone());
+    let dict = resolved.as_dict().ok_or_else(|| Refusal::NoEncoding {
+        font: font.to_string(),
+    })?;
+    if dict
+        .get("Subtype")
+        .and_then(|o| o.as_name())
+        .is_some_and(|n| n == b"Type0")
+    {
+        return Err(Refusal::CompositeText {
+            font: font.to_string(),
+        });
+    }
+    mangle_font::Encoding::from_font_dict(dict, mangle_font::EncodingBase::Standard, fonts.resolve)
+        .ok_or_else(|| Refusal::NoEncoding {
+            font: font.to_string(),
+        })
+}
+
+/// The bytes `text` is written as in `encoding`.
+///
+/// The reverse of the path [`mangle_text::decode`] reads: a character becomes a glyph name
+/// through the Adobe Glyph List, and the name becomes a code through the encoding. A
+/// character at its own code point is written there when that code reads back as the same
+/// glyph — which is what disambiguates a name the encoding holds twice, like `space` at
+/// both 32 and 160: 32 is the character's own code and reads back as a space, so it is the
+/// answer rather than a guess. Anything with no code at all is refused by name.
+fn encode_simple_text(
+    encoding: &mangle_font::Encoding,
+    text: &str,
+    font: &str,
+) -> Result<Vec<u8>, Refusal> {
+    let mut out = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let code_point = u32::from(ch);
+        let name = mangle_font::agl_name(code_point).ok_or_else(|| Refusal::GlyphNotEncodable {
+            ch,
+            font: font.to_string(),
+        })?;
+        let code = if code_point <= 255 && encoding.glyph_for(code_point) == Some(name) {
+            code_point
+        } else {
+            encoding
+                .code_for(name)
+                .ok_or_else(|| Refusal::GlyphNotEncodable {
+                    ch,
+                    font: font.to_string(),
+                })?
+        };
+        if code > 255 {
+            return Err(Refusal::GlyphNotEncodable {
+                ch,
+                font: font.to_string(),
+            });
+        }
+        out.push(code as u8);
+    }
+    Ok(out)
 }
 
 /// The one operator that sets a text property, written where the run's own `Tj` can see it.
@@ -1016,6 +1326,21 @@ pub fn verify(
     object: usize,
     change: &Change,
 ) -> Result<(), String> {
+    verify_with(before, after, object, change, None)
+}
+
+/// [`verify`] with the page's font table, which only [`Change::Retype`] needs.
+///
+/// A retype is checked by the bytes it should have written, and those bytes are the text
+/// encoded in the run's own font. Without the table the check cannot be done, and a check
+/// that cannot be done is an error rather than a pass.
+pub fn verify_with(
+    before: &PageContent,
+    after: &PageContent,
+    object: usize,
+    change: &Change,
+    fonts: Option<&Fonts<'_>>,
+) -> Result<(), String> {
     use crate::page_objects::PageModel;
 
     let old = PageModel::build(&before.records);
@@ -1033,6 +1358,12 @@ pub fn verify(
     // removes nothing from the geometry, so the count is the same.
     if let Change::Text(_) = change {
         return verify_text(before, after, object, change);
+    }
+    // A retype is checked by the bytes it wrote rather than by the geometry: the new string
+    // may be longer or shorter, so the run's box legitimately moves. What must hold is that
+    // exactly the new bytes are on the page, the old ones are gone, and nothing else changed.
+    if let Change::Retype { text } = change {
+        return verify_retype(before, after, object, text, fonts);
     }
 
     let expected = match change {
@@ -1052,6 +1383,8 @@ pub fn verify(
     match change {
         // Dispatched above: the one edit that changes the grouping.
         Change::Text(_) => Ok(()),
+        // Dispatched above: checked by its bytes rather than by the geometry.
+        Change::Retype { .. } => Ok(()),
         // A crop changes where the image **is not**: it still sits exactly where it was, because
         // a clip cuts what is drawn rather than moving it. So the ordinary checks apply.
         Change::Crop { .. } => Ok(()),
@@ -1223,6 +1556,85 @@ fn verify_text(
     Ok(())
 }
 
+/// Did a retype write exactly the bytes it should have, and nothing else?
+///
+/// Read out of the interpreter's records rather than out of the geometry: the new string may
+/// be longer or shorter than the old one, so the run's box legitimately moves and a check at
+/// its old centre would be looking for a run that had changed. What must hold instead is
+/// three facts about the raw strings: the expected bytes are on the page exactly once, the
+/// old bytes are gone, and every other run's bytes are still there.
+fn verify_retype(
+    before: &PageContent,
+    after: &PageContent,
+    object: usize,
+    text: &str,
+    fonts: Option<&Fonts<'_>>,
+) -> Result<(), String> {
+    use crate::page_objects::PageModel;
+
+    let fonts = fonts
+        .ok_or_else(|| "a retype cannot be checked without the page's font table".to_string())?;
+    let old = PageModel::build(&before.records);
+    let Some(target) = old.objects().get(object) else {
+        return Err(format!(
+            "object {object} is not one of the page's {} objects",
+            old.objects().len()
+        ));
+    };
+    let Some(record) = target.records.first() else {
+        return Err("the object has no records to check".to_string());
+    };
+    let Mark::Glyphs { text: was, .. } = &record.mark else {
+        return Err("the object is not a run of text".to_string());
+    };
+    let font = record
+        .text
+        .font
+        .clone()
+        .unwrap_or_else(|| "(unnamed)".to_string());
+    let encoding = retype_encoding(record, fonts, &font).map_err(|r| r.to_string())?;
+    let expected = encode_simple_text(&encoding, text, &font).map_err(|r| r.to_string())?;
+
+    // A retype rewrites one operand and adds no operations, so the record count is the same.
+    if after.records.len() != before.records.len() {
+        return Err(format!(
+            "the edit left {} records, and a retype should have left {}",
+            after.records.len(),
+            before.records.len()
+        ));
+    }
+    let raw = |r: &mangle_content::interp::Record| match &r.mark {
+        Mark::Glyphs { text, .. } => Some(text.clone()),
+        _ => None,
+    };
+    // Every other run's bytes are still there: the comparison is a sorted multiset
+    // rather than positional, because the replacement may be longer or shorter and every
+    // span after it shifts — and a multiset rather than a set, because a page may show
+    // the same string twice and only one of the two was retyped.
+    let mut before_all: Vec<Vec<u8>> = before.records.iter().filter_map(raw).collect();
+    let mut after_all: Vec<Vec<u8>> = after.records.iter().filter_map(raw).collect();
+    before_all.sort();
+    after_all.sort();
+    let Some(at) = before_all
+        .iter()
+        .position(|b| b.as_slice() == was.as_slice())
+    else {
+        return Err("the old string was not on the page to begin with".to_string());
+    };
+    before_all.remove(at);
+    let Some(at) = after_all
+        .iter()
+        .position(|b| b.as_slice() == expected.as_slice())
+    else {
+        return Err("the new string is not on the page".to_string());
+    };
+    after_all.remove(at);
+    if before_all != after_all {
+        return Err("a run besides the retyped one changed".to_string());
+    }
+    Ok(())
+}
+
 /// The operand a text property is written with, for a label and for the check above.
 pub(crate) fn property_operand(property: &TextProperty) -> (&'static str, f64) {
     match property {
@@ -1288,8 +1700,8 @@ mod tests {
     use mangle_content::tokens::ContentStream;
 
     use super::{
-        Change, ChangeError, Patch, Refusal, apply_change, map_point, patches_for,
-        region_holds_an_operation, verify, wrappers,
+        Change, ChangeError, Fonts, Patch, Refusal, apply_change, apply_change_with, map_point,
+        patches_for, patches_for_with, region_holds_an_operation, verify, verify_with, wrappers,
     };
     use crate::page_objects::{Kind, PageModel, PageObject};
 
@@ -1980,5 +2392,274 @@ mod tests {
             "and the deleted one does not"
         );
         let _ = second;
+    }
+
+    /// A WinAnsi simple font, as a page resource would hold it: the table a retype reads
+    /// its codes from. Built through [`mangle_content::Resources::from_dict`] rather than
+    /// by hand, so the test reads the table the interpreter reads.
+    fn winansi_resources(name: &str) -> mangle_content::Resources {
+        use mangle_syntax::object::{Dict, Name, Object};
+        let mut font = Dict::new();
+        font.insert(Name::new("Type"), Object::name("Font"));
+        font.insert(Name::new("Subtype"), Object::name("Type1"));
+        font.insert(Name::new("BaseFont"), Object::name("Helvetica"));
+        font.insert(Name::new("Encoding"), Object::name("WinAnsiEncoding"));
+        let mut fonts = Dict::new();
+        fonts.insert(Name::new(name), Object::Dict(font));
+        let mut resources = Dict::new();
+        resources.insert(Name::new("Font"), Object::Dict(fonts));
+        mangle_content::Resources::from_dict(&resources, &|_| None)
+    }
+
+    /// The font table and a resolver over nothing: the fixture's encoding is direct, so no
+    /// reference needs following.
+    fn winansi_fonts(resources: &mangle_content::Resources) -> Fonts<'_> {
+        Fonts {
+            resources,
+            resolve: &|_| None,
+        }
+    }
+
+    /// The single-run text object in the model of `stream`, which must hold exactly one.
+    fn single_run(model: &PageModel) -> usize {
+        model
+            .objects()
+            .iter()
+            .position(|o| {
+                matches!(o.kind, Kind::Line | Kind::Block | Kind::LooseRun)
+                    && o.records.len() == 1
+                    && matches!(o.records[0].mark, Mark::Glyphs { .. })
+            })
+            .expect("one single-run text object")
+    }
+
+    #[test]
+    fn a_retype_replaces_the_string_and_nothing_else() {
+        let stream = b"BT /F1 12 Tf (Hi) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let change = Change::Retype {
+            text: "Ho".to_string(),
+        };
+        let applied = apply_change_with(stream, &model.objects()[at], &change, Some(&fonts))
+            .expect("writable");
+        assert_eq!(
+            applied.bytes, b"BT /F1 12 Tf (Ho) Tj ET",
+            "the string is replaced and every other byte is identical"
+        );
+        let after = run(&ContentStream::parse(&applied.bytes));
+        verify_with(&before, &after, at, &change, Some(&fonts)).expect("the text changed");
+    }
+
+    #[test]
+    fn a_retype_escapes_what_the_string_syntax_reserves() {
+        let stream = b"BT /F1 12 Tf (Hi) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let applied = apply_change_with(
+            stream,
+            &model.objects()[at],
+            &Change::Retype {
+                text: "a(b)c\\d".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect("writable");
+        assert_eq!(
+            applied.bytes, b"BT /F1 12 Tf (a\\(b\\)c\\\\d) Tj ET",
+            "parens and backslashes are escaped: {0:?}",
+            applied.bytes
+        );
+        let after = run(&ContentStream::parse(&applied.bytes));
+        verify_with(
+            &before,
+            &after,
+            at,
+            &Change::Retype {
+                text: "a(b)c\\d".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect("the escaped text changed");
+    }
+
+    #[test]
+    fn a_retype_writes_a_space_at_its_own_code() {
+        // `space` lives at both 32 and 160 in WinAnsi, so a reverse lookup refuses to choose.
+        // The character's own code reads back as the same glyph, which is the answer rather
+        // than a guess.
+        let stream = b"BT /F1 12 Tf (Hi) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let applied = apply_change_with(
+            stream,
+            &model.objects()[at],
+            &Change::Retype {
+                text: "H i".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect("a space is writable");
+        assert_eq!(applied.bytes, b"BT /F1 12 Tf (H i) Tj ET");
+        let _ = before;
+    }
+
+    #[test]
+    fn a_retype_refuses_a_character_the_encoding_lacks() {
+        let stream = b"BT /F1 12 Tf (Hi) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let err = apply_change_with(
+            stream,
+            &model.objects()[at],
+            &Change::Retype {
+                text: "H\u{3b1}".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect_err("WinAnsi has no alpha");
+        assert!(
+            matches!(
+                err,
+                ChangeError::Refused(Refusal::GlyphNotEncodable { ch: '\u{3b1}', .. })
+            ),
+            "the refusal names the character: {err}"
+        );
+        let _ = before;
+    }
+
+    #[test]
+    fn a_retype_refuses_a_kerned_tj() {
+        let stream = b"BT /F1 12 Tf [(Hi) 20 (Yo)] TJ ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let mut refused = false;
+        for o in model.objects() {
+            if !matches!(o.kind, Kind::Line | Kind::Block | Kind::LooseRun) || o.records.len() != 1
+            {
+                continue;
+            }
+            let err = patches_for_with(
+                stream,
+                o,
+                &Change::Retype {
+                    text: "Hey".to_string(),
+                },
+                Some(&fonts),
+            )
+            .expect_err("a TJ keeps its kerns");
+            assert!(
+                matches!(err, Refusal::NotPlainShow { .. }),
+                "the refusal names the operator: {err}"
+            );
+            refused = true;
+        }
+        assert!(refused, "the TJ run was in the model");
+        let _ = before;
+    }
+
+    #[test]
+    fn a_retype_without_a_font_table_is_refused() {
+        let stream = b"BT /F1 12 Tf (Hi) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let err = patches_for(
+            stream,
+            &model.objects()[at],
+            &Change::Retype {
+                text: "Ho".to_string(),
+            },
+        )
+        .expect_err("no table, no codes");
+        assert!(matches!(err, Refusal::NoFontContext), "{err}");
+        let _ = before;
+    }
+
+    #[test]
+    fn a_retype_of_two_runs_is_refused() {
+        let stream = b"BT /F1 12 Tf (Hi) Tj (Yo) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        // Both runs share a baseline, so the model joins them into one line of two runs.
+        let at = model
+            .objects()
+            .iter()
+            .position(|o| matches!(o.kind, Kind::Line | Kind::Block) && o.records.len() == 2)
+            .expect("one two-run line");
+        let err = patches_for_with(
+            stream,
+            &model.objects()[at],
+            &Change::Retype {
+                text: "Hey".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect_err("two runs need a share each");
+        assert!(matches!(err, Refusal::MultipleRuns { runs: 2 }), "{err}");
+        let _ = before;
+    }
+
+    #[test]
+    fn a_retype_of_composite_text_is_refused() {
+        let mark = Mark::Glyphs {
+            font: Some("F0".to_string()),
+            size: 12.0,
+            text: vec![0, 65],
+            codes: vec![65],
+            two_byte: true,
+            fill: Colour::black(),
+            text_spans: vec![0..2],
+            placements: vec![Matrix::IDENTITY],
+        };
+        let o = object(Kind::Line, vec![record(mark, 0..8)]);
+        let resources = winansi_resources("F0");
+        let fonts = winansi_fonts(&resources);
+        let err = patches_for_with(
+            b"01234567",
+            &o,
+            &Change::Retype {
+                text: "A".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect_err("CIDs are not characters");
+        assert!(matches!(err, Refusal::CompositeText { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_retype_cannot_be_checked_without_the_font_table() {
+        let stream = b"BT /F1 12 Tf (Hi) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let after = before.clone();
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let err = verify_with(
+            &before,
+            &after,
+            at,
+            &Change::Retype {
+                text: "Ho".to_string(),
+            },
+            None,
+        )
+        .expect_err("no table, no check");
+        assert!(err.contains("font table"), "{err}");
     }
 }

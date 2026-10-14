@@ -94,7 +94,12 @@ const fn token_ok(b: u8) -> bool {
         )
 }
 
-fn write_string(out: &mut Vec<u8>, s: &[u8]) {
+/// A literal string `(...)`, with `(`, `)` and `\` escaped.
+///
+/// Public because an edit that rewrites a `Tj` operand writes exactly this: the encoded bytes
+/// wrapped in parentheses. One implementation rather than two, so a string the writer emits and
+/// a string an edit writes cannot disagree about what needs escaping.
+pub fn write_literal_string(out: &mut Vec<u8>, s: &[u8]) {
     out.push(b'(');
     for &b in s {
         match b {
@@ -108,6 +113,10 @@ fn write_string(out: &mut Vec<u8>, s: &[u8]) {
         }
     }
     out.push(b')');
+}
+
+fn write_string(out: &mut Vec<u8>, s: &[u8]) {
+    write_literal_string(out, s);
 }
 
 fn write_dict(out: &mut Vec<u8>, d: &Dict) {

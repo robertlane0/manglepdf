@@ -38,7 +38,7 @@ use mangle_syntax::document::Document;
 use mangle_syntax::object::Object;
 
 use crate::arrange::{Arrange, arrange_patches};
-use crate::edits::{Change, patches_for};
+use crate::edits::{Change, Fonts, patches_for_with};
 use crate::history::{History, Snapshot};
 use crate::page_objects::PageModel;
 use crate::surgery::apply;
@@ -263,8 +263,16 @@ impl Editor {
                 crate::Refusal::NoSpans,
             )));
         };
-        let patches = patches_for(&self.stream(), object, change)
-            .map_err(|r| SessionError::Change(crate::ChangeError::Refused(r)))?;
+        let patches = patches_for_with(
+            &self.stream(),
+            object,
+            change,
+            Some(&Fonts {
+                resources: &self.resources,
+                resolve: &|o| self.doc.resolve_object(o),
+            }),
+        )
+        .map_err(|r| SessionError::Change(crate::ChangeError::Refused(r)))?;
         let applied = apply(&self.stream(), &patches)
             .map_err(|e| SessionError::Change(crate::ChangeError::Stream(e)))?;
         let label = change_label(change);
@@ -469,6 +477,7 @@ fn change_label(change: &Change) -> String {
             let _ = operator;
             format!("set the {} to {}", property.name(), value)
         }
+        Change::Retype { text } => format!("retype as {text:?}"),
     }
 }
 

@@ -57,11 +57,13 @@ early unless the press is on the page.
 
 ## What is left, in the order it blocks
 
-1. **M5 text editing** — retyping into a run, reflow inside the block's original width, and the
-   font-resolution ladder of GOAL §4.4 (own font → same family in the document → bundled/system
-   with an embedded subset → closest metric match → per-script fallback), each with the notice the
-   charter requires. The panel's steppers and the `TextProperty` edits exist; *editing the string*
-   does not.
+1. **M5 text editing** — the first rung has landed (`Change::Retype`: one run, plain
+   `Tj`, own font and encoding, verified through the interpreter, end-to-end on a corpus
+   page). Still open: reflow inside the block's original width, the font-resolution ladder
+   of GOAL §4.4 beyond the own font (same family in the document → bundled/system subset →
+   metric match → per-script fallback, each with its notice), and subset embedding for
+   glyphs the font does not have. The panel's steppers and the `TextProperty` edits exist;
+   *typing* through the panel does not yet.
 2. **UI breadth** — thumbnails that navigate, bookmarks and layers panels, the tool-tab row.
 3. **Type 3 fonts** — design written in `PLAN.md`, not built. Corpus scope is three files.
 4. **Gate 3.1** — 164 of 740 corpus pages below 0.95; ~62 are JPEG 2000 (declined, D22) and ~38 are

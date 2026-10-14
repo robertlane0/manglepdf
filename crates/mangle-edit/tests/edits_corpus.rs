@@ -39,11 +39,14 @@
     clippy::float_cmp
 )]
 
-use mangle_content::interp::run_with;
+use mangle_content::interp::{Mark, run_with};
 use mangle_content::{ContentStream, Matrix, Resources};
 use mangle_doc::PageTree;
 use mangle_edit::PageModel;
-use mangle_edit::edits::{Change, TextProperty, apply_change, verify};
+use mangle_edit::edits::{
+    Change, Fonts, TextProperty, apply_change, apply_change_with, patches_for_with, verify,
+    verify_with,
+};
 use mangle_edit::surgery::Patch;
 use mangle_syntax::object::Object;
 use mangle_syntax::{Document, OpenOptions};
@@ -59,8 +62,8 @@ const PAGES: &[&str] = &[
     "gov__nist-sp800-88.pdf",
 ];
 
-/// The concatenated content stream of page 1, and the page's resources.
-fn page_one(name: &str) -> Option<(Vec<u8>, Resources)> {
+/// The document, the concatenated content stream of page 1, and the page's resources.
+fn page_one_doc(name: &str) -> Option<(Document, Vec<u8>, Resources)> {
     let bytes = std::fs::read(format!("../../corpus/wild/{name}")).ok()?;
     let doc = Document::open(bytes, OpenOptions::default()).ok()?;
     let cat = doc.catalog().ok()?;
@@ -75,7 +78,13 @@ fn page_one(name: &str) -> Option<(Vec<u8>, Resources)> {
         .and_then(|o| o.as_dict().cloned())
         .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
         .unwrap_or_default();
-    Some((page.decoded_contents(&doc), resources))
+    let contents = page.decoded_contents(&doc);
+    Some((doc, contents, resources))
+}
+
+/// The concatenated content stream of page 1, and the page's resources.
+fn page_one(name: &str) -> Option<(Vec<u8>, Resources)> {
+    page_one_doc(name).map(|(_, stream, resources)| (stream, resources))
 }
 
 /// Why this page would refuse an edit, for the skip message above.
@@ -345,6 +354,120 @@ fn a_recolour_on_a_real_page_changes_the_colour_and_not_the_space() {
     verify(&before, &after, index, &change).expect("the colour changed and the space did not");
 }
 
+/// A retype on a real page changes the text and nothing else.
+///
+/// The first object across the corpus pages that accepts a retype is the one edited: a run
+/// shown with a plain `Tj` in its own simple font, with the replacement one ASCII letter
+/// away from what the file wrote. The new text is then read back through the interpreter
+/// and the decoder — not out of the patch — and every byte outside the string's own span
+/// is asserted identical.
+#[test]
+fn a_retype_on_a_real_page_changes_the_text_and_nothing_else() {
+    for name in PAGES {
+        let Some((doc, stream, resources)) = page_one_doc(name) else {
+            eprintln!("skipped: the corpus file {name} is not fetched");
+            continue;
+        };
+        let before = run_with(&ContentStream::parse(&stream), &resources);
+        let model = PageModel::build(&before.records);
+        for (index, object) in model.objects().iter().enumerate() {
+            if !matches!(
+                object.kind,
+                mangle_edit::Kind::Line | mangle_edit::Kind::Block | mangle_edit::Kind::LooseRun
+            ) || object.records.len() != 1
+            {
+                continue;
+            }
+            let record = &object.records[0];
+            let Mark::Glyphs {
+                text,
+                placements,
+                size,
+                ..
+            } = &record.mark
+            else {
+                continue;
+            };
+            // The old text, read the way the panel reads it, so the replacement starts
+            // from what is actually on the page rather than from the raw bytes.
+            let run = mangle_text::Run {
+                form: record.form.as_deref(),
+                font: record.text.font.as_deref(),
+                text,
+                origins: placements.iter().map(|m| (m.e, m.f)).collect(),
+                size: *size
+                    * (record.text_matrix.a * record.text_matrix.d
+                        - record.text_matrix.b * record.text_matrix.c)
+                        .abs()
+                        .sqrt(),
+            };
+            let Some(decoded) = mangle_text::decode(&resources, &|o| doc.resolve_object(o), &run)
+            else {
+                continue;
+            };
+            let Some(text) = bump(&decoded.text) else {
+                continue;
+            };
+            let change = Change::Retype { text: text.clone() };
+            let fonts = Fonts {
+                resources: &resources,
+                resolve: &|o| doc.resolve_object(o),
+            };
+            let Ok(patches) = patches_for_with(&stream, object, &change, Some(&fonts)) else {
+                continue;
+            };
+            // One patch, replacing exactly the string operand: the edit rewrites the
+            // object's own bytes rather than wrapping them, so there is one range and it
+            // is the string's.
+            if patches.len() != 1 || patches[0].range.is_empty() {
+                continue;
+            }
+            let applied =
+                apply_change_with(&stream, object, &change, Some(&fonts)).expect("patched");
+            let range = patches[0].range.clone();
+            assert_eq!(
+                &applied.bytes[..range.start],
+                &stream[..range.start],
+                "every byte before the string is identical"
+            );
+            assert_eq!(
+                &applied.bytes[range.start + patches[0].bytes.len()..],
+                &stream[range.end..],
+                "every byte after the string is identical"
+            );
+            let after = run_with(&ContentStream::parse(&applied.bytes), &resources);
+            verify_with(&before, &after, index, &change, Some(&fonts))
+                .expect("the text changed and nothing else did");
+            let after_model = PageModel::build(&after.records);
+            assert!(
+                mangle_edit::page_text(&resources, &doc, &after_model).contains(&text),
+                "the page now says {text:?}"
+            );
+            return;
+        }
+    }
+    panic!("no retypeable run on any corpus page");
+}
+
+/// One ASCII letter forward, wrapping at the end of each range: the replacement stays in
+/// the run's own encoding whenever the file's own character did, because the next letter
+/// over is in every Latin encoding that held the first.
+fn bump(text: &str) -> Option<String> {
+    let (at, found) = text
+        .char_indices()
+        .find(|(_, c)| c.is_ascii_alphanumeric())?;
+    let next = match found {
+        'a'..='y' | 'A'..='Y' | '0'..='8' => char::from_u32(found as u32 + 1)?,
+        'z' => 'a',
+        'Z' => 'A',
+        '9' => '0',
+        _ => return None,
+    };
+    let mut out = text.to_string();
+    out.replace_range(at..at + found.len_utf8(), &next.to_string());
+    Some(out)
+}
+
 /// An object drawn inside a form is edited in the form's stream, not the page's.
 ///
 /// This is the case that would otherwise be got wrong silently: the page's model carries the
@@ -602,7 +725,7 @@ fn a_crop_on_a_real_image_is_a_clip_and_nothing_else() {
     let cropped = after
         .records
         .iter()
-        .find(|r| matches!(r.mark, mangle_content::Mark::Image { .. }))
+        .find(|r| matches!(r.mark, Mark::Image { .. }))
         .expect("the image is still on the page");
     assert!(
         cropped.clip.is_some(),
