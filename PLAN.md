@@ -1137,9 +1137,11 @@ repaint immediately, so the poll is a ceiling on noticing, not the latency.
 while the channel held the answer. A screenshot proved the window drew; only the thread states
 showed it had stopped asking.)*
 
-What is left in M4 is the rest of the wiring: text editing (§4.4), and the panel's own controls
-mapped onto the `Arrange` type. The Text Properties panel now **shows the numbers the file has**
-and lets a click move them.
+What is left in M4 is the rest of the wiring: thumbnails that navigate and the
+bookmarks/layers panels. Text editing (§4.4) has since landed in M5 — retyping in the
+run's own font with kerned-`TJ` and multi-run support, plus fallback to embedded
+subsets — and the panel's content field types into it. The Text Properties panel now
+**shows the numbers the file has** and lets a click move them.
 
 **A stepper is only as honest as the value it reads from.** The four numbers that are steppers —
 size, line spacing, character spacing, baseline shift — are all read out of the object's own
