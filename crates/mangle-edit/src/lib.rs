@@ -19,6 +19,7 @@
 
 pub mod arrange;
 pub mod edits;
+pub mod embed;
 pub mod history;
 pub mod page_objects;
 pub mod session;
@@ -30,6 +31,7 @@ pub use edits::{
     Change, ChangeError, Channel, Fonts, Refusal, TextProperty, apply_change, apply_change_with,
     line_spacing, map_point, patches_for, patches_for_with, text_value, verify, verify_with,
 };
+pub use embed::{EMBEDDED_OBJECTS, EmbedError, EmbeddedFont, embed_truetype};
 pub use history::{Edit, History, HistoryError, Snapshot};
 pub use page_objects::{
     Kind, LineBreak, PageModel, PageObject, Provenance, Summary, content, page_text, provenance_of,
