@@ -989,93 +989,197 @@ pub fn composite_masked(
 /// this project has been bitten by repeatedly. A missing blend mode is a note, not a guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BlendMode {
-    /// No blending: the source replaces what is under it. The default.
     #[default]
     Normal,
-    /// `Multiply`, §11.3.5.2: darkens both, and is **how a highlight is normally written** — it
-    /// is what makes a highlight darken the text under it rather than hide it.
     Multiply,
-    /// `Screen`: the inverse of `Multiply`, lightening both.
     Screen,
-    /// `Darken`: the darker of the two, per channel.
+    Overlay,
     Darken,
-    /// `Lighten`: the lighter of the two, per channel.
     Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
 }
 
 impl BlendMode {
-    /// Read the name a content stream or an `/ExtGState` gives, including the abbreviations the
-    /// specification allows for the lengthiest ones.
+    /// Parse a PDF blend mode name (ISO 32000-1 Tables 136 and 137).
     ///
-    /// `None` for a mode this renderer does not implement, which the caller turns into a note.
-    /// The abbreviations are single letters for exactly the ones with long names: `/H` hue,
-    /// `/S` saturation, `/C` colour, `/M` multiply, `/Scr` screen, `/D` darken.
-    ///
-    /// **`/L` is not among them, on purpose.** Table 136 abbreviates `Lighten` and `Luminosity`
-    /// with the same letter, and `C` here is `Colour`, which is a different function from the
-    /// `Luminosity` that `/L` also names. Rather than pick one and be plausibly wrong, `/L` is
-    /// refused and the note says so.
+    /// `"L"` is refused because Table 136/137 uses it for both `Lighten` and `Luminosity`.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         match name {
-            "Normal" | "N" => Some(Self::Normal),
+            "Normal" | "N" | "Compatible" => Some(Self::Normal),
             "Multiply" | "M" => Some(Self::Multiply),
             "Screen" | "Scr" => Some(Self::Screen),
+            "Overlay" => Some(Self::Overlay),
             "Darken" | "D" => Some(Self::Darken),
-            // `/L` is **refused**, and deliberately so. PDF 32000-1 Table 136 abbreviates
-            // both `Lighten` and `Luminosity` as `L`, so the single letter names two different
-            // functions and a reader has to choose. Adobe resolves it to `Luminosity`, which is
-            // not implemented here, so answering `Lighten` would put the wrong function on the
-            // page for a document that meant the other one — and it would look entirely
-            // plausible, which is the failure this function exists to avoid. Refusing asks the
-            // writer to spell it out, and the note says which one was dropped.
             "Lighten" => Some(Self::Lighten),
+            "ColorDodge" => Some(Self::ColorDodge),
+            "ColorBurn" => Some(Self::ColorBurn),
+            "HardLight" => Some(Self::HardLight),
+            "SoftLight" => Some(Self::SoftLight),
+            "Difference" => Some(Self::Difference),
+            "Exclusion" => Some(Self::Exclusion),
+            "Hue" | "H" => Some(Self::Hue),
+            "Saturation" | "S" => Some(Self::Saturation),
+            "Color" | "C" => Some(Self::Color),
+            "Luminosity" => Some(Self::Luminosity),
             _ => None,
         }
     }
 
-    /// The separable blend function `B(Cb, Cs)` of §11.3.5.2, for one channel.
-    ///
-    /// Every mode here is **separable** — it works the same on each channel independently —
-    /// which is why four of them fit in one function and the remaining twelve do not.
+    /// Separable blend function `B(Cb, Cs)` of ISO 32000-1 §11.3.5.2, for one channel.
     #[must_use]
     pub fn channel(self, backdrop: f64, source: f64) -> f64 {
         match self {
-            Self::Normal => source,
+            Self::Normal | Self::Hue | Self::Saturation | Self::Color | Self::Luminosity => source,
             Self::Multiply => backdrop * source,
             Self::Screen => backdrop + source - (backdrop * source),
+            Self::Overlay => Self::HardLight.channel(source, backdrop),
             Self::Darken => backdrop.min(source),
             Self::Lighten => backdrop.max(source),
+            Self::ColorDodge => {
+                if backdrop == 0.0 {
+                    0.0
+                } else if source >= 1.0 {
+                    1.0
+                } else {
+                    (backdrop / (1.0 - source)).min(1.0)
+                }
+            }
+            Self::ColorBurn => {
+                if backdrop >= 1.0 {
+                    1.0
+                } else if source == 0.0 {
+                    0.0
+                } else {
+                    1.0 - ((1.0 - backdrop) / source).min(1.0)
+                }
+            }
+            Self::HardLight => {
+                if source <= 0.5 {
+                    2.0 * backdrop * source
+                } else {
+                    1.0 - 2.0 * (1.0 - backdrop) * (1.0 - source)
+                }
+            }
+            Self::SoftLight => {
+                if source <= 0.5 {
+                    backdrop - (1.0 - 2.0 * source) * backdrop * (1.0 - backdrop)
+                } else {
+                    let d = if backdrop <= 0.25 {
+                        ((16.0 * backdrop - 12.0) * backdrop + 4.0) * backdrop
+                    } else {
+                        backdrop.sqrt()
+                    };
+                    backdrop + (2.0 * source - 1.0) * (d - backdrop)
+                }
+            }
+            Self::Difference => (backdrop - source).abs(),
+            Self::Exclusion => backdrop + source - 2.0 * backdrop * source,
+        }
+    }
+
+    /// Blend an RGB backdrop and source in `0.0..=1.0` per channel (ISO 32000-1 §11.3.5.2–3).
+    #[must_use]
+    pub fn rgb(self, cb: [f64; 3], cs: [f64; 3]) -> [f64; 3] {
+        match self {
+            Self::Hue => set_lum(set_sat(cs, sat(cb)), lum(cb)),
+            Self::Saturation => set_lum(set_sat(cb, sat(cs)), lum(cb)),
+            Self::Color => set_lum(cs, lum(cb)),
+            Self::Luminosity => set_lum(cb, lum(cs)),
+            _ => [
+                self.channel(cb[0], cs[0]),
+                self.channel(cb[1], cs[1]),
+                self.channel(cb[2], cs[2]),
+            ],
         }
     }
 }
 
-/// Source-over compositing, honouring a blend mode.
-///
-/// The formula is §11.3.5.2's general case, which is source-over with the blend function in
-/// place of the source colour where the backdrop is opaque:
-///
-/// ```text
-/// co = αs·(1 − αb)·Cs  +  αs·αb·B(Cb, Cs)  +  (1 − αs)·αb·Cb
-/// ```
-///
-/// `Normal` reduces that to plain source-over, which is what [`over`] is and why it stays: it is
-/// the hot path and it does not need the extra arithmetic.
+fn lum(c: [f64; 3]) -> f64 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+fn clip_color(mut c: [f64; 3]) -> [f64; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    if n < 0.0 && (l - n) > f64::EPSILON {
+        for ch in &mut c {
+            *ch = l + ((*ch - l) * l) / (l - n);
+        }
+    }
+    if x > 1.0 && (x - l) > f64::EPSILON {
+        for ch in &mut c {
+            *ch = l + ((*ch - l) * (1.0 - l)) / (x - l);
+        }
+    }
+    c
+}
+
+fn set_lum(c: [f64; 3], l: f64) -> [f64; 3] {
+    let d = l - lum(c);
+    clip_color([c[0] + d, c[1] + d, c[2] + d])
+}
+
+fn sat(c: [f64; 3]) -> f64 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+fn set_sat(c: [f64; 3], s: f64) -> [f64; 3] {
+    let mut pairs = [(0usize, c[0]), (1usize, c[1]), (2usize, c[2])];
+    pairs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let (imin, cmin) = pairs[0];
+    let (imid, cmid) = pairs[1];
+    let (imax, cmax) = pairs[2];
+    let mut out = [0.0; 3];
+    if cmax > cmin {
+        if let Some(slot) = out.get_mut(imid) {
+            *slot = ((cmid - cmin) * s) / (cmax - cmin);
+        }
+        if let Some(slot) = out.get_mut(imax) {
+            *slot = s;
+        }
+    }
+    if let Some(slot) = out.get_mut(imin) {
+        *slot = 0.0;
+    }
+    out
+}
+
+/// Source-over compositing, honouring all 16 PDF blend modes.
 #[must_use]
 pub fn over_blend(dst: [u8; 4], src: [u8; 4], src_alpha: f64, mode: BlendMode) -> [u8; 4] {
     let dst_a = f64::from(dst[3]) / 255.0;
     let out_a = src_alpha + dst_a * (1.0 - src_alpha);
+    let cb = [
+        f64::from(dst[0]) / 255.0,
+        f64::from(dst[1]) / 255.0,
+        f64::from(dst[2]) / 255.0,
+    ];
+    let cs = [
+        f64::from(src[0]) / 255.0,
+        f64::from(src[1]) / 255.0,
+        f64::from(src[2]) / 255.0,
+    ];
+    let blended = mode.rgb(cb, cs);
     let mut out = [0u8; 4];
-    // Walking the two colours together is what keeps the channels paired: an index into an
-    // array of four invites an off-by-one that a zip cannot express.
-    for ((s, d), slot) in src.iter().zip(dst.iter()).zip(out.iter_mut()).take(3) {
-        let cs = f64::from(*s) / 255.0;
-        let cb = f64::from(*d) / 255.0;
+    for (((&s, &d), &b), slot) in cs
+        .iter()
+        .zip(cb.iter())
+        .zip(blended.iter())
+        .zip(out.iter_mut())
+    {
         let value = if out_a > 0.0 {
-            let blended = mode.channel(cb, cs);
-            (src_alpha * (1.0 - dst_a) * cs
-                + src_alpha * dst_a * blended
-                + (1.0 - src_alpha) * dst_a * cb)
+            (src_alpha * (1.0 - dst_a) * s + src_alpha * dst_a * b + (1.0 - src_alpha) * dst_a * d)
                 / out_a
         } else {
             0.0
@@ -1575,8 +1679,19 @@ mod tests {
             BlendMode::Normal,
             BlendMode::Multiply,
             BlendMode::Screen,
+            BlendMode::Overlay,
             BlendMode::Darken,
             BlendMode::Lighten,
+            BlendMode::ColorDodge,
+            BlendMode::ColorBurn,
+            BlendMode::HardLight,
+            BlendMode::SoftLight,
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
         ] {
             assert_eq!(
                 over_blend(paper, source, 1.0, mode)[..3],
@@ -1602,35 +1717,83 @@ mod tests {
         }
     }
 
-    /// The names a content stream or an `/ExtGState` may use, including the abbreviations.
-    ///
-    /// A name that parses to nothing must return `None` rather than `Normal`, because the
-    /// caller turns `None` into a note and `Normal` into a silently wrong page.
+    /// All 16 standard PDF blend modes parse and evaluate per ISO 32000-1 Tables 136 and 137.
     #[test]
     fn a_blend_mode_name_parses_or_says_it_does_not() {
         for (name, expect) in [
             ("Normal", Some(BlendMode::Normal)),
+            ("Compatible", Some(BlendMode::Normal)),
             ("Multiply", Some(BlendMode::Multiply)),
             ("Screen", Some(BlendMode::Screen)),
+            ("Overlay", Some(BlendMode::Overlay)),
             ("Darken", Some(BlendMode::Darken)),
             ("Lighten", Some(BlendMode::Lighten)),
-            // The specification's own short names.
+            ("ColorDodge", Some(BlendMode::ColorDodge)),
+            ("ColorBurn", Some(BlendMode::ColorBurn)),
+            ("HardLight", Some(BlendMode::HardLight)),
+            ("SoftLight", Some(BlendMode::SoftLight)),
+            ("Difference", Some(BlendMode::Difference)),
+            ("Exclusion", Some(BlendMode::Exclusion)),
+            ("Hue", Some(BlendMode::Hue)),
+            ("Saturation", Some(BlendMode::Saturation)),
+            ("Color", Some(BlendMode::Color)),
+            ("Luminosity", Some(BlendMode::Luminosity)),
             ("M", Some(BlendMode::Multiply)),
             ("Scr", Some(BlendMode::Screen)),
             ("D", Some(BlendMode::Darken)),
-            // The specification's one genuinely ambiguous abbreviation: `L` is both
-            // `Lighten` and `Luminosity`, so this asserts it is refused rather than guessed.
+            ("H", Some(BlendMode::Hue)),
+            ("S", Some(BlendMode::Saturation)),
+            ("C", Some(BlendMode::Color)),
             ("L", None),
-            // The separable ones this renderer does not do.
-            ("Difference", None),
-            ("Exclusion", None),
-            ("Hue", None),
-            ("Saturation", None),
-            ("Luminosity", None),
             ("nonsense", None),
         ] {
             assert_eq!(BlendMode::parse(name), expect, "parsing `{name}`");
         }
+    }
+
+    #[test]
+    fn all_sixteen_blend_modes_match_analytic_formulas() {
+        let b = [100u8, 150, 200, 255];
+        let s = [200u8, 50, 100, 255];
+        assert_eq!(
+            over_blend(b, s, 1.0, BlendMode::Difference)[..3],
+            [100, 100, 100]
+        );
+        assert_eq!(
+            over_blend(b, s, 1.0, BlendMode::Exclusion)[..3],
+            [143, 141, 143]
+        );
+        assert_eq!(
+            over_blend(b, s, 1.0, BlendMode::Overlay)[..3],
+            [157, 86, 188]
+        );
+        assert_eq!(
+            over_blend(b, s, 1.0, BlendMode::HardLight)[..3],
+            [188, 59, 157]
+        );
+        assert_eq!(
+            over_blend(b, s, 1.0, BlendMode::ColorDodge)[..3],
+            [255, 187, 255]
+        );
+        assert_eq!(
+            over_blend(b, s, 1.0, BlendMode::ColorBurn)[..3],
+            [57, 0, 115]
+        );
+        assert_eq!(
+            over_blend(b, s, 1.0, BlendMode::SoftLight)[..3],
+            [134, 112, 191]
+        );
+        let lum_out = over_blend(b, s, 1.0, BlendMode::Luminosity);
+        let col_out = over_blend(b, s, 1.0, BlendMode::Color);
+        let hue_out = over_blend(b, s, 1.0, BlendMode::Hue);
+        let sat_out = over_blend(b, s, 1.0, BlendMode::Saturation);
+        let lum_u8 = |rgb: [u8; 4]| {
+            0.3 * f64::from(rgb[0]) + 0.59 * f64::from(rgb[1]) + 0.11 * f64::from(rgb[2])
+        };
+        assert!((lum_u8(col_out) - lum_u8(b)).abs() <= 1.5);
+        assert!((lum_u8(lum_out) - lum_u8(s)).abs() <= 1.5);
+        assert!((lum_u8(hue_out) - lum_u8(b)).abs() <= 1.5);
+        assert!((lum_u8(sat_out) - lum_u8(b)).abs() <= 1.5);
     }
     // Tests state their expectations with `expect` and index a slice whose length they
     // have just asserted; both are what a test is for. The panic-free rule is about what

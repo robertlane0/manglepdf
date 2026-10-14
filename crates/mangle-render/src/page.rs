@@ -616,6 +616,21 @@ fn paint_records(
     doc: &Document,
     notes: &mut Vec<String>,
 ) -> usize {
+    paint_records_at(executed, device, placement, resources, doc, notes, 0)
+}
+
+/// Maximum recursion depth for Type 3 glyph procedures (`ContentStreamCycleType3insideType3`).
+const MAX_TYPE3_DEPTH: usize = 8;
+
+fn paint_records_at(
+    executed: &mangle_content::PageContent,
+    device: &mut Device,
+    placement: &Placement,
+    resources: &Resources,
+    doc: &Document,
+    notes: &mut Vec<String>,
+    type3_depth: usize,
+) -> usize {
     let mut drawn = 0usize;
     for (name, span) in &executed.unknown_operators {
         notes.push(format!(
@@ -624,36 +639,12 @@ fn paint_records(
             span.start
         ));
     }
-    // The image lookup borrows the page's resources and the document and nothing else. It
-    // must not capture the notes: they are passed into `draw_mark` on the next line, and a
-    // second live borrow of them would not compile. The failure reason comes back as the
-    // closure's `Err` and is appended by `draw_mark` itself.
-    //
-    // All three lookups take the resource table to look in rather than capturing the
-    // page's, because a mark drawn inside a form resolves its names against **that form's**
-    // `/Resources`. Two forms may each name `/F1` and mean different fonts, so a lookup
-    // that fell back to the page's table would draw the wrong glyphs with nothing in the
-    // report to say so.
     let mut lookup = |name: &str, in_resources: &Resources| image_for(name, in_resources, doc);
     let mut shade_lookup =
         |name: &str, in_resources: &Resources| shading_for(name, in_resources, doc);
-    // The font lookup is beside the other two rather than inside `draw_mark`, for the same
-    // reason: the document and the page's resources are borrowed here, once, and the
-    // drawing code only ever sees a name.
     let mut font_lookup = |name: &str, in_resources: &Resources| font_for(name, in_resources, doc);
-    // The clip the device is holding, so a run of marks under one clip costs one install
-    // rather than one per mark. The memo is keyed on the record's own clip and installs the
-    // whole region when it differs, which keeps the cost proportional to how often the page
-    // changed its clip without making the result depend on anything but the record: installing
-    // the same region twice gives the same clip.
-    //
-    // `None` here is also the device's starting state — a fresh device has the whole image as
-    // its clip — so a page whose first mark has no clip needs no first install.
     let mut installed: Option<mangle_content::Clip> = None;
     for record in &executed.records {
-        // Before the mark, from that mark's own record. This is what makes drawing a mark
-        // independent of what was drawn before it, and it is why `Mark::ClipChanged` has
-        // nothing to do here: the record carrying the *next* mark already holds the new clip.
         if installed.as_ref() != record.clip.as_ref() {
             match &record.clip {
                 Some(clip) => device.install_clip(Some(&clip_region(clip, &placement.matrix))),
@@ -662,9 +653,6 @@ fn paint_records(
             installed.clone_from(&record.clip);
         }
         let to_device = placement.matrix.concat(record.ctm);
-        // The table this mark's names resolve against: the form's own where it was drawn
-        // inside one, and the page's otherwise. One line, and the reason a font named only
-        // inside a form is found at all.
         let own = record
             .form
             .as_ref()
@@ -682,6 +670,7 @@ fn paint_records(
             &mut font_lookup,
             named_in,
             doc,
+            type3_depth,
         );
         drawn += 1;
     }
@@ -1759,6 +1748,7 @@ fn draw_mark(
     // information, taken directly, because it is needed in three arms rather than in one.
     resources: &Resources,
     doc: &Document,
+    type3_depth: usize,
 ) {
     match mark {
         Mark::Path {
@@ -1986,6 +1976,30 @@ fn draw_mark(
             let Some(name) = font.as_deref().filter(|n| !n.is_empty()) else {
                 return;
             };
+            if let Some(font_obj) = resources.fonts.get(name) {
+                let resolved = doc
+                    .resolve_object(font_obj)
+                    .unwrap_or_else(|| font_obj.clone());
+                if let Object::Dict(font_dict) = &resolved
+                    && font_dict.get("Subtype").and_then(Object::as_name) == Some(b"Type3")
+                {
+                    draw_type3_glyphs(
+                        name,
+                        font_dict,
+                        codes,
+                        placements,
+                        fill,
+                        record,
+                        device,
+                        placement,
+                        resources,
+                        doc,
+                        notes,
+                        type3_depth,
+                    );
+                    return;
+                }
+            }
             let mut program = match fonts(name, resources) {
                 Ok(program) => program,
                 Err(reason) => {
@@ -2078,6 +2092,115 @@ fn draw_mark(
             }
         }
     }
+}
+
+/// Execute and render the `/CharProcs` content streams of a Type 3 font run.
+#[allow(clippy::too_many_arguments)]
+fn draw_type3_glyphs(
+    name: &str,
+    font_dict: &Dict,
+    codes: &[u32],
+    placements: &[Matrix],
+    fill: &mangle_content::Colour,
+    record: &mangle_content::Record,
+    device: &mut Device,
+    placement: &Matrix,
+    resources: &Resources,
+    doc: &Document,
+    notes: &mut Vec<String>,
+    type3_depth: usize,
+) {
+    if type3_depth >= MAX_TYPE3_DEPTH {
+        let note = format!(
+            "the Type 3 font `/{name}` nested deeper than {MAX_TYPE3_DEPTH} levels and was stopped"
+        );
+        if !notes.contains(&note) {
+            notes.push(note);
+        }
+        return;
+    }
+    let font_matrix = read_matrix(
+        font_dict
+            .get("FontMatrix")
+            .map(|o| doc.resolve_object(o).unwrap_or_else(|| o.clone()))
+            .as_ref(),
+    );
+    let encoding = encoding_for(font_dict, false, doc);
+    let charprocs = font_dict
+        .get("CharProcs")
+        .map(|o| doc.resolve_object(o).unwrap_or_else(|| o.clone()));
+    let Some(Object::Dict(charprocs)) = charprocs else {
+        let note = format!(
+            "the Type 3 font `/{name}` has no `/CharProcs` dictionary, so its glyphs were not drawn"
+        );
+        if !notes.contains(&note) {
+            notes.push(note);
+        }
+        return;
+    };
+    let type3_resources = font_dict
+        .get("Resources")
+        .map(|o| doc.resolve_object(o).unwrap_or_else(|| o.clone()))
+        .and_then(|o| o.as_dict().cloned())
+        .filter(|d| !d.is_empty())
+        .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+        .unwrap_or_else(|| resources.clone());
+    let saved_clip = record.clip.as_ref().map(|c| clip_region(c, placement));
+    let proc_placement = Placement {
+        matrix: *placement,
+        size: (device.image().width, device.image().height),
+    };
+    for (code, glyph_matrix) in codes.iter().zip(placements.iter()) {
+        let Some(glyph_name) = encoding.glyph_for(*code) else {
+            continue;
+        };
+        if glyph_name == ".notdef" {
+            continue;
+        }
+        let Some(proc_obj) = charprocs.get(glyph_name) else {
+            continue;
+        };
+        let proc_resolved = doc
+            .resolve_object(proc_obj)
+            .unwrap_or_else(|| proc_obj.clone());
+        let Object::Stream(proc_stream) = proc_resolved else {
+            continue;
+        };
+        let decoded = decode_stream(&proc_stream);
+        if decoded.encoded {
+            let note = format!(
+                "a glyph procedure in Type 3 font `/{name}` remained encoded after its filters \
+                 and was not drawn"
+            );
+            if !notes.contains(&note) {
+                notes.push(note);
+            }
+            continue;
+        }
+        if decoded.data.is_empty() {
+            continue;
+        }
+        let content = ContentStream::parse(&decoded.data);
+        let mut initial = mangle_content::GraphicsState::new();
+        initial.ctm = glyph_matrix.concat(font_matrix);
+        initial.fill = fill.clone();
+        initial.stroking = fill.clone();
+        initial.fill_alpha = record.fill_alpha;
+        initial.stroke_alpha = record.fill_alpha;
+        initial.blend_mode.clone_from(&record.blend_mode);
+        initial.clip.clone_from(&record.clip);
+        let executed = mangle_content::run_with_state(&content, &initial, &type3_resources);
+        let _ = paint_records_at(
+            &executed,
+            device,
+            &proc_placement,
+            &type3_resources,
+            doc,
+            notes,
+            type3_depth + 1,
+        );
+    }
+    device.install_clip(saved_clip.as_ref());
 }
 
 /// A viewport for a page, for a caller that wants the placement without the drawing.
@@ -3441,6 +3564,82 @@ mod tests {
         assert!(
             !reason.contains("metric-compatible"),
             "and it must not have been answered with a substitution: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_type3_glyph_procedure_renders_and_bounds_recursion() {
+        let doc =
+            Document::open(page_bytes(100), mangle_syntax::OpenOptions::default()).expect("opens");
+        let tree = mangle_doc::PageTree::build(
+            &doc,
+            doc.catalog()
+                .expect("cat")
+                .get("Pages")
+                .and_then(Object::as_ref_id)
+                .expect("pages"),
+        )
+        .expect("tree");
+        let page = tree.pages().first().expect("page");
+
+        let mut font = Dict::new();
+        font.set("Type", Object::name("Font"));
+        font.set("Subtype", Object::name("Type3"));
+        font.set("FontMatrix", numbers(&[0.1, 0.0, 0.0, 0.1, 0.0, 0.0]));
+        font.set("Encoding", Object::name("WinAnsiEncoding"));
+        let mut charprocs = Dict::new();
+        let proc_bytes = b"100 0 0 0 100 100 d1 0 0 100 100 re f".to_vec();
+        charprocs.set(
+            "A",
+            Object::Stream(mangle_syntax::Stream::new(Dict::new(), proc_bytes)),
+        );
+        let cycle_bytes = b"BT /T3 1 Tf (B) Tj ET".to_vec();
+        charprocs.set(
+            "B",
+            Object::Stream(mangle_syntax::Stream::new(Dict::new(), cycle_bytes)),
+        );
+        font.set("CharProcs", Object::Dict(charprocs));
+        let mut font_table = Dict::new();
+        font_table.set("T3", Object::Dict(font));
+        let mut resources_dict = Dict::new();
+        resources_dict.set("Font", Object::Dict(font_table));
+        let resources = Resources::from_dict(&resources_dict, &|o| Some(o.clone()));
+
+        let stream = ContentStream::parse(b"BT /T3 2 Tf 10 10 Td (A) Tj ET");
+        let executed = run_with(&stream, &resources);
+        let placement = Placement::fit(&page.inherited.crop_rect(), (100, 100), 1.0, 0);
+        let mut device = Device::new(Image::filled(100, 100, [255, 255, 255, 255]));
+        let mut notes = Vec::new();
+        let _ = paint_records(
+            &executed,
+            &mut device,
+            &placement,
+            &resources,
+            &doc,
+            &mut notes,
+        );
+        let img = device.into_image();
+        let inked = img.pixels.chunks_exact(4).filter(|px| px[0] < 128).count();
+        assert!(
+            inked > 100,
+            "Type 3 glyph procedure painted {inked} ink pixels"
+        );
+
+        let cycle_stream = ContentStream::parse(b"BT /T3 2 Tf 10 10 Td (B) Tj ET");
+        let cycle_executed = run_with(&cycle_stream, &resources);
+        let mut cycle_device = Device::new(Image::filled(100, 100, [255, 255, 255, 255]));
+        let mut cycle_notes = Vec::new();
+        let _ = paint_records(
+            &cycle_executed,
+            &mut cycle_device,
+            &placement,
+            &resources,
+            &doc,
+            &mut cycle_notes,
+        );
+        assert!(
+            cycle_notes.iter().any(|n| n.contains("nested deeper than")),
+            "cycle is bounded and reported: {cycle_notes:?}"
         );
     }
 }

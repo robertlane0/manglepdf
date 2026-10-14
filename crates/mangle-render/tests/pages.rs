@@ -7938,7 +7938,7 @@ fn an_unimplemented_blend_mode_is_reported_and_still_draws() {
     out.extend_from_slice(b"endstream\nendobj\n");
     offsets.push(out.len());
     out.extend_from_slice(
-        b"5 0 obj\n<< /ExtGState << /GS1 << /Type /ExtGState /BM /Difference >> >> >>\nendobj\n",
+        b"5 0 obj\n<< /ExtGState << /GS1 << /Type /ExtGState /BM /L >> >> >>\nendobj\n",
     );
     let xref = out.len();
     out.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
@@ -7950,7 +7950,7 @@ fn an_unimplemented_blend_mode_is_reported_and_still_draws() {
     );
     let render = render(out, 1.0);
     assert!(
-        render.notes.iter().any(|n| n.contains("Difference")),
+        render.notes.iter().any(|n| n.contains("`L`")),
         "the note names the mode that was dropped: {:?}",
         render.notes
     );
