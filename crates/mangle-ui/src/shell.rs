@@ -487,11 +487,20 @@ impl App {
                     // from another thread is exactly the case where nothing else would ask.
                     ctx.request_repaint();
                 }
-                JobResult::Saved { bytes, objects } => {
+                JobResult::Saved {
+                    bytes,
+                    objects,
+                    notice,
+                } => {
                     // A save is worth saying out loud: the user asked for a file, and got one.
-                    self.state.notice = Some(format!(
-                        "saved {bytes} bytes, rewriting {objects} stream(s)"
-                    ));
+                    // A substitution notice goes first, because it is the thing the user did
+                    // not ask for and has to see.
+                    self.state.notice = Some(match notice {
+                        Some(n) => {
+                            format!("{n}. Saved {bytes} bytes, rewriting {objects} stream(s)")
+                        }
+                        None => format!("saved {bytes} bytes, rewriting {objects} stream(s)"),
+                    });
                 }
                 JobResult::Failed { reason } => {
                     self.tell(reason);

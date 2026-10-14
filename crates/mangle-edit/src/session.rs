@@ -207,6 +207,9 @@ pub struct Outcome {
     pub label: String,
     /// What was executed, with a fallback resolved to its installed CIDs.
     pub change: Change,
+    /// What the status line shows, when the edit substituted something: which face
+    /// stood in and why. `None` for an edit that wrote what it was asked.
+    pub notice: Option<String>,
 }
 
 /// What went wrong in a session.
@@ -368,6 +371,7 @@ impl Editor {
         Ok(Outcome {
             label,
             change: change.clone(),
+            notice: None,
         })
     }
 
@@ -443,6 +447,9 @@ impl Editor {
         Ok(Outcome {
             label,
             change: fallback,
+            notice: Some(format!(
+                "{missing:?} is not in {base_font} — substituted {family} ({name})"
+            )),
         })
     }
 
@@ -1076,6 +1083,13 @@ mod tests {
                 && outcome.label.contains("Helvetica"),
             "the notice names the face, the character and the missing font: {}",
             outcome.label
+        );
+        // The status line travels separately from the history label: same facts, banner
+        // shape, and `None` for every edit that wrote what it was asked.
+        let notice = outcome.notice.expect("a fallback has a notice");
+        assert!(
+            notice.contains('α') && notice.contains("LiberationSans"),
+            "the banner names the character and the face: {notice}"
         );
         // The install staged objects beside the edit; the save carries both, and the
         // reopened file is checked below rather than the session's memory of it.

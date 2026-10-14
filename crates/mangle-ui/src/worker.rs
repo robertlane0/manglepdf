@@ -156,6 +156,8 @@ pub enum JobResult {
         bytes: usize,
         /// How many objects the revision rewrote.
         objects: usize,
+        /// What the status line shows about a substitution, if the edit made one.
+        notice: Option<String>,
     },
     /// The file could not be opened, or the job could not be done.
     Failed {
@@ -307,13 +309,16 @@ impl Worker {
             EditRequest::Text(property) => mangle_edit::Change::Text(*property),
             EditRequest::Retype { text } => mangle_edit::Change::Retype { text: text.clone() },
         };
-        if let Err(e) = editor.apply(object, &change) {
-            let _ = outbox.send(JobResult::Failed {
-                reason: e.to_string(),
-            });
-            return;
-        }
-        self.save_and_redraw(outbox, page);
+        let notice = match editor.apply(object, &change) {
+            Ok(outcome) => outcome.notice,
+            Err(e) => {
+                let _ = outbox.send(JobResult::Failed {
+                    reason: e.to_string(),
+                });
+                return;
+            }
+        };
+        self.save_and_redraw(outbox, page, notice);
     }
 
     /// Move an object in the z-order, save it, and draw the file as saved.
@@ -341,7 +346,7 @@ impl Worker {
             });
             return;
         }
-        self.save_and_redraw(outbox, page);
+        self.save_and_redraw(outbox, page, None);
     }
 
     /// Save the session, then re-open what it wrote and draw *that*.
@@ -349,7 +354,7 @@ impl Worker {
     /// Every mutating job ends here, and deliberately so: the canvas draws the file, not the
     /// model in memory, so the two cannot disagree. A save that failed is answered with its own
     /// reason rather than silently falling back to the unsaved page.
-    fn save_and_redraw(&mut self, outbox: &Sender<JobResult>, page: usize) {
+    fn save_and_redraw(&mut self, outbox: &Sender<JobResult>, page: usize, notice: Option<String>) {
         let saved = match self.session.as_mut().map(mangle_edit::Editor::save) {
             Some(Ok(save)) => save,
             Some(Err(e)) => {
@@ -363,6 +368,7 @@ impl Worker {
         let _ = outbox.send(JobResult::Saved {
             bytes: saved.bytes.len(),
             objects: saved.rewritten.len(),
+            notice,
         });
         self.reopen(saved.bytes, outbox);
         self.page(outbox, page, 1.0);
@@ -395,6 +401,7 @@ impl Worker {
         let _ = outbox.send(JobResult::Saved {
             bytes: saved.bytes.len(),
             objects: saved.rewritten.len(),
+            notice: None,
         });
         self.reopen(saved.bytes, outbox);
         self.page(outbox, page, 1.0);
@@ -687,7 +694,7 @@ mod tests {
         let mut after = None;
         for result in collect(&supervisor, 3) {
             match result {
-                JobResult::Saved { bytes, objects } => saved = Some((bytes, objects)),
+                JobResult::Saved { bytes, objects, .. } => saved = Some((bytes, objects)),
                 JobResult::Page { index, objects, .. } => {
                     redrawn = Some(index);
                     after = Some(objects);
@@ -722,6 +729,98 @@ mod tests {
             "and it moved straight across, without changing size: {before_bounds:?} -> \
              {after_bounds:?}"
         );
+    }
+
+    /// A retype with a missing glyph reports its substitution through the save notice.
+    ///
+    /// The window path without a window: the same `Job::Edit` the panel sends, driven
+    /// here, asserting the `Saved` answer carries the fallback notice rather than only
+    /// the byte counts. `α` is not in the WinAnsi fonts this page sets, so a run that
+    /// takes it falls back to an embedded Liberation subset.
+    #[test]
+    fn a_retype_with_a_missing_glyph_reports_its_substitution() {
+        let path = PathBuf::from("../../corpus/wild/gov__nist-sp800-88.pdf");
+        if !path.exists() {
+            eprintln!("skipped: the corpus file is not fetched");
+            return;
+        }
+        let supervisor = Supervisor::start();
+        supervisor.ask(Job::Open(path));
+        let mut objects = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => Some(objects),
+                _ => None,
+            })
+            .expect("a page");
+        // An own-font success rewrites the text the later attempts read, so the scan
+        // restarts from the redrawn page — bounded, because such a success is rare and
+        // each restart re-tries only fast refusals before it.
+        let mut restarts = 0usize;
+        loop {
+            let mut progressed = false;
+            for (index, summary) in objects.iter().enumerate() {
+                if !matches!(
+                    summary.kind,
+                    mangle_edit::Kind::Line
+                        | mangle_edit::Kind::Block
+                        | mangle_edit::Kind::LooseRun
+                ) {
+                    continue;
+                }
+                let Some(content) = summary.content.as_deref() else {
+                    continue;
+                };
+                let Some(position) = content
+                    .char_indices()
+                    .rev()
+                    .find(|(_, c)| c.is_ascii_alphanumeric())
+                else {
+                    continue;
+                };
+                let mut text = content.to_string();
+                text.replace_range(position.0..position.0 + position.1.len_utf8(), "α");
+                supervisor.ask(Job::Edit {
+                    page: 0,
+                    object: index,
+                    request: EditRequest::Retype { text },
+                });
+                let mut answers = collect(&supervisor, 1);
+                assert!(
+                    !answers.is_empty(),
+                    "the worker went quiet on object {index}"
+                );
+                match answers.remove(0) {
+                    JobResult::Saved { notice, .. } => match notice {
+                        Some(notice) => {
+                            assert!(
+                                notice.contains('α') && notice.contains("Liberation"),
+                                "the notice names the character and the face: {notice}"
+                            );
+                            return;
+                        }
+                        None => {
+                            // An own-font success: the page changed under the scan, so
+                            // re-read it rather than reasoning about stale indices.
+                            restarts += 1;
+                            assert!(restarts <= 3, "too many own-font successes to scan past");
+                            objects = collect(&supervisor, 1)
+                                .into_iter()
+                                .find_map(|r| match r {
+                                    JobResult::Page { objects, .. } => Some(objects),
+                                    _ => None,
+                                })
+                                .expect("the redrawn page");
+                            progressed = true;
+                            break;
+                        }
+                    },
+                    JobResult::Failed { .. } => {}
+                    other => panic!("an edit answers Saved or Failed, not {other:?}"),
+                }
+            }
+            assert!(progressed, "no run fell back on this page");
+        }
     }
 
     /// A stepper's edit reaches the file, which is the only place it counts.
@@ -922,7 +1021,7 @@ mod tests {
         let mut after = None;
         for result in collect(&supervisor, 4) {
             match result {
-                JobResult::Saved { bytes, objects } => saved = Some((bytes, objects)),
+                JobResult::Saved { bytes, objects, .. } => saved = Some((bytes, objects)),
                 JobResult::Page { objects, .. } => after = Some(objects),
                 JobResult::Failed { reason } => panic!("the arrange failed: {reason}"),
                 JobResult::Opened { .. } => {}
