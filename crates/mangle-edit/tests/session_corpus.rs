@@ -173,6 +173,55 @@ fn a_session_round_trips_a_real_page() {
     eprintln!("{sessions} session round trip(s)");
 }
 
+/// An installed font on a real page rides the save and reopens with it.
+///
+/// The unit test proves the bookkeeping on a fixture; this proves the revision a real
+/// file's readers accept — indirect resources, filtered streams, and all.
+#[test]
+fn an_installed_font_rides_a_real_save() {
+    let Some((doc, tree, index)) = open_page("gov__irs-f1040.pdf") else {
+        eprintln!("skipped: the corpus file is not fetched");
+        return;
+    };
+    let page = tree.pages().get(index).expect("page one");
+    let resources = resources_of(&doc, page);
+    let mut editor = match Editor::open(std::sync::Arc::new(doc), page, &resources) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let program = std::fs::read("../../assets/fonts/LiberationSans-Regular.ttf")
+        .expect("the bundled face is checked in");
+    let name = editor.free_font_name("F");
+    if let Err(e) = editor.install_truetype(&name, &program, &['H', 'i'], "LiberationSans") {
+        eprintln!("skipped: {e}");
+        return;
+    }
+    let save = editor.save().expect("and it saves");
+    assert!(
+        save.appended_only(editor.document().bytes()),
+        "the saved file is the original with a revision appended"
+    );
+    let reopened = Document::open(save.bytes, OpenOptions::default()).expect("it reopens");
+    let cat = reopened.catalog().expect("a catalogue");
+    let root = cat
+        .get("Pages")
+        .and_then(Object::as_ref_id)
+        .expect("a tree");
+    let tree2 = PageTree::build(&reopened, root).expect("the walk");
+    let page2 = tree2.pages().first().expect("a page");
+    let resources2 = resources_of(&reopened, page2);
+    let font = resources2.fonts.get(&name).expect("the installed font");
+    let dict = font.as_dict().expect("a font dictionary");
+    assert_eq!(
+        dict.get("Subtype").and_then(|o| o.as_name()),
+        Some(&b"Type0"[..]),
+        "a composite wrapper with a ToUnicode behind it"
+    );
+}
+
 /// An arrange inside a session moves an object past its neighbour and can be undone like any
 /// other step.
 #[test]

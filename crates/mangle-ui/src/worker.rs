@@ -350,7 +350,7 @@ impl Worker {
     /// model in memory, so the two cannot disagree. A save that failed is answered with its own
     /// reason rather than silently falling back to the unsaved page.
     fn save_and_redraw(&mut self, outbox: &Sender<JobResult>, page: usize) {
-        let saved = match self.session.as_ref().map(mangle_edit::Editor::save) {
+        let saved = match self.session.as_mut().map(mangle_edit::Editor::save) {
             Some(Ok(save)) => save,
             Some(Err(e)) => {
                 let _ = outbox.send(JobResult::Failed {

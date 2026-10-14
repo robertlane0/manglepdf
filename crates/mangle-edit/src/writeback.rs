@@ -189,6 +189,21 @@ pub fn save_decoded(
     page: &Page,
     wanted: &[Option<Vec<u8>>],
 ) -> Result<Save, SaveError> {
+    save_decoded_with(doc, page, wanted, &[])
+}
+
+/// [`save_decoded`], plus extra objects the revision carries.
+///
+/// Installed fonts live here: they are new objects no content stream names yet, but the
+/// revision must contain them or the `Tf` that will name them points at nothing. They
+/// ride the same revision rather than a second one because a file whose font arrives
+/// one revision after its text is a file that lies between the two.
+pub fn save_decoded_with(
+    doc: &Document,
+    page: &Page,
+    wanted: &[Option<Vec<u8>>],
+    extra: &[(u32, Object)],
+) -> Result<Save, SaveError> {
     if doc.info().encryption.encrypted {
         return Err(SaveError::Encrypted);
     }
@@ -212,7 +227,7 @@ pub fn save_decoded(
         rewritten.push((part.r, stream));
         let _ = i;
     }
-    finish(doc, rewritten, re_encoded)
+    finish(doc, rewritten, re_encoded, extra)
 }
 
 /// Take the wanted ranges in `wanted` and save them, which is the shape a single edit produces.
@@ -243,7 +258,7 @@ pub fn save_page(doc: &Document, page: &Page, patches: &[Patch]) -> Result<Save,
 
     let lengths = part_lengths(&parts, patches)?;
     let rewritten = rewritten_parts(&parts, &applied.bytes, &lengths)?;
-    finish(doc, rewritten.0, rewritten.1)
+    finish(doc, rewritten.0, rewritten.1, &[])
 }
 
 /// Each part's length once `patches` are applied to the concatenation.
@@ -356,10 +371,14 @@ fn finish(
     doc: &Document,
     rewritten: Vec<(Ref, Stream)>,
     re_encoded: bool,
+    extra: &[(u32, Object)],
 ) -> Result<Save, SaveError> {
     let mut update = IncrementalUpdate::new(doc.xref().size());
     for (r, stream) in &rewritten {
         update.set(r.num, Object::Stream(stream.clone()));
+    }
+    for (num, obj) in extra {
+        update.set(*num, obj.clone());
     }
     if let Some(info) = doc.info_ref() {
         update.info = Some(info);
@@ -370,9 +389,11 @@ fn finish(
         doc.catalog_ref(),
         &doc.file_id(),
     );
+    let mut numbers: Vec<u32> = rewritten.iter().map(|(r, _)| r.num).collect();
+    numbers.extend(extra.iter().map(|(num, _)| *num));
     Ok(Save {
         bytes,
-        rewritten: rewritten.iter().map(|(r, _)| r.num).collect(),
+        rewritten: numbers,
         re_encoded,
     })
 }

@@ -37,6 +37,6 @@ pub use page_objects::{
     Kind, LineBreak, PageModel, PageObject, Provenance, Summary, content, page_text, provenance_of,
     summarise,
 };
-pub use session::{Editor, OpenError, Reason, SessionError};
+pub use session::{Editor, InstallError, OpenError, Reason, SessionError};
 pub use surgery::{Applied, EditError, Patch};
-pub use writeback::{Save, SaveError, save_decoded, save_page, stream_digest};
+pub use writeback::{Save, SaveError, save_decoded, save_decoded_with, save_page, stream_digest};
