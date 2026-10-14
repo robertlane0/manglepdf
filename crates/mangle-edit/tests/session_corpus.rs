@@ -98,10 +98,10 @@ fn a_session_round_trips_a_real_page() {
             continue;
         };
 
-        let label = editor
+        let outcome = editor
             .apply(moved, &Change::move_by(9.0, 0.0))
             .expect("a move on a movable object");
-        assert_eq!(label, "move by 9, 0");
+        assert_eq!(outcome.label, "move by 9, 0");
         let edited = editor.stream();
         assert_ne!(edited, was, "the edit changed the stream");
         assert_eq!(editor.depth(), (1, 0), "one step back");
@@ -259,4 +259,258 @@ fn an_arrange_in_a_session_can_be_undone() {
         }
         Err(e) => eprintln!("skipped: this object cannot be arranged: {e}"),
     }
+}
+
+/// A missing glyph on a real page falls back to an embedded subset through a session.
+///
+/// The first single-run `Tj` object whose font lacks `α` is retyped with it: the label
+/// names the fallback, the save carries the new font objects, and the reopened run
+/// reads back through the installed `ToUnicode`.
+#[test]
+fn a_missing_glyph_falls_back_on_a_real_page() {
+    // Several pages, because whether a run can fall back depends on its family: a run
+    // set in HelveticaNeue — which is not metric-compatible with anything bundled —
+    // keeps its refusal, and only a run with a bundled stand-in takes the fallback.
+    let mut fell_back = false;
+    for name in [
+        "gov__irs-f1040.pdf",
+        "gov__nist-sp800-88.pdf",
+        "pdfjs__TAMReview.pdf",
+    ] {
+        let Some((doc, tree, index)) = open_page(name) else {
+            eprintln!("skipped: the corpus file is not fetched");
+            continue;
+        };
+        let page = tree.pages().get(index).expect("page one");
+        let resources = resources_of(&doc, page);
+        let mut editor = match Editor::open(std::sync::Arc::new(doc), page, &resources) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                continue;
+            }
+        };
+        let mut no_content = 0usize;
+        let mut no_alpha = 0usize;
+        let mut own_font = 0usize;
+        let mut refused = 0usize;
+        for (at, object) in editor.model().objects().iter().enumerate() {
+            if !matches!(
+                object.kind,
+                mangle_edit::Kind::Line | mangle_edit::Kind::Block | mangle_edit::Kind::LooseRun
+            ) || object.records.len() != 1
+            {
+                continue;
+            }
+            let Some(content) = summaries_content(&editor, at) else {
+                no_content += 1;
+                continue;
+            };
+            let Some(alpha) = with_alpha(&content) else {
+                no_alpha += 1;
+                continue;
+            };
+            match editor.apply(
+                at,
+                &Change::Retype {
+                    text: alpha.clone(),
+                },
+            ) {
+                Ok(outcome) if outcome.label.contains("fallback") => {
+                    assert!(
+                        outcome.label.contains("Liberation"),
+                        "the notice names the face: {}",
+                        outcome.label
+                    );
+                    eprintln!("fell back on {name} object {at}: {}", outcome.label);
+                    let save = editor.save().expect("and it saves");
+                    assert!(
+                        save.appended_only(editor.document().bytes()),
+                        "the saved file is the original with a revision appended"
+                    );
+                    let reopened =
+                        Document::open(save.bytes, OpenOptions::default()).expect("it reopens");
+                    assert!(
+                        reads_through_tounicode(&reopened, &alpha),
+                        "the page says {alpha:?} through its ToUnicode"
+                    );
+                    fell_back = true;
+                    break;
+                }
+                Ok(_) => {
+                    own_font += 1;
+                }
+                Err(_) => {
+                    refused += 1;
+                }
+            }
+        }
+        eprintln!(
+            "{name}: no-content={no_content} no-alpha={no_alpha} own-font={own_font} refused={refused}"
+        );
+        if fell_back {
+            break;
+        }
+    }
+    assert!(fell_back, "no run fell back on any corpus page");
+}
+
+/// The object's decoded text, read the way the panel reads it.
+fn summaries_content(editor: &Editor, at: usize) -> Option<String> {
+    editor
+        .model()
+        .objects()
+        .get(at)
+        .and_then(|o| {
+            o.records.first().and_then(|r| match &r.mark {
+                mangle_content::interp::Mark::Glyphs {
+                    text,
+                    placements,
+                    size,
+                    ..
+                } => {
+                    let run = mangle_text::Run {
+                        form: r.form.as_deref(),
+                        font: r.text.font.as_deref(),
+                        text,
+                        origins: placements.iter().map(|m| (m.e, m.f)).collect(),
+                        size: *size
+                            * (r.text_matrix.a * r.text_matrix.d
+                                - r.text_matrix.b * r.text_matrix.c)
+                                .abs()
+                                .sqrt(),
+                    };
+                    let doc = editor.document();
+                    // The page's own resources, resolved the way the interpreter needs them.
+                    let page = editor.page();
+                    let resources = page
+                        .inherited
+                        .resources
+                        .as_ref()
+                        .and_then(|o| doc.resolve_object(o))
+                        .and_then(|o| o.as_dict().cloned())
+                        .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+                        .unwrap_or_default();
+                    mangle_text::decode(&resources, &|o| doc.resolve_object(o), &run)
+                        .map(|d| d.text)
+                }
+                _ => None,
+            })
+        })
+        .filter(|t| !t.is_empty())
+}
+
+/// The text with its last alphanumeric character replaced by `α`, when it has one.
+fn with_alpha(text: &str) -> Option<String> {
+    let (at, found) = text
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_ascii_alphanumeric())?;
+    let mut out = text.to_string();
+    out.replace_range(at..at + found.len_utf8(), "α");
+    Some(out)
+}
+
+/// Whether any text-showing run of the file's first page reads as `want` through its
+/// own `ToUnicode`: the installed CMap is what makes the new text extractable.
+fn reads_through_tounicode(doc: &Document, want: &str) -> bool {
+    let Some(cat) = doc.catalog().ok() else {
+        return false;
+    };
+    let Some(root) = cat.get("Pages").and_then(Object::as_ref_id) else {
+        return false;
+    };
+    let Some(tree) = PageTree::build(doc, root).ok() else {
+        return false;
+    };
+    let Some(page) = tree.pages().first() else {
+        return false;
+    };
+    let resources = resources_of(doc, page);
+    // Every composite font's map, collected first: the run does not say which font it
+    // fell back to, and a map that names the run's CIDs is the one.
+    let mut maps: Vec<(String, std::collections::BTreeMap<u32, char>)> = Vec::new();
+    for (name, font) in &resources.fonts {
+        let Some(dict) = doc.resolve_object(font).and_then(|o| o.as_dict().cloned()) else {
+            continue;
+        };
+        if dict.get("Subtype").and_then(|o| o.as_name()) != Some(&b"Type0"[..]) {
+            continue;
+        }
+        let Some(text) = dict
+            .get("ToUnicode")
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| match o {
+                Object::Stream(s) => String::from_utf8(s.raw).ok(),
+                _ => None,
+            })
+        else {
+            continue;
+        };
+        maps.push((name.clone(), to_unicode_map(&text)));
+    }
+    if maps.is_empty() {
+        return false;
+    }
+    let stream = page.decoded_contents(doc);
+    let run = run_with(&ContentStream::parse(&stream), &resources);
+    for record in &run.records {
+        let mangle_content::interp::Mark::Glyphs { text: raw, .. } = &record.mark else {
+            continue;
+        };
+        if raw.len() % 2 != 0 || raw.is_empty() {
+            continue;
+        }
+        for (_, map) in &maps {
+            let decoded: String = raw
+                .chunks_exact(2)
+                .map(|pair| {
+                    let cid = (u32::from(pair[0]) << 8) | u32::from(pair[1]);
+                    map.get(&cid).copied().unwrap_or('�')
+                })
+                .collect();
+            if decoded == want {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// One `beginbfchar` block read as CID to character.
+fn to_unicode_map(cmap: &str) -> std::collections::BTreeMap<u32, char> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut inside = false;
+    for line in cmap.lines() {
+        let line = line.trim();
+        if line.ends_with("beginbfchar") {
+            inside = true;
+            continue;
+        }
+        if line.starts_with("endbfchar") {
+            inside = false;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        if let (Some(cid), Some(uni)) = (parts.next(), parts.next()) {
+            if let (Some(cid), Some(uni)) = (hex_of(cid), hex_of(uni)) {
+                if let Some(ch) = char::from_u32(uni) {
+                    out.insert(cid, ch);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `<1F>` to its number, or `None` for anything that is not one hex word.
+fn hex_of(word: &str) -> Option<u32> {
+    let word = word.strip_prefix('<')?.strip_suffix('>')?;
+    if word.is_empty() || word.len() > 8 || !word.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(word, 16).ok()
 }

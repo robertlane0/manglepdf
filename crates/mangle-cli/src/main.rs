@@ -211,15 +211,21 @@ fn edit(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("{path}: {e}"))?;
     let size_before = session.document().bytes().len();
     let original = session.document().bytes().to_vec();
+    // The change as executed, for the check below: a fallback resolves to its installed
+    // CIDs, and checking the requested change instead would fail a correct file.
+    // Arrange takes no such path, so only the edit arm sets it.
+    let mut executed: Option<mangle_edit::Change> = None;
     let report = match arrange {
         Some(arrange) => session
             .arrange(which, arrange)
             .map_err(|e| format!("{path}: {e}"))?,
         None => {
             let change = change_from_args(args, object)?;
-            session
+            let outcome = session
                 .apply(which, &change)
-                .map_err(|e| format!("{path}: {e}"))?
+                .map_err(|e| format!("{path}: {e}"))?;
+            executed = Some(outcome.change);
+            outcome.label
         }
     };
     let save = session.save().map_err(|e| format!("{path}: {e}"))?;
@@ -264,6 +270,9 @@ fn edit(args: &[String]) -> Result<(), String> {
             ""
         }
     );
+    if !save.installed.is_empty() {
+        let _ = writeln!(out, "installed {} object(s)", save.installed.len());
+    }
     let _ = writeln!(
         out,
         "appended  {}",
@@ -304,7 +313,10 @@ fn edit(args: &[String]) -> Result<(), String> {
     match arrange {
         Some(_) => {}
         None => {
-            let change = change_from_args(args, object)?;
+            let change = match executed {
+                Some(change) => change,
+                None => change_from_args(args, object)?,
+            };
             // The reopened page's own font table checks a retype: the edit never touches
             // the fonts, so the table is the same one the edit read.
             let fonts = mangle_edit::Fonts {

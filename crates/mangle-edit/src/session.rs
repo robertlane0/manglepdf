@@ -41,7 +41,7 @@ use crate::arrange::{Arrange, arrange_patches};
 use crate::edits::{Change, Fonts, patches_for_with};
 use crate::embed::{EMBEDDED_OBJECTS, embed_truetype};
 use crate::history::{History, Snapshot};
-use crate::page_objects::PageModel;
+use crate::page_objects::{PageModel, PageObject};
 use crate::surgery::apply;
 use crate::writeback::{Part, Save, SaveError, save_decoded_with, split_like};
 
@@ -194,6 +194,21 @@ impl std::fmt::Display for Reason {
 
 impl std::error::Error for Reason {}
 
+/// What one `apply` did: the label it recorded and the change as executed.
+///
+/// The two differ when a retype fell back to an embedded subset: the label carries the
+/// notice for humans, and the change carries the CIDs for the check. A caller that
+/// verifies what happened must verify the executed change rather than the requested
+/// one — checking a fallback against the run's own font fails on a file that is
+/// correct, because that font was never written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Outcome {
+    /// What the history panel shows, including any fallback notice.
+    pub label: String,
+    /// What was executed, with a fallback resolved to its installed CIDs.
+    pub change: Change,
+}
+
 /// What went wrong in a session.
 ///
 /// Three shapes rather than one, because they are three different failures: the edit was refused,
@@ -205,6 +220,8 @@ pub enum SessionError {
     Change(crate::ChangeError),
     /// The rearrange was refused, or the object cannot be moved faithfully.
     Arrange(crate::ArrangeError),
+    /// A fallback font could not be installed, so a retype that needed one did not happen.
+    Install(InstallError),
     /// The edited stream no longer divides into the page's content streams.
     Reason(Reason),
 }
@@ -214,6 +231,7 @@ impl std::fmt::Display for SessionError {
         match self {
             Self::Change(e) => write!(f, "{e}"),
             Self::Arrange(e) => write!(f, "{e}"),
+            Self::Install(e) => write!(f, "{e}"),
             Self::Reason(r) => write!(f, "{r}"),
         }
     }
@@ -311,15 +329,16 @@ impl Editor {
 
     /// Apply a change to the object at `index`, in the model as it now stands.
     ///
-    /// Returns the label recorded for it, which is the same string a history panel shows.
-    pub fn apply(&mut self, index: usize, change: &Change) -> Result<String, SessionError> {
+    /// Returns what was done: the label recorded for it — the same string a history
+    /// panel shows — and the change as executed, which a fallback resolves.
+    pub fn apply(&mut self, index: usize, change: &Change) -> Result<Outcome, SessionError> {
         let model = self.model();
         let Some(object) = model.objects().get(index) else {
             return Err(SessionError::Change(crate::ChangeError::Refused(
                 crate::Refusal::NoSpans,
             )));
         };
-        let patches = patches_for_with(
+        let patches = match patches_for_with(
             &self.stream(),
             object,
             change,
@@ -327,13 +346,105 @@ impl Editor {
                 resources: &self.resources,
                 resolve: &|o| self.doc.resolve_object(o),
             }),
-        )
-        .map_err(|r| SessionError::Change(crate::ChangeError::Refused(r)))?;
+        ) {
+            Ok(patches) => patches,
+            // The one refusal with a second answer: a character the run's own font cannot
+            // write is embedded from a bundled face rather than reported, which is the
+            // charter's third rung. Every other refusal stands, and a fallback that
+            // fails its own encoding propagates rather than recursing.
+            Err(e) => {
+                if let (Change::Retype { text }, crate::Refusal::GlyphNotEncodable { ch, font }) =
+                    (change, &e)
+                {
+                    return self.apply_fallback(object, text, *ch, font.clone());
+                }
+                return Err(SessionError::Change(crate::ChangeError::Refused(e)));
+            }
+        };
         let applied = apply(&self.stream(), &patches)
             .map_err(|e| SessionError::Change(crate::ChangeError::Stream(e)))?;
         let label = change_label(change);
         self.record(applied.bytes, &patches, label.clone())?;
-        Ok(label)
+        Ok(Outcome {
+            label,
+            change: change.clone(),
+        })
+    }
+
+    /// Retype through an embedded fallback face, for a character the run's own font lacks.
+    ///
+    /// The run's family resolves to a bundled metric-compatible face, which is subset for
+    /// exactly the new text's characters, installed under a free name, and switched to
+    /// for the one operation. The label carries the notice the charter requires — which
+    /// face stood in and which character needed it — because a substitution no notice
+    /// names is a silent one. Anything without a bundled face keeps the original refusal.
+    fn apply_fallback(
+        &mut self,
+        object: &PageObject,
+        text: &str,
+        missing: char,
+        font: String,
+    ) -> Result<Outcome, SessionError> {
+        use crate::Refusal;
+        let original = || {
+            SessionError::Change(crate::ChangeError::Refused(Refusal::GlyphNotEncodable {
+                ch: missing,
+                font: font.clone(),
+            }))
+        };
+        let Some(record) = object.records.first() else {
+            return Err(original());
+        };
+        let resource_name = record.text.font.clone().unwrap_or_default();
+        let table = match record.form.as_deref() {
+            Some(form) => self
+                .resources
+                .form_resources(form)
+                .unwrap_or_else(|| std::sync::Arc::new(self.resources.clone())),
+            None => std::sync::Arc::new(self.resources.clone()),
+        };
+        let base_font = table
+            .fonts
+            .get(&resource_name)
+            .and_then(|found| {
+                self.doc
+                    .resolve_object(found)
+                    .or_else(|| Some(found.clone()))
+            })
+            .and_then(|o| o.as_dict().cloned())
+            .and_then(|d| {
+                d.get("BaseFont")
+                    .and_then(|o| o.as_name())
+                    .map(|n| n.to_vec())
+            })
+            .and_then(|n| String::from_utf8(n).ok())
+            .unwrap_or_default();
+        let Some((family, program)) = mangle_font::substitute_named(&base_font) else {
+            return Err(original());
+        };
+        let name = self.free_font_name("F");
+        let chars: Vec<char> = text.chars().collect();
+        let embedded = self
+            .install_truetype(&name, program, &chars, family)
+            .map_err(SessionError::Install)?;
+        let fallback = Change::RetypeIn {
+            text: text.to_string(),
+            font: name.clone(),
+            size: record.text.size,
+            cids: embedded.cids.clone(),
+        };
+        let patches = patches_for_with(&self.stream(), object, &fallback, None)
+            .map_err(|r| SessionError::Change(crate::ChangeError::Refused(r)))?;
+        let applied = apply(&self.stream(), &patches)
+            .map_err(|e| SessionError::Change(crate::ChangeError::Stream(e)))?;
+        let label = format!(
+            "retype as {text:?} (fallback {family} {name}: {missing:?} is not in {base_font})"
+        );
+        self.record(applied.bytes, &patches, label.clone())?;
+        Ok(Outcome {
+            label,
+            change: fallback,
+        })
     }
 
     /// Arrange the object at `index`, which needs its neighbours and is therefore not a `Change`.
@@ -393,7 +504,8 @@ impl Editor {
         }
     }
 
-    /// Install an embedded subset of `program` for `chars` under `name`.
+    /// Install an embedded subset of `program` for `chars` under `name`, and give back
+    /// what was installed: the session's retype fallback switches the run to it next.
     ///
     /// The five font objects are staged for the next save with the resource-dict rewrite
     /// that names them; the in-memory resources learn the name too, so the session's own
@@ -405,7 +517,7 @@ impl Editor {
         program: &[u8],
         chars: &[char],
         family: &str,
-    ) -> Result<(), InstallError> {
+    ) -> Result<crate::EmbeddedFont, InstallError> {
         if self.resources.fonts.contains_key(name) {
             return Err(InstallError::NameTaken {
                 name: name.to_string(),
@@ -454,6 +566,7 @@ impl Editor {
             mangle_syntax::object::Name::new("Font"),
             Object::Dict(font_table),
         );
+        let installed = embedded.clone();
         for (num, obj) in embedded.numbered {
             self.staged.push((num, obj));
         }
@@ -461,7 +574,7 @@ impl Editor {
         self.resources
             .fonts
             .insert(name.to_string(), Object::Dict(dict));
-        Ok(())
+        Ok(installed)
     }
 
     /// Save the page as it now stands, as an incremental update.
@@ -628,6 +741,7 @@ fn change_label(change: &Change) -> String {
             format!("set the {} to {}", property.name(), value)
         }
         Change::Retype { text } => format!("retype as {text:?}"),
+        Change::RetypeIn { text, font, .. } => format!("retype as {text:?} in {font}"),
     }
 }
 
@@ -801,6 +915,56 @@ mod tests {
         std::fs::read(&path).expect("the bundled face is checked in")
     }
 
+    /// A page whose only font is an unembedded `/Helvetica` in WinAnsi: the shape a
+    /// fallback embeds beside rather than replaces.
+    fn doc_with_helvetica(part: &str) -> (Document, Page) {
+        let mut out = String::from("%PDF-1.7\n");
+        let mut offsets = vec![0usize];
+        offsets.push(out.len());
+        out.push_str("1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n");
+        offsets.push(out.len());
+        out.push_str("2 0 obj\n<</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n");
+        offsets.push(out.len());
+        out.push_str(
+            "3 0 obj\n<</Type /Page /Parent 2 0 R /Contents [4 0 R] \
+             /MediaBox [0 0 200 200] /Resources 5 0 R >>\nendobj\n",
+        );
+        offsets.push(out.len());
+        out.push_str("4 0 obj\n<</Length ");
+        out.push_str(&part.len().to_string());
+        out.push_str(">>\nstream\n");
+        out.push_str(part);
+        out.push_str("\nendstream\nendobj\n");
+        offsets.push(out.len());
+        out.push_str(
+            "5 0 obj\n<</Font <</F1 <</Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+             /Encoding /WinAnsiEncoding>>>>>>\nendobj\n",
+        );
+        assert_eq!(offsets.len(), 6, "one entry per object plus the free head");
+        let start_xref = out.len();
+        out.push_str("xref\n0 6\n");
+        for (n, offset) in offsets.iter().enumerate() {
+            if n == 0 {
+                out.push_str("0000000000 65535 f \n");
+            } else {
+                let _ = writeln!(out, "{offset:010} 00000 n ");
+            }
+        }
+        let _ = write!(
+            out,
+            "trailer\n<</Size 6 /Root 1 0 R>>\nstartxref\n{start_xref}\n%%EOF\n"
+        );
+        let doc =
+            Document::open(out.into_bytes(), OpenOptions::default()).expect("the fixture opens");
+        let cat = doc.catalog().expect("a catalogue");
+        let root = cat
+            .get("Pages")
+            .and_then(Object::as_ref_id)
+            .expect("a tree");
+        let tree = mangle_doc::PageTree::build(&doc, root).expect("the walk");
+        (doc, tree.pages().first().expect("a page").clone())
+    }
+
     #[test]
     fn an_installed_font_rides_the_next_save() {
         let (doc, page) = doc_with_resources(&["BT (Hi) Tj ET"]);
@@ -822,7 +986,8 @@ mod tests {
             "an install appends a revision rather than rewriting the file"
         );
         // Six objects ride along: the five font objects and the resource rewrite.
-        assert_eq!(save.rewritten.len(), 6, "nothing more, nothing less");
+        assert_eq!(save.rewritten.len(), 0, "no stream changed");
+        assert_eq!(save.installed.len(), 6, "nothing more, nothing less");
         // Reopen what was written: the font is there, wired to its five objects.
         let doc2 = Document::open(save.bytes.clone(), OpenOptions::default()).expect("reopens");
         let cat = doc2.catalog().expect("a catalogue");
@@ -866,6 +1031,159 @@ mod tests {
         assert!(matches!(err, crate::InstallError::DirectResources), "{err}");
     }
 
+    /// A character the run's own WinAnsi font cannot write falls back to an embedded
+    /// Liberation subset, and the label says so.
+    ///
+    /// `α` is not in WinAnsi; `Helvetica` resolves to a bundled face that has it. The
+    /// label is the notice the charter requires — which face stood in and which
+    /// character needed it — because the history panel and the command line both print
+    /// labels, and a substitution neither shows is a silent one.
+    #[test]
+    fn a_missing_glyph_falls_back_to_an_embedded_subset() {
+        let (doc, page) = doc_with_helvetica("BT /F1 12 Tf (Hi) Tj ET");
+        let resources = page
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .unwrap_or_default();
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &resources).expect("editable");
+        let at = editor
+            .model()
+            .objects()
+            .iter()
+            .position(|o| {
+                matches!(
+                    o.kind,
+                    crate::Kind::Line | crate::Kind::Block | crate::Kind::LooseRun
+                )
+            })
+            .expect("a text object");
+        let outcome = editor
+            .apply(
+                at,
+                &Change::Retype {
+                    text: "Hα".to_string(),
+                },
+            )
+            .expect("a fallback answers");
+        assert!(
+            outcome.label.contains("fallback")
+                && outcome.label.contains("LiberationSans")
+                && outcome.label.contains('α')
+                && outcome.label.contains("Helvetica"),
+            "the notice names the face, the character and the missing font: {}",
+            outcome.label
+        );
+        // The install staged objects beside the edit; the save carries both, and the
+        // reopened file is checked below rather than the session's memory of it.
+        let save = editor.save().expect("saves");
+        let doc2 = Document::open(save.bytes.clone(), OpenOptions::default()).expect("reopens");
+        let cat = doc2.catalog().expect("a catalogue");
+        let root = cat
+            .get("Pages")
+            .and_then(Object::as_ref_id)
+            .expect("a tree");
+        let tree = mangle_doc::PageTree::build(&doc2, root).expect("the walk");
+        let page2 = tree.pages().first().expect("a page").clone();
+        // The new run reads back as "Hα" through the installed `ToUnicode`: the CMap is
+        // what makes extraction of the new text exact, so the check reads through it
+        // rather than through the raw CID bytes.
+        let resources2 = page2
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc2.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc2.resolve_object(o)))
+            .expect("resources");
+        let (name, dict) = resources2
+            .fonts
+            .iter()
+            .find_map(|(name, font)| {
+                let dict = doc2.resolve_object(font)?.as_dict()?.clone();
+                (dict.get("Subtype").and_then(|o| o.as_name()) == Some(&b"Type0"[..]))
+                    .then(|| (name.clone(), dict))
+            })
+            .expect("the installed composite font");
+        let to_unicode = dict
+            .get("ToUnicode")
+            .and_then(|o| doc2.resolve_object(o))
+            .expect("a ToUnicode");
+        let text = match to_unicode {
+            Object::Stream(stream) => String::from_utf8(stream.raw.clone()).expect("a CMap"),
+            other => panic!("a stream, not {other:?}"),
+        };
+        let map = to_unicode_map(&text);
+        let stream2 = page2.decoded_contents(&doc2);
+        let after = mangle_content::interp::run_with(
+            &mangle_content::ContentStream::parse(&stream2),
+            &resources2,
+        );
+        let mut found = false;
+        for record in &after.records {
+            let mangle_content::interp::Mark::Glyphs { text: raw, .. } = &record.mark else {
+                continue;
+            };
+            if raw.len() != 4 {
+                continue;
+            }
+            let decoded: String = raw
+                .chunks_exact(2)
+                .map(|pair| {
+                    let cid = (u32::from(pair[0]) << 8) | u32::from(pair[1]);
+                    map.get(&cid).copied().unwrap_or('�')
+                })
+                .collect();
+            if decoded == "Hα" {
+                found = true;
+            }
+        }
+        assert!(found, "the page says Hα through {name}");
+    }
+
+    /// One `beginbfchar` block read as CID to character: the reader a Unicode
+    /// extraction would use, reduced to what the check needs.
+    fn to_unicode_map(cmap: &str) -> std::collections::BTreeMap<u32, char> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut inside = false;
+        for line in cmap.lines() {
+            let line = line.trim();
+            if line.ends_with("beginbfchar") {
+                inside = true;
+                continue;
+            }
+            if line.starts_with("endbfchar") {
+                inside = false;
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            if let (Some(cid), Some(uni)) = (parts.next(), parts.next()) {
+                if let (Some(cid), Some(uni)) = (hex_of(cid), hex_of(uni)) {
+                    if let Some(ch) = char::from_u32(uni) {
+                        out.insert(cid, ch);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `<1F>` to its number, or `None` for anything that is not one hex word.
+    fn hex_of(word: &str) -> Option<u32> {
+        let word = word.strip_prefix('<')?.strip_suffix('>')?;
+        if word.is_empty() || word.len() > 8 || !word.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(word, 16).ok()
+    }
+
     #[test]
     fn a_session_starts_with_the_streams_the_file_has() {
         let (doc, page) = doc_with(&["q 1 0 0 1 0 0 cm /Im0 Do Q", "q /Im1 Do Q"]);
@@ -893,10 +1211,10 @@ mod tests {
                 .expect("editable");
         let was = editor.stream();
 
-        let label = editor
+        let outcome = editor
             .apply(0, &Change::move_by(7.0, 0.0))
             .expect("a move on a real object");
-        assert_eq!(label, "move by 7, 0");
+        assert_eq!(outcome.label, "move by 7, 0");
         assert!(editor.is_dirty(), "the stream changed");
         assert_ne!(editor.stream(), was, "and it changed");
         assert_eq!(editor.depth(), (1, 0), "one step back, none forward");

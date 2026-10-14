@@ -47,8 +47,11 @@ use crate::surgery::{Patch, apply};
 pub struct Save {
     /// The whole file, as it should now be written.
     pub bytes: Vec<u8>,
-    /// The object numbers this revision rewrites. Everything else is the same bytes.
+    /// The content-stream objects this revision rewrites. Everything else is the same bytes.
     pub rewritten: Vec<u32>,
+    /// Staged objects the revision carries beside the streams: installed fonts and the
+    /// resource rewrite that names them. Empty for an edit that installed nothing.
+    pub installed: Vec<u32>,
     /// Whether any stream had to be re-encoded, which is the case that costs size.
     pub re_encoded: bool,
 }
@@ -389,11 +392,11 @@ fn finish(
         doc.catalog_ref(),
         &doc.file_id(),
     );
-    let mut numbers: Vec<u32> = rewritten.iter().map(|(r, _)| r.num).collect();
-    numbers.extend(extra.iter().map(|(num, _)| *num));
+    let numbers: Vec<u32> = rewritten.iter().map(|(r, _)| r.num).collect();
     Ok(Save {
         bytes,
         rewritten: numbers,
+        installed: extra.iter().map(|(num, _)| *num).collect(),
         re_encoded,
     })
 }

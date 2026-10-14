@@ -86,12 +86,24 @@ const COURIER: [(&str, &[u8]); 4] = [
 /// alias table in `metrics` records which pairings that is and which it is not.
 #[must_use]
 pub fn substitute(name: &str) -> Option<&'static [u8]> {
+    substitute_named(name).map(|(_, bytes)| bytes)
+}
+
+/// The bundled program and the family it belongs to, for an embedding that must name
+/// what it installed.
+///
+/// The family is the face's own (`LiberationSans`, not the `Helvetica` that asked for
+/// it): a `BaseFont` naming a family the program does not hold is a file that lies
+/// about its own font, and the notice the charter requires names this family rather
+/// than the one that was missing.
+#[must_use]
+pub fn substitute_named(name: &str) -> Option<(&'static str, &'static [u8])> {
     let (family, style) = split_name(name)?;
     let (bold, italic) = style_words(&style)?;
-    let table = match canonical_family(family) {
-        "Helvetica" => &HELVETICA,
-        "Times" => &TIMES,
-        "Courier" => &COURIER,
+    let (face, table) = match canonical_family(family) {
+        "Helvetica" => ("LiberationSans", &HELVETICA),
+        "Times" => ("LiberationSerif", &TIMES),
+        "Courier" => ("LiberationMono", &COURIER),
         // Liberation carries no symbol or dingbat face. There is nothing metric-compatible
         // to substitute, and the project's position is to report the missing font rather
         // than invent one, so these deliberately have no entry above.
@@ -104,11 +116,23 @@ pub fn substitute(name: &str) -> Option<&'static [u8]> {
         (false, true) => "Italic",
         (true, true) => "BoldItalic",
     };
-    table.iter().find(|(k, _)| *k == want).map(|(_, b)| *b)
+    table
+        .iter()
+        .find(|(k, _)| *k == want)
+        .map(|(_, bytes)| (face, *bytes))
 }
 
 #[cfg(test)]
 mod tests {
+    // Tests state their expectations plainly; the panic-free rule is about what the
+    // product does with a file, not about tests.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
     use super::*;
 
     /// A TrueType sfnt version tag: `0x00010000`, or `true` for an Apple-flavoured one.
@@ -139,6 +163,17 @@ mod tests {
     #[test]
     fn a_subset_prefix_resolves() {
         assert!(substitute("ABCDEF+Helvetica-Bold").is_some());
+    }
+
+    #[test]
+    fn the_named_substitute_says_which_face_it_is() {
+        // The bytes are the program; the name is what an embedding writes into its
+        // `BaseFont`, so the two travel together rather than being looked up twice.
+        let (face, program) = substitute_named("Helvetica-Bold").expect("a face");
+        assert_eq!(face, "LiberationSans");
+        assert!(program.starts_with(&[0x00, 0x01, 0x00, 0x00]) || program.starts_with(b"true"));
+        assert_eq!(substitute_named("Symbol"), None);
+        assert_eq!(substitute_named("NoSuchFace"), None);
     }
 
     #[test]
