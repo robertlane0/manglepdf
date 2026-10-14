@@ -401,6 +401,15 @@ pub enum Refusal {
         /// The font as the stream named it.
         font: String,
     },
+    /// The new text holds a different number of glyphs than a kerned run: the run's kerns
+    /// sit between particular glyphs, and any other count puts every kern after the change
+    /// in the wrong gap.
+    GlyphCountMismatch {
+        /// How many glyphs the new text holds.
+        want: usize,
+        /// How many the run holds.
+        have: usize,
+    },
 }
 
 impl fmt::Display for Refusal {
@@ -469,6 +478,11 @@ impl fmt::Display for Refusal {
                 f,
                 "the character {ch:?} has no code in the run's own {font} encoding; a font the \
                  page does not have would be needed to write it"
+            ),
+            Self::GlyphCountMismatch { want, have } => write!(
+                f,
+                "the new text holds {want} glyphs and the run's kerns are placed for {have}; \
+                 only an equal-length replacement keeps each kern with its gap"
             ),
         }
     }
@@ -697,30 +711,218 @@ fn retype_patches(
         .operator()
         .map(|b| String::from_utf8_lossy(b).into_owned())
         .unwrap_or_else(|| "(operatorless)".to_string());
-    if op != "Tj" || text_spans.len() != 1 {
-        return Err(Refusal::NotPlainShow { op });
+    // A plain `Tj` — and `'` and `"`, whose line positioning belongs to the operation
+    // rather than to the glyphs — holds one string and no kerns, so any replacement is
+    // safe. A `TJ` array's strings share their operation with kerns, which takes its own
+    // path below.
+    if matches!(op.as_str(), "Tj" | "'" | "\"") {
+        if text_spans.len() != 1 {
+            return Err(Refusal::NotPlainShow { op });
+        }
+        let Some(span) = text_spans.first() else {
+            return Err(Refusal::NotPlainShow { op });
+        };
+        if span.end > stream.len() || span.start > span.end {
+            return Err(Refusal::ForeignSpan {
+                span: span.clone(),
+                len: stream.len(),
+            });
+        }
+        let encoding = retype_encoding(record, fonts, &font)?;
+        let bytes = encode_simple_text(&encoding, text, &font)?;
+        return retype_patch(span, &bytes, text);
     }
-    let Some(span) = text_spans.first() else {
+    if op != "TJ" {
         return Err(Refusal::NotPlainShow { op });
-    };
-    if span.end > stream.len() || span.start > span.end {
-        return Err(Refusal::ForeignSpan {
-            span: span.clone(),
-            len: stream.len(),
-        });
     }
     let encoding = retype_encoding(record, fonts, &font)?;
-    let bytes = encode_simple_text(&encoding, text, &font)?;
-    // The replacement is the same token in the same place — a literal string where a
-    // literal string was — so the whitespace around it is the file's own and no separator
-    // has to be added. That is the B1 class of defect, closed by the shape of the patch.
+    tj_patches(stream, record, text, &encoding, &font)
+}
+
+/// One replacement of a string token by a literal string holding `bytes`.
+///
+/// The replacement is the same token in the same place — a literal string where a string
+/// was, whether the file wrote it literal or hex — so the whitespace around it is the
+/// file's own and no separator has to be added. That is the B1 class of defect, closed
+/// by the shape of the patch.
+fn retype_patch(span: &Range<usize>, bytes: &[u8], text: &str) -> Result<Vec<Patch>, Refusal> {
     let mut replacement = Vec::new();
-    mangle_syntax::writer::write_literal_string(&mut replacement, &bytes);
+    mangle_syntax::writer::write_literal_string(&mut replacement, bytes);
     Ok(vec![Patch {
         range: span.clone(),
         bytes: replacement,
         label: format!("retype as {text:?}"),
     }])
+}
+
+/// The operation's one string span, when it holds exactly one.
+///
+/// A `Tj`, `'`, or `"` names its string directly; a `TJ` names its array, whose own
+/// strings are read back out of the lexer below. Anything else is a shape this does not
+/// rewrite.
+fn record_span_single(record: &mangle_content::interp::Record) -> Option<Range<usize>> {
+    let Mark::Glyphs { text_spans, .. } = &record.mark else {
+        return None;
+    };
+    if text_spans.len() != 1 {
+        return None;
+    }
+    text_spans.first().cloned()
+}
+
+/// The patches that replace the strings of one `TJ` array with `text`.
+///
+/// A `TJ` array pairs strings with kerns, and the kerns belong to the old glyphs: a kern
+/// displaces whatever follows it, so every kern after a change sits in the wrong gap.
+/// Two shapes are faithful and everything else is refused. When no kern does anything —
+/// no numbers at all, or all of them zero — the array collapses to one `Tj`, which draws
+/// pixel-identically and takes any length. Otherwise the new text must hold exactly as
+/// many glyphs as the old, and each string keeps its span: the kerns stay at their
+/// indices because the indices themselves do not move.
+///
+/// The split matters because it is the common case, not the corner: one page each of 73
+/// corpus files holds 151 plain-`Tj` runs against 340 kerned-`TJ` ones (and 512
+/// multi-run objects, which are the slice after this).
+///
+/// The strings are found by re-reading the array with the lexer's own reader rather than
+/// with a second implementation of string syntax: what the interpreter read as strings
+/// is what this writes back over, at the same token boundaries.
+fn tj_patches(
+    stream: &[u8],
+    record: &mangle_content::interp::Record,
+    text: &str,
+    encoding: &mangle_font::Encoding,
+    font: &str,
+) -> Result<Vec<Patch>, Refusal> {
+    let refused = || Refusal::NotPlainShow {
+        op: "TJ".to_string(),
+    };
+    let Some(array_span) = record_span_single(record) else {
+        return Err(refused());
+    };
+    let array = stream
+        .get(array_span.clone())
+        .ok_or_else(|| Refusal::ForeignSpan {
+            span: array_span.clone(),
+            len: stream.len(),
+        })?;
+    let (strings, numbers) = tj_items(array, array_span.start)?;
+    if strings.is_empty() {
+        return Err(refused());
+    }
+    let bytes = encode_simple_text(encoding, text, font)?;
+    if numbers.iter().all(|v| *v == 0.0) {
+        // No kern moves anything, so the array is one string wearing brackets: collapse
+        // it. The range is the whole operation — operands through operator — and the
+        // replacement is a complete `Tj`, so the bytes around it are untouched.
+        let mut replacement = Vec::new();
+        mangle_syntax::writer::write_literal_string(&mut replacement, &bytes);
+        replacement.extend_from_slice(b" Tj");
+        return Ok(vec![Patch {
+            range: record.span.clone(),
+            bytes: replacement,
+            label: format!("retype as {text:?}"),
+        }]);
+    }
+    let have: usize = strings.iter().map(|(_, resolved)| resolved.len()).sum();
+    if bytes.len() != have {
+        return Err(Refusal::GlyphCountMismatch {
+            want: bytes.len(),
+            have,
+        });
+    }
+    // Each string keeps its span and therefore its kerns: the pieces are cut at the old
+    // resolved lengths, which are glyph counts for a single-byte encoding, so every kern
+    // follows the same glyph it followed before.
+    let mut patches = Vec::with_capacity(strings.len());
+    let mut rest = bytes.as_slice();
+    for (span, resolved) in &strings {
+        let (piece, tail) = rest.split_at(resolved.len());
+        rest = tail;
+        let mut replacement = Vec::new();
+        mangle_syntax::writer::write_literal_string(&mut replacement, piece);
+        patches.push(Patch {
+            range: span.clone(),
+            bytes: replacement,
+            label: format!("retype as {text:?}"),
+        });
+    }
+    Ok(patches)
+}
+
+/// What one `TJ` array holds for a retype: each string's span beside its resolved bytes
+/// (whose length is its glyph count), and the kerns in thousandths of an em.
+type TjItems = (Vec<(Range<usize>, Vec<u8>)>, Vec<f64>);
+
+/// The strings and kerns of one `TJ` array, read back out of the lexer's own tokens.
+///
+/// Each string is its span in the stream (delimiters included, exactly as a replacement
+/// must cover) beside its resolved bytes, whose length is its glyph count. Numbers are
+/// kerns in thousandths of an em. Anything nested — an array or dictionary inside the
+/// array — is damage this does not reach into: the interpreter's own collection bounds
+/// decide what nested bytes mean, and a second opinion about them would be a guess.
+fn tj_items(array: &[u8], base: usize) -> Result<TjItems, Refusal> {
+    use mangle_syntax::lexer::{Lexer, Token};
+
+    let refused = || Refusal::NotPlainShow {
+        op: "TJ".to_string(),
+    };
+    let mut lex = Lexer::new(array);
+    lex.skip_space();
+    if !matches!(lex.next_token().map(|t| t.token), Ok(Token::ArrayOpen)) {
+        return Err(refused());
+    }
+    let mut strings = Vec::new();
+    let mut numbers = Vec::new();
+    let mut depth = 0usize;
+    let mut closed = false;
+    let mut items = 0usize;
+    loop {
+        lex.skip_space();
+        if lex.at_end() {
+            break;
+        }
+        let token = lex.next_token().map_err(|_| refused())?;
+        let span = token.start + base..token.end + base;
+        match token.token {
+            Token::ArrayClose if depth == 0 => {
+                closed = true;
+                break;
+            }
+            Token::ArrayClose => {
+                depth -= 1;
+            }
+            Token::ArrayOpen | Token::DictOpen => {
+                depth += 1;
+            }
+            Token::String(s) | Token::HexString(s) if depth == 0 => {
+                strings.push((span, s));
+            }
+            Token::Int(i) if depth == 0 => {
+                numbers.push(i as f64);
+            }
+            Token::Real(f) if depth == 0 => {
+                numbers.push(f);
+            }
+            _ => {}
+        }
+        items += 1;
+        // The interpreter gathers arrays under its own collection bound, past which it
+        // reads a prefix and says so. Past that bound this reader would see strings the
+        // interpreter never showed, and replacing one would lose text in silence — so the
+        // bound is honoured here rather than re-derived.
+        if items > mangle_content::tokens::MAX_COLLECTION_ITEMS {
+            return Err(refused());
+        }
+        // Anything nested is left alone rather than reached into, for the reason above.
+        if depth > 0 {
+            return Err(refused());
+        }
+    }
+    if !closed {
+        return Err(refused());
+    }
+    Ok((strings, numbers))
 }
 
 /// The encoding the run's own font reads, for writing back into.
@@ -2541,7 +2743,7 @@ mod tests {
     }
 
     #[test]
-    fn a_retype_refuses_a_kerned_tj() {
+    fn a_retype_refuses_a_kerned_tj_of_another_length() {
         let stream = b"BT /F1 12 Tf [(Hi) 20 (Yo)] TJ ET";
         let before = run(&ContentStream::parse(stream));
         let model = PageModel::build(&before.records);
@@ -2561,14 +2763,157 @@ mod tests {
                 },
                 Some(&fonts),
             )
-            .expect_err("a TJ keeps its kerns");
+            .expect_err("three glyphs cannot keep four glyphs' kerns");
             assert!(
-                matches!(err, Refusal::NotPlainShow { .. }),
-                "the refusal names the operator: {err}"
+                matches!(err, Refusal::GlyphCountMismatch { want: 3, have: 4 }),
+                "the refusal counts both sides: {err}"
             );
             refused = true;
         }
         assert!(refused, "the TJ run was in the model");
+        let _ = before;
+    }
+
+    #[test]
+    fn a_retype_of_a_kerned_tj_keeps_each_kern_with_its_gap() {
+        let stream = b"BT /F1 12 Tf [(Hi) 20 (Yo)] TJ ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let change = Change::Retype {
+            text: "Heyo".to_string(),
+        };
+        let applied = apply_change_with(stream, &model.objects()[at], &change, Some(&fonts))
+            .expect("four glyphs for four glyphs");
+        assert_eq!(
+            applied.bytes, b"BT /F1 12 Tf [(He) 20 (yo)] TJ ET",
+            "each string keeps its span and the kern stays between them"
+        );
+        // And the kern survived as a number, not as a substring: re-parse and read the
+        // array's own items, because a byte search cannot tell a kern from a glyph.
+        let reparsed = ContentStream::parse(&applied.bytes);
+        let tj = reparsed
+            .operations()
+            .into_iter()
+            .find(|o| o.operator.operator() == Some(&b"TJ"[..]))
+            .expect("one TJ");
+        let items = tj.operands.first().and_then(|t| t.value.as_array());
+        assert!(matches!(
+            items.map(|a| a.to_vec()).as_deref(),
+            Some([
+                mangle_syntax::object::Object::String(_),
+                mangle_syntax::object::Object::Int(20),
+                mangle_syntax::object::Object::String(_)
+            ])
+        ));
+        let after = run(&ContentStream::parse(&applied.bytes));
+        verify_with(&before, &after, at, &change, Some(&fonts)).expect("the kerns did not move");
+    }
+
+    #[test]
+    fn a_retype_collapses_a_degenerate_tj() {
+        // One string and no kerns is one string wearing brackets: the replacement is a
+        // plain `Tj`, which draws pixel-identically and takes any length.
+        let stream = b"BT /F1 12 Tf [(Hi)] TJ ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let change = Change::Retype {
+            text: "Hello!".to_string(),
+        };
+        let applied = apply_change_with(stream, &model.objects()[at], &change, Some(&fonts))
+            .expect("no kern to keep");
+        assert_eq!(applied.bytes, b"BT /F1 12 Tf (Hello!) Tj ET");
+        let after = run(&ContentStream::parse(&applied.bytes));
+        verify_with(&before, &after, at, &change, Some(&fonts)).expect("collapsed");
+    }
+
+    #[test]
+    fn a_retype_collapses_zero_kerns_and_keeps_nonzero_ones() {
+        let stream = b"BT /F1 12 Tf [(Hi) 0 (Yo)] TJ ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let applied = apply_change_with(
+            stream,
+            &model.objects()[at],
+            &Change::Retype {
+                text: "Hey!".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect("a zero kern moves nothing");
+        assert_eq!(applied.bytes, b"BT /F1 12 Tf (Hey!) Tj ET");
+
+        // A trailing kern displaces the text that follows the run, so it is kept even
+        // though the run holds one string: dropping it would move the neighbours.
+        let stream = b"BT /F1 12 Tf [(Hi) 30] TJ ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let applied = apply_change_with(
+            stream,
+            &model.objects()[at],
+            &Change::Retype {
+                text: "Ho".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect("two glyphs for two glyphs");
+        assert_eq!(applied.bytes, b"BT /F1 12 Tf [(Ho) 30] TJ ET");
+        let _ = before;
+    }
+
+    #[test]
+    fn a_retype_splits_at_escaped_boundaries() {
+        // The old spans' byte lengths are not their glyph counts: `\\(` is two bytes for
+        // one glyph. The split is at resolved lengths, so the kern follows the same glyph
+        // it followed before rather than the same byte offset.
+        let stream = b"BT /F1 12 Tf [(a\\(b) 10 (cd)] TJ ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let change = Change::Retype {
+            text: "VWXYZ".to_string(),
+        };
+        let applied = apply_change_with(stream, &model.objects()[at], &change, Some(&fonts))
+            .expect("five glyphs for five glyphs");
+        assert_eq!(
+            applied.bytes, b"BT /F1 12 Tf [(VWX) 10 (YZ)] TJ ET",
+            "three glyphs before the kern, two after"
+        );
+        let after = run(&ContentStream::parse(&applied.bytes));
+        verify_with(&before, &after, at, &change, Some(&fonts)).expect("the kern did not move");
+    }
+
+    #[test]
+    fn a_retype_rewrites_a_hex_string_as_a_literal_one() {
+        // `<4869>` is "Hi" in hex: the replacement is a literal string either way, because
+        // the token is what is replaced and both spellings are the same token.
+        let stream = b"BT /F1 12 Tf [<4869> 10 (Yo)] TJ ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let applied = apply_change_with(
+            stream,
+            &model.objects()[at],
+            &Change::Retype {
+                text: "Heyo".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect("four glyphs for four glyphs");
+        assert_eq!(applied.bytes, b"BT /F1 12 Tf [(He) 10 (yo)] TJ ET");
         let _ = before;
     }
 

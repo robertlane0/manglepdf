@@ -363,14 +363,23 @@ fn a_recolour_on_a_real_page_changes_the_colour_and_not_the_space() {
 /// is asserted identical.
 #[test]
 fn a_retype_on_a_real_page_changes_the_text_and_nothing_else() {
+    // One plain-`Tj` run and one `TJ` run, because the two take different paths through
+    // the patcher — a string replaced in place, and an array collapsed or split at its
+    // kerns — and a test that proved one would prove nothing about the other.
+    let mut done_plain = false;
+    let mut done_tj = false;
     for name in PAGES {
         let Some((doc, stream, resources)) = page_one_doc(name) else {
             eprintln!("skipped: the corpus file {name} is not fetched");
             continue;
         };
-        let before = run_with(&ContentStream::parse(&stream), &resources);
+        let content = ContentStream::parse(&stream);
+        let before = run_with(&content, &resources);
         let model = PageModel::build(&before.records);
         for (index, object) in model.objects().iter().enumerate() {
+            if done_plain && done_tj {
+                break;
+            }
             if !matches!(
                 object.kind,
                 mangle_edit::Kind::Line | mangle_edit::Kind::Block | mangle_edit::Kind::LooseRun
@@ -388,6 +397,15 @@ fn a_retype_on_a_real_page_changes_the_text_and_nothing_else() {
             else {
                 continue;
             };
+            let is_tj = content
+                .operations()
+                .into_iter()
+                .find(|o| o.span == record.span)
+                .and_then(|o| o.operator.operator().map(|b| b.to_vec()))
+                == Some(b"TJ".to_vec());
+            if is_tj && done_tj || !is_tj && done_plain {
+                continue;
+            }
             // The old text, read the way the panel reads it, so the replacement starts
             // from what is actually on the page rather than from the raw bytes.
             let run = mangle_text::Run {
@@ -405,6 +423,8 @@ fn a_retype_on_a_real_page_changes_the_text_and_nothing_else() {
             else {
                 continue;
             };
+            // One letter forward, so the replacement holds as many glyphs as the run: a
+            // kerned `TJ` keeps its kerns only at the same count.
             let Some(text) = bump(&decoded.text) else {
                 continue;
             };
@@ -416,24 +436,34 @@ fn a_retype_on_a_real_page_changes_the_text_and_nothing_else() {
             let Ok(patches) = patches_for_with(&stream, object, &change, Some(&fonts)) else {
                 continue;
             };
-            // One patch, replacing exactly the string operand: the edit rewrites the
-            // object's own bytes rather than wrapping them, so there is one range and it
-            // is the string's.
-            if patches.len() != 1 || patches[0].range.is_empty() {
+            if patches.is_empty() || patches.iter().any(|p| p.range.is_empty()) {
                 continue;
             }
             let applied =
                 apply_change_with(&stream, object, &change, Some(&fonts)).expect("patched");
-            let range = patches[0].range.clone();
+            // Every byte outside the patches' own ranges is identical: the edit rewrites
+            // the object's own strings rather than wrapping them, so one range for a
+            // `Tj` and one per string for a `TJ`.
+            let mut ranges: Vec<_> = patches
+                .iter()
+                .map(|p| (p.range.clone(), p.bytes.len()))
+                .collect();
+            ranges.sort_by_key(|(r, _)| r.start);
+            let mut at = 0usize;
+            let mut cursor = 0usize;
+            for (range, len) in &ranges {
+                assert_eq!(
+                    &applied.bytes[cursor..cursor + (range.start - at)],
+                    &stream[at..range.start],
+                    "every byte before the strings is identical"
+                );
+                cursor += range.start - at + len;
+                at = range.end;
+            }
             assert_eq!(
-                &applied.bytes[..range.start],
-                &stream[..range.start],
-                "every byte before the string is identical"
-            );
-            assert_eq!(
-                &applied.bytes[range.start + patches[0].bytes.len()..],
-                &stream[range.end..],
-                "every byte after the string is identical"
+                &applied.bytes[cursor..],
+                &stream[at..],
+                "every byte after the strings is identical"
             );
             let after = run_with(&ContentStream::parse(&applied.bytes), &resources);
             verify_with(&before, &after, index, &change, Some(&fonts))
@@ -443,10 +473,15 @@ fn a_retype_on_a_real_page_changes_the_text_and_nothing_else() {
                 mangle_edit::page_text(&resources, &doc, &after_model).contains(&text),
                 "the page now says {text:?}"
             );
-            return;
+            if is_tj {
+                done_tj = true;
+            } else {
+                done_plain = true;
+            }
         }
     }
-    panic!("no retypeable run on any corpus page");
+    assert!(done_plain, "no plain-Tj run on any corpus page");
+    assert!(done_tj, "no TJ run on any corpus page");
 }
 
 /// One ASCII letter forward, wrapping at the end of each range: the replacement stays in
