@@ -10,7 +10,7 @@ acceptance evidence — there is no `docs/acceptance/` directory. Milestone **M4
 (surgical write-back, edits, arrange, session, save→reopen, and the window wired to all of it);
 **M5–M12 are unstarted**.
 
-Test suite: **1175 passing, 0 failing, 1 ignored** over 39 binaries. The ignored one is the
+Test suite: **1181 passing, 0 failing, 1 ignored** over 39 binaries. The ignored one is the
 Tier-B wild-corpus run.
 
 ## Conventions worth reusing
