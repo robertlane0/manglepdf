@@ -99,13 +99,20 @@ pub struct Page {
     pub index: usize,
     /// Attributes resolved through the tree.
     pub inherited: Inheritable,
+    /// The object number, when the page came from one.
+    ///
+    /// `None` for a page built by hand rather than walked out of a file. An edit that
+    /// has to rewrite the page dictionary itself — rather than an object the
+    /// dictionary names — needs this number, and a page without one cannot be
+    /// rewritten in place.
+    pub reference: Option<Ref>,
 }
 
 impl Page {
     /// The object number, when the page came from one.
     #[must_use]
     pub fn object_ref(&self) -> Option<Ref> {
-        None
+        self.reference
     }
 
     /// The page's content streams, concatenated with a newline between them, exactly
@@ -391,6 +398,7 @@ fn walk(
             dict: node.clone(),
             index: out.len(),
             inherited: here,
+            reference: Some(id),
         });
         return Ok(());
     }

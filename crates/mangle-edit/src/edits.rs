@@ -384,6 +384,13 @@ pub enum Refusal {
         /// The font as the stream named it.
         font: String,
     },
+    /// The run is set in a bitmap (Type 3) font: its codes name glyph programs rather
+    /// than characters, so replacing them would swap pictures while claiming to edit
+    /// text. Replace the run whole through an embedded font, or delete it.
+    BitmapFont {
+        /// The font as the stream named it.
+        font: String,
+    },
     /// The run was not shown with a plain `Tj`: a `TJ` array's kerns belong to the old
     /// glyphs, and `'` and `"` carry positioning a rewrite would silently drop.
     NotPlainShow {
@@ -460,6 +467,12 @@ impl fmt::Display for Refusal {
                 f,
                 "the run is shown in {font}, whose codes are two-byte CIDs rather than \
                  characters in an encoding; retyping it needs a CMap lookup this does not do"
+            ),
+            Self::BitmapFont { font } => write!(
+                f,
+                "the run is set in {font}, a bitmap font whose codes name glyph programs \
+                 rather than characters; replace it with live text in an embedded font, or \
+                 delete it"
             ),
             Self::NotPlainShow { op } => write!(
                 f,
@@ -1264,6 +1277,19 @@ fn retype_encoding(
         .is_some_and(|n| n == b"Type0")
     {
         return Err(Refusal::CompositeText {
+            font: font.to_string(),
+        });
+    }
+    // A bitmap font's codes name glyph programs, not characters: retyping them would
+    // swap pictures while claiming to edit text, which is the silent wrongness the
+    // charter's honesty law exists to prevent. The run is replaced whole or not at
+    // all, through the fallback that embeds a real font for the new text.
+    if dict
+        .get("Subtype")
+        .and_then(|o| o.as_name())
+        .is_some_and(|n| n == b"Type3")
+    {
+        return Err(Refusal::BitmapFont {
             font: font.to_string(),
         });
     }
@@ -3348,6 +3374,42 @@ mod tests {
         )
         .expect_err("CIDs are not characters");
         assert!(matches!(err, Refusal::CompositeText { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_retype_of_bitmap_text_is_refused() {
+        use mangle_syntax::object::{Dict, Name, Object};
+        // A Type 3 font with an ordinary WinAnsi encoding: the codes resolve, and must
+        // still refuse, because they name glyph programs rather than characters.
+        let mut font = Dict::new();
+        font.insert(Name::new("Type"), Object::name("Font"));
+        font.insert(Name::new("Subtype"), Object::name("Type3"));
+        font.insert(Name::new("BaseFont"), Object::name("Bitmap"));
+        font.insert(Name::new("Encoding"), Object::name("WinAnsiEncoding"));
+        let mut fonts = Dict::new();
+        fonts.insert(Name::new("F9"), Object::Dict(font));
+        let mut outer = Dict::new();
+        outer.insert(Name::new("Font"), Object::Dict(fonts));
+        let resources = mangle_content::Resources::from_dict(&outer, &|_| None);
+        let fonts = winansi_fonts(&resources);
+        let stream = b"BT /F9 12 Tf (Hi) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let at = single_run(&model);
+        let err = patches_for_with(
+            stream,
+            &model.objects()[at],
+            &Change::Retype {
+                text: "Ho".to_string(),
+            },
+            Some(&fonts),
+        )
+        .expect_err("pictures are not text");
+        assert!(
+            matches!(err, Refusal::BitmapFont { .. }),
+            "the refusal says bitmap: {err}"
+        );
+        let _ = before;
     }
 
     #[test]

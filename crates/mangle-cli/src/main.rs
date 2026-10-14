@@ -72,6 +72,7 @@ manglepdf-cli <command> <file.pdf> [options]
                             --size N               the font size, points
                             --crop x0,y0,x1,y1      keep that part of an image, in page space
                             --retype TEXT          replace the run's string, in its own font
+                            --replace TEXT         replace bitmap text with live text
                             --forward|--backward   arrange it past the object it overlaps
                             --to-front|--to-back   arrange it to the ends of the page
                             -o FILE                where to write (default beside the input)
@@ -220,12 +221,25 @@ fn edit(args: &[String]) -> Result<(), String> {
             .arrange(which, arrange)
             .map_err(|e| format!("{path}: {e}"))?,
         None => {
-            let change = change_from_args(args, object)?;
-            let outcome = session
-                .apply(which, &change)
-                .map_err(|e| format!("{path}: {e}"))?;
-            executed = Some(outcome.change);
-            outcome.label
+            // Replacing bitmap text is a session call rather than a change: it installs
+            // a font first, which a byte-patch cannot do.
+            if let Some(text) = value(args, "--replace") {
+                if text.is_empty() {
+                    return Err("--replace needs the replacement string".to_string());
+                }
+                let outcome = session
+                    .replace_with_live_text(which, &text)
+                    .map_err(|e| format!("{path}: {e}"))?;
+                executed = Some(outcome.change);
+                outcome.label
+            } else {
+                let change = change_from_args(args, object)?;
+                let outcome = session
+                    .apply(which, &change)
+                    .map_err(|e| format!("{path}: {e}"))?;
+                executed = Some(outcome.change);
+                outcome.label
+            }
         }
     };
     let save = session.save().map_err(|e| format!("{path}: {e}"))?;
@@ -428,7 +442,8 @@ fn change_from_args(
     }
     Err(
         "say what to do: --move dx,dy, --scale s, --delete, --colour r,g,b, a text property \
-         (--tc/--tw/--tz/--tl/--ts/--size), --crop x0,y0,x1,y1, --retype TEXT, or an arrange flag"
+         (--tc/--tw/--tz/--tl/--ts/--size), --crop x0,y0,x1,y1, --retype TEXT, --replace TEXT,
+         or an arrange flag"
             .to_string(),
     )
 }

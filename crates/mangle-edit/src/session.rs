@@ -35,7 +35,7 @@ use mangle_content::matrix::Matrix;
 use mangle_content::{ContentStream, Resources};
 use mangle_doc::Page;
 use mangle_syntax::document::Document;
-use mangle_syntax::object::Object;
+use mangle_syntax::object::{Dict, Object};
 
 use crate::arrange::{Arrange, arrange_patches};
 use crate::edits::{Change, Fonts, patches_for_with};
@@ -71,6 +71,13 @@ pub struct Editor {
     /// the way every editor's orphans are carried. A save drains them — what is in the
     /// file is no longer staged.
     staged: Vec<(u32, Object)>,
+    /// The resource dictionary installs extend, once it leaves the file.
+    ///
+    /// The file's bytes do not change under a session, so after the first install the
+    /// current dictionary is the staged one rather than the file's; after a save it is
+    /// the saved one. Without this a second install would extend a stale copy and drop
+    /// the first install's fonts.
+    current_res: Option<(u32, Dict)>,
 }
 
 /// Why a session could not be built.
@@ -122,10 +129,8 @@ impl From<SaveError> for OpenError {
 /// Why a font could not be installed, named rather than approximated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallError {
-    /// The page names no resource dictionary, so there is nowhere to put the font.
-    NoResources,
-    /// The resource dictionary is inline in the page dictionary: rewriting it means
-    /// rewriting the page dictionary, which an install does not do.
+    /// The resource dictionary is inline and the page has no object number, so neither
+    /// the dictionary nor the page can be rewritten in place.
     DirectResources,
     /// The resource dictionary cannot be resolved, so it cannot be extended.
     UnresolvableResources,
@@ -141,14 +146,10 @@ pub enum InstallError {
 impl std::fmt::Display for InstallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoResources => write!(
-                f,
-                "the page names no resource dictionary, so there is nowhere to install a font"
-            ),
             Self::DirectResources => write!(
                 f,
-                "the page's resource dictionary is inline rather than indirect, and rewriting \
-                 the page dictionary around it is not an install"
+                "the page's resource dictionary is inline and the page has no object \
+                 number, so neither can be rewritten in place"
             ),
             Self::UnresolvableResources => write!(
                 f,
@@ -248,6 +249,10 @@ impl From<Reason> for SessionError {
     }
 }
 
+/// Where an install writes: the resource dictionary's number and contents, with a
+/// page-dict rewrite when the dictionary itself is new.
+type ResDict = (u32, Dict, Option<(u32, Dict)>);
+
 impl Editor {
     /// Open a session on a page of a document the caller owns.
     ///
@@ -289,6 +294,7 @@ impl Editor {
                     labels: Vec::new(),
                     parts: views,
                     staged: Vec::new(),
+                    current_res: None,
                 })
             }
             Err(why) => Err(OpenError::NotSavable(why)),
@@ -382,6 +388,34 @@ impl Editor {
     /// for the one operation. The label carries the notice the charter requires — which
     /// face stood in and which character needed it — because a substitution no notice
     /// names is a silent one. Anything without a bundled face keeps the original refusal.
+    /// Replace a bitmap-text run with live text in an embedded face.
+    ///
+    /// The explicit form of what the fallback does unasked: the run's codes name glyph
+    /// programs rather than characters, so no retype of it is faithful, but a user who
+    /// chooses *Replace with live text* gets the run's string installed in a bundled
+    /// face — Liberation Sans, the metric-compatible default, until the panel offers a
+    /// choice of face. Deleting the run is a plain [`Change::Delete`].
+    pub fn replace_with_live_text(
+        &mut self,
+        index: usize,
+        text: &str,
+    ) -> Result<Outcome, SessionError> {
+        let model = self.model();
+        let Some(object) = model.objects().get(index) else {
+            return Err(SessionError::Change(crate::ChangeError::Refused(
+                crate::Refusal::NoSpans,
+            )));
+        };
+        let Some((family, program)) = mangle_font::substitute_named("Helvetica") else {
+            return Err(SessionError::Change(crate::ChangeError::Refused(
+                crate::Refusal::NoSuchFont {
+                    font: "Helvetica".to_string(),
+                },
+            )));
+        };
+        self.fallback_to(object, text, program, family, None)
+    }
+
     fn apply_fallback(
         &mut self,
         object: &PageObject,
@@ -426,6 +460,23 @@ impl Editor {
         let Some((family, program)) = mangle_font::substitute_named(&base_font) else {
             return Err(original());
         };
+        self.fallback_to(object, text, program, family, Some((missing, base_font)))
+    }
+
+    /// Install `program` for `text` and switch the run to it: the shared tail of the
+    /// unasked fallback and the explicit bitmap-text replacement.
+    ///
+    /// `missing` names the character and font that forced the fallback, and is `None`
+    /// for an explicit replacement — the label and the notice say which of the two
+    /// happened, because a history that cannot tell them apart cannot be trusted.
+    fn fallback_to(
+        &mut self,
+        object: &PageObject,
+        text: &str,
+        program: &[u8],
+        family: &str,
+        missing: Option<(char, String)>,
+    ) -> Result<Outcome, SessionError> {
         let name = self.free_font_name("F");
         let chars: Vec<char> = text.chars().collect();
         let embedded = self
@@ -440,16 +491,21 @@ impl Editor {
             .map_err(|r| SessionError::Change(crate::ChangeError::Refused(r)))?;
         let applied = apply(&self.stream(), &patches)
             .map_err(|e| SessionError::Change(crate::ChangeError::Stream(e)))?;
-        let label = format!(
-            "retype as {text:?} (fallback {family} {name}: {missing:?} is not in {base_font})"
-        );
+        let (label, notice) = match missing {
+            Some((ch, base)) => (
+                format!("retype as {text:?} (fallback {family} {name}: {ch:?} is not in {base})"),
+                format!("{ch:?} is not in {base} — substituted {family} ({name})"),
+            ),
+            None => (
+                format!("replaced bitmap text with live text {text:?} in {family} ({name})"),
+                format!("bitmap text replaced with live text in {family} ({name})"),
+            ),
+        };
         self.record(applied.bytes, &patches, label.clone())?;
         Ok(Outcome {
             label,
             change: fallback,
-            notice: Some(format!(
-                "{missing:?} is not in {base_font} — substituted {family} ({name})"
-            )),
+            notice: Some(notice),
         })
     }
 
@@ -517,6 +573,11 @@ impl Editor {
     /// that names them; the in-memory resources learn the name too, so the session's own
     /// reads see the font before any save. `program` is a TrueType program (a bundled
     /// face, for the fallback the charter asks for) and `family` its `BaseFont` stem.
+    ///
+    /// A page whose resources live in the page dictionary itself — inline rather than
+    /// indirect — gets a new resource dictionary and a rewritten page dictionary naming
+    /// it: the alternative is rewriting nothing and refusing every install on the page.
+    /// Only a page with no object number at all cannot be rewritten in place.
     pub fn install_truetype(
         &mut self,
         name: &str,
@@ -529,16 +590,10 @@ impl Editor {
                 name: name.to_string(),
             });
         }
-        let res_num = match &self.page.inherited.resources {
-            Some(Object::Ref(r)) => r.num,
-            Some(_) => return Err(InstallError::DirectResources),
-            None => return Err(InstallError::NoResources),
-        };
-        let current = self
-            .doc
-            .resolve_object(&Object::Ref(mangle_syntax::object::Ref::new(res_num, 0)))
-            .and_then(|o| o.as_dict().cloned())
-            .ok_or(InstallError::UnresolvableResources)?;
+        // The dictionary to extend: the staged one when installs are already in flight,
+        // the saved one after a save, else the file's — in that order, because each
+        // shadows the one before it and extending a shadowed copy would drop fonts.
+        let (res_num, current, page_rewrite) = self.res_dict()?;
         // Five consecutive numbers, reserved up front: the builder wires its references
         // to exactly this range, so the range is taken before it runs rather than
         // discovered after.
@@ -548,21 +603,16 @@ impl Editor {
         }
         let embedded =
             embed_truetype(program, chars, family, first).map_err(InstallError::Embed)?;
-        // Into the `/Font` table, not beside it: a font name lives inside the table, and
-        // a sibling of it is a resource no reader looks up. The table itself may be
-        // direct or indirect; either way it is replaced whole, resolved first when it
-        // is a reference.
-        let doc = std::sync::Arc::clone(&self.doc);
-        let font_table = match current.get("Font") {
-            Some(table) => doc
-                .resolve_object(table)
-                .unwrap_or_else(|| table.clone())
-                .as_dict()
-                .cloned()
-                .unwrap_or_default(),
-            None => mangle_syntax::object::Dict::new(),
-        };
-        let mut font_table = font_table;
+        let mut font_table = current
+            .get("Font")
+            .and_then(|table| {
+                self.doc
+                    .resolve_object(table)
+                    .unwrap_or_else(|| table.clone())
+                    .as_dict()
+                    .cloned()
+            })
+            .unwrap_or_default();
         font_table.insert(
             mangle_syntax::object::Name::new(name),
             Object::Ref(mangle_syntax::object::Ref::new(embedded.type0, 0)),
@@ -577,10 +627,62 @@ impl Editor {
             self.staged.push((num, obj));
         }
         self.staged.push((res_num, Object::Dict(dict.clone())));
+        if let Some((page_num, page_dict)) = page_rewrite {
+            self.staged.push((page_num, Object::Dict(page_dict)));
+        }
+        self.current_res = Some((res_num, dict.clone()));
         self.resources
             .fonts
             .insert(name.to_string(), Object::Dict(dict));
         Ok(installed)
+    }
+
+    /// The resource dictionary installs extend: staged, saved, or the file's, whichever
+    /// is newest — with the number it lives at, and a page-dict rewrite when the
+    /// dictionary itself is new.
+    ///
+    /// The rewrite is returned rather than staged because the caller stages it beside
+    /// the font objects only once they exist: staging a page that names a dictionary
+    /// that was never written would point the file at nothing.
+    fn res_dict(&self) -> Result<ResDict, InstallError> {
+        if let Some((num, dict)) = &self.current_res {
+            return Ok((*num, dict.clone(), None));
+        }
+        match &self.page.inherited.resources {
+            Some(Object::Ref(r)) => self
+                .doc
+                .resolve_object(&Object::Ref(mangle_syntax::object::Ref::new(r.num, 0)))
+                .and_then(|o| o.as_dict().cloned())
+                .map(|dict| (r.num, dict, None))
+                .ok_or(InstallError::UnresolvableResources),
+            // Inline or absent: a fresh dictionary under a fresh number, with the page
+            // dictionary rewritten to name it. Absent resources gain their first font
+            // table here rather than refusing a page that simply has no text yet.
+            _ => {
+                let page_num = self
+                    .page
+                    .object_ref()
+                    .map(|r| r.num)
+                    .ok_or(InstallError::DirectResources)?;
+                let current = match &self.page.inherited.resources {
+                    Some(found) => self
+                        .doc
+                        .resolve_object(found)
+                        .unwrap_or_else(|| found.clone())
+                        .as_dict()
+                        .cloned()
+                        .unwrap_or_default(),
+                    None => Dict::new(),
+                };
+                let new_res = self.doc.alloc().num;
+                let mut page_dict = self.page.dict.clone();
+                page_dict.insert(
+                    mangle_syntax::object::Name::new("Resources"),
+                    Object::Ref(mangle_syntax::object::Ref::new(new_res, 0)),
+                );
+                Ok((new_res, current, Some((page_num, page_dict))))
+            }
+        }
     }
 
     /// Save the page as it now stands, as an incremental update.
@@ -791,7 +893,12 @@ mod tests {
     /// own bookkeeping — the corpus round trips are in `tests/`.
     fn doc_with(parts: &[&str]) -> (Document, Page) {
         let mut out = String::from("%PDF-1.7\n");
-        let mut offsets = Vec::new();
+        // One entry per object plus the free head: object n lives at offsets[n].
+        // Written correctly — unlike an earlier version that relied on the reader's
+        // repair — because revision chains resolve through these tables, and a test
+        // that reopens a saved file through a broken first table resolves stale
+        // objects.
+        let mut offsets = vec![0usize];
         // The catalogue, the page tree and the page, then one object per content stream.
         let first_stream = 4;
         let contents = parts
@@ -800,7 +907,7 @@ mod tests {
             .map(|(i, _)| format!("{} 0 R", first_stream + i))
             .collect::<Vec<_>>()
             .join(" ");
-        offsets.push(1);
+        offsets.push(out.len());
         out.push_str("1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n");
         offsets.push(out.len());
         out.push_str("2 0 obj\n<</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n");
@@ -823,9 +930,17 @@ mod tests {
         out.push_str("xref\n0 ");
         out.push_str(&(first_stream + parts.len()).to_string());
         out.push('\n');
-        out.push_str("0000000000 65535 f \n");
-        for offset in &offsets {
-            let _ = writeln!(out, "{offset:010} 00000 n ");
+        assert_eq!(
+            offsets.len(),
+            first_stream + parts.len(),
+            "one entry per object plus the free head"
+        );
+        for (n, offset) in offsets.iter().enumerate() {
+            if n == 0 {
+                out.push_str("0000000000 65535 f \n");
+            } else {
+                let _ = writeln!(out, "{offset:010} 00000 n ");
+            }
         }
         let _ = write!(
             out,
@@ -924,6 +1039,24 @@ mod tests {
     /// A page whose only font is an unembedded `/Helvetica` in WinAnsi: the shape a
     /// fallback embeds beside rather than replaces.
     fn doc_with_helvetica(part: &str) -> (Document, Page) {
+        doc_with_fontdict(
+            part,
+            "<</Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding>>",
+        )
+    }
+
+    /// A page whose only font is a bitmap (Type 3) face: retyping it is refused, and
+    /// replacing it with live text is the faithful answer.
+    fn doc_with_type3(part: &str) -> (Document, Page) {
+        doc_with_fontdict(
+            part,
+            "<</Type /Font /Subtype /Type3 /Name /T3 /FontBBox [0 0 100 100] \
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs <<>> /Resources <<>> \
+             /Encoding /WinAnsiEncoding>>",
+        )
+    }
+
+    fn doc_with_fontdict(part: &str, fontdict: &str) -> (Document, Page) {
         let mut out = String::from("%PDF-1.7\n");
         let mut offsets = vec![0usize];
         offsets.push(out.len());
@@ -942,10 +1075,9 @@ mod tests {
         out.push_str(part);
         out.push_str("\nendstream\nendobj\n");
         offsets.push(out.len());
-        out.push_str(
-            "5 0 obj\n<</Font <</F1 <</Type /Font /Subtype /Type1 /BaseFont /Helvetica \
-             /Encoding /WinAnsiEncoding>>>>>>\nendobj\n",
-        );
+        out.push_str("5 0 obj\n<</Font <</F1 ");
+        out.push_str(fontdict);
+        out.push_str(">>>>\nendobj\n");
         assert_eq!(offsets.len(), 6, "one entry per object plus the free head");
         let start_xref = out.len();
         out.push_str("xref\n0 6\n");
@@ -1025,15 +1157,56 @@ mod tests {
     }
 
     #[test]
-    fn an_install_refuses_what_it_cannot_rewrite() {
-        // Direct resources: rewriting them means rewriting the page dictionary.
+    fn an_install_rewrites_the_page_for_inline_resources() {
+        // Inline resources cannot be extended, so the install writes a fresh resource
+        // dictionary and repoints the page dictionary at it: two staged rewrites beside
+        // the five font objects.
         let (doc, page) = doc_with(&["BT (Hi) Tj ET"]);
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &Resources::default())
+                .expect("editable");
+        editor
+            .install_truetype("F1", &liberation(), &['H'], "LiberationSans")
+            .expect("a page rewrite answers inline resources");
+        let save = editor.save().expect("saves");
+        assert!(
+            save.appended_only(editor.document().bytes()),
+            "still an append, with one more rewrite in it"
+        );
+        let doc2 = Document::open(save.bytes.clone(), OpenOptions::default()).expect("reopens");
+        let cat = doc2.catalog().expect("a catalogue");
+        let root = cat
+            .get("Pages")
+            .and_then(Object::as_ref_id)
+            .expect("a tree");
+        let tree = mangle_doc::PageTree::build(&doc2, root).expect("the walk");
+        let page2 = tree.pages().first().expect("a page").clone();
+        let resources = page2
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc2.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc2.resolve_object(o)))
+            .expect("resources");
+        assert!(
+            resources.fonts.contains_key("F1"),
+            "the repointed dictionary names the font"
+        );
+    }
+
+    #[test]
+    fn an_install_without_a_page_number_is_refused() {
+        // Inline resources on a page with no object number: neither the dictionary nor
+        // the page can be rewritten in place, so the install is refused by name.
+        let (doc, mut page) = doc_with(&["BT (Hi) Tj ET"]);
+        page.reference = None;
         let mut editor =
             crate::Editor::open(std::sync::Arc::new(doc), &page, &Resources::default())
                 .expect("editable");
         let err = editor
             .install_truetype("F1", &liberation(), &['H'], "LiberationSans")
-            .expect_err("inline resources cannot be extended");
+            .expect_err("nothing to rewrite");
         assert!(matches!(err, crate::InstallError::DirectResources), "{err}");
     }
 
@@ -1156,6 +1329,115 @@ mod tests {
             }
         }
         assert!(found, "the page says Hα through {name}");
+    }
+
+    /// Bitmap text is replaced whole rather than retyped: the run's codes name glyph
+    /// programs, and the replacement installs a live-text subset for the new string.
+    #[test]
+    fn bitmap_text_is_replaced_with_live_text() {
+        let (doc, page) = doc_with_type3("BT /F1 12 Tf (Hi) Tj ET");
+        let resources = page
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .unwrap_or_default();
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &resources).expect("editable");
+        let at = editor
+            .model()
+            .objects()
+            .iter()
+            .position(|o| {
+                matches!(
+                    o.kind,
+                    crate::Kind::Line | crate::Kind::Block | crate::Kind::LooseRun
+                )
+            })
+            .expect("a text object");
+        // Retyping the bitmap run is refused first: pictures are not text.
+        let err = editor
+            .apply(
+                at,
+                &Change::Retype {
+                    text: "Ho".to_string(),
+                },
+            )
+            .expect_err("a Type 3 run is not text");
+        assert!(
+            err.to_string().contains("bitmap"),
+            "the refusal says why: {err}"
+        );
+        // The explicit replacement embeds a subset and switches the run to it.
+        let outcome = editor
+            .replace_with_live_text(at, "Hi")
+            .expect("a replacement installs");
+        assert!(
+            outcome.label.contains("live text") && outcome.label.contains("LiberationSans"),
+            "the label says what happened: {}",
+            outcome.label
+        );
+        let save = editor.save().expect("saves");
+        let doc2 = Document::open(save.bytes.clone(), OpenOptions::default()).expect("reopens");
+        let cat = doc2.catalog().expect("a catalogue");
+        let root = cat
+            .get("Pages")
+            .and_then(Object::as_ref_id)
+            .expect("a tree");
+        let tree = mangle_doc::PageTree::build(&doc2, root).expect("the walk");
+        let page2 = tree.pages().first().expect("a page").clone();
+        let resources2 = page2
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc2.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc2.resolve_object(o)))
+            .expect("resources");
+        let stream2 = page2.decoded_contents(&doc2);
+        let after = mangle_content::interp::run_with(
+            &mangle_content::ContentStream::parse(&stream2),
+            &resources2,
+        );
+        // The run's new bytes decode through some installed ToUnicode as "Hi".
+        let mut found = false;
+        for font in resources2.fonts.values() {
+            let Some(dict) = doc2.resolve_object(font).and_then(|o| o.as_dict().cloned()) else {
+                continue;
+            };
+            if dict.get("Subtype").and_then(|o| o.as_name()) != Some(&b"Type0"[..]) {
+                continue;
+            }
+            let Some(text) = dict.get("ToUnicode").and_then(|o| doc2.resolve_object(o)) else {
+                continue;
+            };
+            let Object::Stream(stream) = text else {
+                continue;
+            };
+            let text = String::from_utf8(stream.raw.clone()).expect("a CMap");
+            let map = to_unicode_map(&text);
+            for record in &after.records {
+                let mangle_content::interp::Mark::Glyphs { text: raw, .. } = &record.mark else {
+                    continue;
+                };
+                if raw.len() % 2 != 0 || raw.is_empty() {
+                    continue;
+                }
+                let decoded: String = raw
+                    .chunks_exact(2)
+                    .map(|pair| {
+                        let cid = (u32::from(pair[0]) << 8) | u32::from(pair[1]);
+                        map.get(&cid).copied().unwrap_or('�')
+                    })
+                    .collect();
+                if decoded == "Hi" {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "the page says Hi through an installed font");
     }
 
     /// One `beginbfchar` block read as CID to character: the reader a Unicode

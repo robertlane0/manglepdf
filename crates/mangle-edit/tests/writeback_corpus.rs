@@ -301,6 +301,7 @@ fn an_encrypted_file_is_refused_rather_than_saved() {
         dict: mangle_syntax::object::Dict::new(),
         index: 0,
         inherited: mangle_doc::Inheritable::default(),
+        reference: None,
     };
     let err = save_page(&doc, &page, &[]).expect_err("an encrypted file gets no revision");
     assert!(matches!(err, mangle_edit::SaveError::Encrypted), "{err}");
