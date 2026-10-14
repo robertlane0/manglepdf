@@ -441,7 +441,7 @@ impl Editor {
                 .unwrap_or_else(|| std::sync::Arc::new(self.resources.clone())),
             None => std::sync::Arc::new(self.resources.clone()),
         };
-        let base_font = table
+        let font_dict = table
             .fonts
             .get(&resource_name)
             .and_then(|found| {
@@ -449,7 +449,9 @@ impl Editor {
                     .resolve_object(found)
                     .or_else(|| Some(found.clone()))
             })
-            .and_then(|o| o.as_dict().cloned())
+            .and_then(|o| o.as_dict().cloned());
+        let base_font = font_dict
+            .as_ref()
             .and_then(|d| {
                 d.get("BaseFont")
                     .and_then(|o| o.as_name())
@@ -457,6 +459,19 @@ impl Editor {
             })
             .and_then(|n| String::from_utf8(n).ok())
             .unwrap_or_default();
+        if let Some(dict) = &font_dict
+            && let Some(program) = self.embedded_truetype(dict)
+        {
+            let unicodes: Vec<u32> = text.chars().map(u32::from).collect();
+            if mangle_font::subset_truetype(&program, &unicodes).is_ok() {
+                let clean = match base_font.as_bytes().get(6) {
+                    Some(b'+') => base_font.get(7..).unwrap_or(&base_font),
+                    _ => &base_font,
+                };
+                let family = if clean.is_empty() { "Embedded" } else { clean };
+                return self.fallback_to_own(object, text, &program, family);
+            }
+        }
         if let Some(outcome) = self.apply_family(object, text, &base_font, missing) {
             return outcome;
         }
@@ -464,6 +479,65 @@ impl Editor {
             return Err(original());
         };
         self.fallback_to(object, text, program, family, Some((missing, base_font)))
+    }
+
+    /// Read an embedded `/FontFile2` program from `dict` (or its `/DescendantFonts` entry).
+    fn embedded_truetype(&self, dict: &Dict) -> Option<Vec<u8>> {
+        let descriptor = dict
+            .get("FontDescriptor")
+            .and_then(|o| self.doc.resolve_object(o).or_else(|| Some(o.clone())))
+            .or_else(|| {
+                let descendants = dict
+                    .get("DescendantFonts")
+                    .and_then(|o| self.doc.resolve_object(o).or_else(|| Some(o.clone())))?;
+                let first = descendants.as_array()?.first()?;
+                let cid_dict = self
+                    .doc
+                    .resolve_object(first)
+                    .or_else(|| Some(first.clone()))?;
+                let fd = cid_dict.as_dict()?.get("FontDescriptor")?;
+                self.doc.resolve_object(fd).or_else(|| Some(fd.clone()))
+            })?;
+        let file2 = descriptor.as_dict()?.get("FontFile2")?;
+        let resolved = self
+            .doc
+            .resolve_object(file2)
+            .or_else(|| Some(file2.clone()))?;
+        let Object::Stream(stream) = resolved else {
+            return None;
+        };
+        Some(mangle_syntax::stream::decode_stream(&stream).data)
+    }
+
+    /// Embed a new subset of the run's own `/FontFile2` program with no substitution notice.
+    fn fallback_to_own(
+        &mut self,
+        object: &PageObject,
+        text: &str,
+        program: &[u8],
+        family: &str,
+    ) -> Result<Outcome, SessionError> {
+        let name = self.free_font_name("F");
+        let chars: Vec<char> = text.chars().collect();
+        let embedded = self
+            .install_truetype(&name, program, &chars, family)
+            .map_err(SessionError::Install)?;
+        let fallback = Change::RetypeIn {
+            text: text.to_string(),
+            font: name.clone(),
+            cids: embedded.cids.clone(),
+        };
+        let patches = patches_for_with(&self.stream(), object, &fallback, None)
+            .map_err(|r| SessionError::Change(crate::ChangeError::Refused(r)))?;
+        let applied = apply(&self.stream(), &patches)
+            .map_err(|e| SessionError::Change(crate::ChangeError::Stream(e)))?;
+        let label = format!("retype as {text:?} (new subset of {family} in {name})");
+        self.record(applied.bytes, &patches, label.clone())?;
+        Ok(Outcome {
+            label,
+            change: fallback,
+            notice: None,
+        })
     }
 
     /// Retype in a same-family document font when one covers `text` (rung 2).
@@ -1619,6 +1693,81 @@ mod tests {
         )
         .expect("readable");
         assert_eq!(decoded.text, "Hα");
+    }
+
+    #[test]
+    fn an_embedded_type0_font_extracts_and_retypes_through_its_tounicode() {
+        let (doc, page) = doc_with_helvetica("BT /F1 12 Tf (Hi) Tj ET");
+        let resources = page
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .unwrap_or_default();
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &resources).expect("editable");
+        editor
+            .apply(
+                0,
+                &Change::Retype {
+                    text: "Hα".to_string(),
+                },
+            )
+            .expect("falls back to embedded subset");
+        let save = editor.save().expect("saves");
+        let doc2 = Document::open(save.bytes, OpenOptions::default()).expect("reopens");
+        let cat2 = doc2.catalog().expect("catalog");
+        let root2 = cat2.get("Pages").and_then(Object::as_ref_id).expect("root");
+        let tree2 = mangle_doc::PageTree::build(&doc2, root2).expect("tree");
+        let page2 = tree2.pages().first().expect("page").clone();
+        let resources2 = page2
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc2.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc2.resolve_object(o)))
+            .expect("resources");
+        let mut editor2 =
+            crate::Editor::open(std::sync::Arc::new(doc2), &page2, &resources2).expect("editable");
+        assert_eq!(
+            crate::page_objects::page_text(&resources2, editor2.document(), &editor2.model()),
+            "Hα",
+            "ToUnicode decodes the Type0 run"
+        );
+        // Retyping with characters already in the Type0 subset's ToUnicode succeeds in-place.
+        let outcome = editor2
+            .apply(
+                0,
+                &Change::Retype {
+                    text: "αH".to_string(),
+                },
+            )
+            .expect("retypes in-place using ToUnicode");
+        assert_eq!(outcome.notice, None);
+        let save2 = editor2.save().expect("saves");
+        assert!(save2.installed.is_empty());
+        let doc3 = Document::open(save2.bytes, OpenOptions::default()).expect("reopens");
+        let cat3 = doc3.catalog().expect("catalog");
+        let root3 = cat3.get("Pages").and_then(Object::as_ref_id).expect("root");
+        let tree3 = mangle_doc::PageTree::build(&doc3, root3).expect("tree");
+        let page3 = tree3.pages().first().expect("page").clone();
+        let resources3 = page3
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc3.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc3.resolve_object(o)))
+            .expect("resources");
+        let editor3 =
+            crate::Editor::open(std::sync::Arc::new(doc3), &page3, &resources3).expect("editable");
+        assert_eq!(
+            crate::page_objects::page_text(&resources3, editor3.document(), &editor3.model()),
+            "αH"
+        );
     }
 
     /// One `beginbfchar` block read as CID to character: the reader a Unicode

@@ -23,6 +23,7 @@ pub mod metrics;
 pub mod outline;
 pub mod subset;
 pub mod substitutes;
+pub mod tounicode;
 pub mod type1;
 
 pub use cff::{Cff, MAX_DEPTH as CFF_MAX_DEPTH, MAX_STACK as CFF_MAX_STACK};
@@ -36,4 +37,5 @@ pub use metrics::{
 pub use outline::{Outline, Program, Segment, em_scale, from_cff, from_true_type, from_type1};
 pub use subset::{glyph_for_unicode, subset_truetype};
 pub use substitutes::{substitute, substitute_named};
+pub use tounicode::{MAX_TO_UNICODE_ENTRIES, ToUnicode};
 pub use type1::{MAX_DEPTH as TYPE1_MAX_DEPTH, MAX_STACK as TYPE1_MAX_STACK, Type1};

@@ -714,19 +714,15 @@ fn retype_patches(
     // written over. A different total would put every kern and every run after the
     // change in the wrong place.
     let pieces = retype_pieces(object, text, fonts)?;
-    // The operations the records came from, read back out of the stream rather than
-    // remembered: the shape of each operation decides its own surgery below.
     let operations = ContentStream::parse(stream).operations();
     let mut patches = Vec::new();
-    for (record, piece) in object.records.iter().zip(pieces.iter()) {
-        // One byte a glyph: composite runs are refused above, so every piece here is
-        // single-byte by construction rather than by checking afterwards.
+    for (record, (piece, units)) in object.records.iter().zip(pieces.iter()) {
         patches.extend(retype_record(
             stream,
             object.kind,
             record,
             piece,
-            1,
+            *units,
             text,
             &operations,
             None,
@@ -735,32 +731,81 @@ fn retype_patches(
     Ok(patches)
 }
 
-/// The new text cut into one encoded piece per run.
-///
-/// Every check that depends on the fonts lives here, so the span surgery below works on
-/// bytes alone: each run names its own font and encoding, and each character must have a
-/// code in the run it lands in.
-///
-/// One run takes the whole text at any length — there is no boundary to choose. Several
-/// runs split it at the old glyph counts, so each run's kerns, spacing and font still
-/// belong to what they are written over; a different total would put every kern and
-/// every run after the change in the wrong place, and choosing any other split would be
-/// layout rather than editing.
+/// The new text cut into one encoded piece per run, alongside each run's byte width per glyph.
 fn retype_pieces(
     object: &PageObject,
     text: &str,
     fonts: &Fonts<'_>,
-) -> Result<Vec<Vec<u8>>, Refusal> {
+) -> Result<Vec<(Vec<u8>, usize)>, Refusal> {
     let pieces = split_counts(object, text)?;
     let mut out = Vec::with_capacity(pieces.len());
     for (record, piece) in object.records.iter().zip(pieces.iter()) {
+        let mark_font = match &record.mark {
+            Mark::Glyphs { font, .. } => font.clone(),
+            _ => None,
+        };
         let font = record
             .text
             .font
             .clone()
+            .or(mark_font)
             .unwrap_or_else(|| "(unnamed)".to_string());
-        let encoding = retype_encoding(record, fonts, &font)?;
-        out.push(encode_simple_text(&encoding, piece, &font)?);
+        let is_two_byte = matches!(&record.mark, Mark::Glyphs { two_byte: true, .. });
+        let table = match record.form.as_deref() {
+            Some(name) => fonts
+                .resources
+                .form_resources(name)
+                .unwrap_or_else(|| Arc::new(fonts.resources.clone())),
+            None => Arc::new(fonts.resources.clone()),
+        };
+        let Some(found) = table.fonts.get(&font) else {
+            return Err(if is_two_byte {
+                Refusal::CompositeText { font }
+            } else {
+                Refusal::NoSuchFont { font }
+            });
+        };
+        let resolved = (fonts.resolve)(found).unwrap_or_else(|| found.clone());
+        let Some(dict) = resolved.as_dict() else {
+            return Err(if is_two_byte {
+                Refusal::CompositeText { font }
+            } else {
+                Refusal::NoEncoding { font }
+            });
+        };
+        let is_type0 = dict
+            .get("Subtype")
+            .and_then(|o| o.as_name())
+            .is_some_and(|n| n == b"Type0");
+        if is_two_byte || is_type0 {
+            let Some(cmap) = mangle_font::ToUnicode::from_font_dict(dict, fonts.resolve) else {
+                return Err(Refusal::CompositeText { font });
+            };
+            if cmap.is_empty() {
+                return Err(Refusal::CompositeText { font });
+            }
+            let mut bytes = Vec::with_capacity(piece.len() * 2);
+            for ch in piece.chars() {
+                let code = cmap
+                    .code_for(ch)
+                    .ok_or_else(|| Refusal::GlyphNotEncodable {
+                        ch,
+                        font: font.clone(),
+                    })?;
+                if code > 0xFFFF {
+                    return Err(Refusal::GlyphNotEncodable {
+                        ch,
+                        font: font.clone(),
+                    });
+                }
+                bytes.push((code >> 8) as u8);
+                bytes.push((code & 0xFF) as u8);
+            }
+            out.push((bytes, 2));
+        } else {
+            let encoding = retype_encoding(record, fonts, &font)?;
+            out.push((encode_simple_text(&encoding, piece, &font)?, 1));
+        }
     }
     Ok(out)
 }
@@ -838,20 +883,9 @@ pub(crate) fn retype_face_pieces(
 fn split_counts(object: &PageObject, text: &str) -> Result<Vec<String>, Refusal> {
     let mut counts = Vec::with_capacity(object.records.len());
     for record in &object.records {
-        let Mark::Glyphs {
-            codes, two_byte, ..
-        } = &record.mark
-        else {
+        let Mark::Glyphs { codes, .. } = &record.mark else {
             return Err(Refusal::NotText { kind: object.kind });
         };
-        if *two_byte {
-            let font = record
-                .text
-                .font
-                .clone()
-                .unwrap_or_else(|| "(unnamed)".to_string());
-            return Err(Refusal::CompositeText { font });
-        }
         counts.push(codes.len());
     }
     if counts.len() == 1 {
@@ -1154,20 +1188,25 @@ fn tj_patches(
             label: format!("retype as {text:?}"),
         }]);
     }
-    let have: usize = strings.iter().map(|(_, resolved)| resolved.len()).sum();
+    let old_units = match &record.mark {
+        Mark::Glyphs { two_byte: true, .. } => 2,
+        _ => 1,
+    };
+    let have: usize = strings
+        .iter()
+        .map(|(_, resolved)| resolved.len() / old_units)
+        .sum();
     if piece.len() != have * units {
         return Err(Refusal::GlyphCountMismatch {
             want: piece.len() / units.max(1),
             have,
         });
     }
-    // Each string keeps its span and therefore its kerns: the pieces are cut at the old
-    // resolved lengths times the units, so every kern follows the same glyph it followed
-    // before.
     let mut patches = Vec::with_capacity(strings.len());
     let mut rest = piece;
     for (span, resolved) in &strings {
-        let (piece, tail) = rest.split_at(resolved.len() * units);
+        let glyphs = resolved.len() / old_units;
+        let (piece, tail) = rest.split_at(glyphs * units);
         rest = tail;
         let mut replacement = Vec::new();
         mangle_syntax::writer::write_literal_string(&mut replacement, piece);
@@ -2146,7 +2185,11 @@ fn verify_retype(
             old.objects().len()
         ));
     };
-    let pieces = retype_pieces(target, text, fonts).map_err(|r| r.to_string())?;
+    let pieces: Vec<Vec<u8>> = retype_pieces(target, text, fonts)
+        .map_err(|r| r.to_string())?
+        .into_iter()
+        .map(|(b, _)| b)
+        .collect();
     check_retype_bytes(before, after, target, &pieces)
 }
 

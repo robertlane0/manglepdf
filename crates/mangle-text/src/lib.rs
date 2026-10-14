@@ -98,18 +98,43 @@ pub fn decode(
     };
     let name = run.font?;
     let font = table.fonts.get(name)?;
-    let dict = font.as_dict()?;
-    // A composite font is refused by the encoding reader, and refusing it here is correct: its
-    // codes are two bytes and are CIDs, so there is no glyph per code to look up.
+    let resolved = resolve(font).unwrap_or_else(|| font.clone());
+    let dict = resolved.as_dict()?;
+    let to_unicode = mangle_font::ToUnicode::from_font_dict(dict, resolve);
     if dict
         .get("Subtype")
         .and_then(|o| o.as_name())
         .is_some_and(|n| n == b"Type0")
     {
-        return None;
+        let cmap = to_unicode?;
+        let mut out = Decoded {
+            size: run.size,
+            ..Decoded::default()
+        };
+        let codes = run.text.chunks_exact(2).filter_map(|pair| {
+            let hi = *pair.first()?;
+            let lo = *pair.get(1)?;
+            Some(u32::from(u16::from_be_bytes([hi, lo])))
+        });
+        for (code, origin) in codes.zip(run.origins.iter().copied()) {
+            match cmap.get(code) {
+                Some(s) if !s.is_empty() => {
+                    out.extent = Some(match out.extent {
+                        Some((first, _)) => (first, origin),
+                        None => (origin, origin),
+                    });
+                    out.text.push_str(s);
+                }
+                _ => out.unmapped += 1,
+            }
+        }
+        return Some(out);
     }
     let encoding =
-        mangle_font::Encoding::from_font_dict(dict, mangle_font::EncodingBase::Standard, resolve)?;
+        mangle_font::Encoding::from_font_dict(dict, mangle_font::EncodingBase::Standard, resolve);
+    if to_unicode.is_none() && encoding.is_none() {
+        return None;
+    }
     let mut out = Decoded {
         size: run.size,
         ..Decoded::default()
@@ -120,7 +145,17 @@ pub fn decode(
         .map(|b| u32::from(*b))
         .zip(run.origins.iter().copied())
     {
-        let Some(glyph) = encoding.glyph_for(code) else {
+        if let Some(s) = to_unicode.as_ref().and_then(|cmap| cmap.get(code))
+            && !s.is_empty()
+        {
+            out.extent = Some(match out.extent {
+                Some((first, _)) => (first, origin),
+                None => (origin, origin),
+            });
+            out.text.push_str(s);
+            continue;
+        }
+        let Some(glyph) = encoding.as_ref().and_then(|enc| enc.glyph_for(code)) else {
             out.unmapped += 1;
             continue;
         };
