@@ -63,6 +63,21 @@ pub enum Job {
     Undo(usize),
     /// Redo the last undone edit on this page.
     Redo(usize),
+    /// Edit an object drawn inside a shared form, with an explicit scope.
+    ///
+    /// Headless counterpart to the prompt the window will show: the engine
+    /// refuses form edits without a scope, so the scope travels with the job
+    /// rather than defaulting anywhere.
+    EditShared {
+        /// Which page the object was selected on.
+        page: usize,
+        /// Which object, in the session model.
+        object: usize,
+        /// What to do to it.
+        request: EditRequest,
+        /// This page only, or everywhere the form is used.
+        scope: mangle_edit::SharedFormScope,
+    },
     /// Close whatever is open.
     Close,
 }
@@ -311,6 +326,49 @@ impl Worker {
         self.session.is_some()
     }
 
+    /// Turn a request into a change, answering failures instead of writing.
+    ///
+    /// Shared by ordinary edits and shared-form edits so the two cannot disagree
+    /// about what a request means: `None` is "answered already", `Some` is "apply".
+    fn change_of(
+        editor: &mangle_edit::Editor,
+        object: usize,
+        request: &EditRequest,
+        outbox: &Sender<JobResult>,
+    ) -> Option<mangle_edit::Change> {
+        match request {
+            EditRequest::Move { dx, dy } => Some(mangle_edit::Change::move_by(*dx, *dy)),
+            EditRequest::Delete => Some(mangle_edit::Change::Delete),
+            EditRequest::Rotate { degrees, about } => Some(mangle_edit::Change::rotate_about(
+                about.0, about.1, *degrees,
+            )),
+            EditRequest::Text(property) => Some(mangle_edit::Change::Text(*property)),
+            EditRequest::Retype { text } => {
+                Some(mangle_edit::Change::Retype { text: text.clone() })
+            }
+            EditRequest::Align { alignment } => match editor.align_change(object, *alignment) {
+                Ok(change) => Some(change),
+                Err(e) => {
+                    let _ = outbox.send(JobResult::Failed {
+                        reason: e.to_string(),
+                    });
+                    None
+                }
+            },
+            EditRequest::Recolour { hex } => match parse_hex_colour(hex) {
+                Some(colour) => Some(mangle_edit::Change::recolour(colour)),
+                None => {
+                    let _ = outbox.send(JobResult::Failed {
+                        reason: format!(
+                            "{hex:?} is not a `#RRGGBB` colour, so nothing was recoloured"
+                        ),
+                    });
+                    None
+                }
+            },
+        }
+    }
+
     /// Apply an edit, save it, and draw the file as saved.
     fn edit(
         &mut self,
@@ -325,34 +383,8 @@ impl Worker {
         let Some(editor) = self.session.as_mut() else {
             return;
         };
-        let change = match request {
-            EditRequest::Move { dx, dy } => mangle_edit::Change::move_by(*dx, *dy),
-            EditRequest::Delete => mangle_edit::Change::Delete,
-            EditRequest::Rotate { degrees, about } => {
-                mangle_edit::Change::rotate_about(about.0, about.1, *degrees)
-            }
-            EditRequest::Text(property) => mangle_edit::Change::Text(*property),
-            EditRequest::Retype { text } => mangle_edit::Change::Retype { text: text.clone() },
-            EditRequest::Align { alignment } => match editor.align_change(object, *alignment) {
-                Ok(change) => change,
-                Err(e) => {
-                    let _ = outbox.send(JobResult::Failed {
-                        reason: e.to_string(),
-                    });
-                    return;
-                }
-            },
-            EditRequest::Recolour { hex } => match parse_hex_colour(hex) {
-                Some(colour) => mangle_edit::Change::recolour(colour),
-                None => {
-                    let _ = outbox.send(JobResult::Failed {
-                        reason: format!(
-                            "{hex:?} is not a `#RRGGBB` colour, so nothing was recoloured"
-                        ),
-                    });
-                    return;
-                }
-            },
+        let Some(change) = Self::change_of(editor, object, request, outbox) else {
+            return;
         };
         let notice = match editor.apply(object, &change) {
             Ok(outcome) => outcome.notice,
@@ -364,6 +396,62 @@ impl Worker {
             }
         };
         self.save_and_redraw(outbox, page, notice);
+    }
+
+    /// Edit an object drawn inside a shared form, then draw the file as saved.
+    ///
+    /// Form edits save outside the session history, which only snapshots page
+    /// streams: the notice says what was edited and where, and undo integration
+    /// for form edits is still open (see `Editor::apply_shared`).
+    fn edit_shared(
+        &mut self,
+        outbox: &Sender<JobResult>,
+        page: usize,
+        object: usize,
+        request: &EditRequest,
+        scope: mangle_edit::SharedFormScope,
+    ) {
+        if !self.session_for(outbox, page) {
+            return;
+        }
+        let Some(editor) = self.session.as_mut() else {
+            return;
+        };
+        let Some(change) = Self::change_of(editor, object, request, outbox) else {
+            return;
+        };
+        let form = editor
+            .model()
+            .objects()
+            .get(object)
+            .and_then(|o| {
+                o.form
+                    .clone()
+                    .or_else(|| o.records.iter().find_map(|r| r.form.clone()))
+            })
+            .unwrap_or_default();
+        let scope_note = match scope {
+            mangle_edit::SharedFormScope::ThisPageOnly => "on this page only",
+            mangle_edit::SharedFormScope::Everywhere => "everywhere it is used",
+        };
+        match editor.apply_shared(object, &change, scope) {
+            Ok(save) => {
+                let _ = outbox.send(JobResult::Saved {
+                    bytes: save.bytes.len(),
+                    objects: save.rewritten.len() + save.installed.len(),
+                    notice: Some(format!(
+                        "edited /{form} {scope_note} (form edits are not undoable yet)"
+                    )),
+                });
+                self.reopen(save.bytes, outbox);
+                self.page(outbox, page, 1.0);
+            }
+            Err(e) => {
+                let _ = outbox.send(JobResult::Failed {
+                    reason: e.to_string(),
+                });
+            }
+        }
     }
 
     /// Move an object in the z-order, save it, and draw the file as saved.
@@ -594,6 +682,20 @@ fn run(inbox: Receiver<Job>, outbox: Sender<JobResult>, font_dirs: Vec<PathBuf>)
                 };
                 worker.edit(&outbox, page, object, &request);
             }
+            Job::EditShared {
+                page,
+                object,
+                request,
+                scope,
+            } => {
+                let Some(worker) = &mut open else {
+                    let _ = outbox.send(JobResult::Failed {
+                        reason: "no document is open".to_string(),
+                    });
+                    continue;
+                };
+                worker.edit_shared(&outbox, page, object, &request, scope);
+            }
             Job::Arrange {
                 page,
                 object,
@@ -812,6 +914,126 @@ mod tests {
             notes.iter().any(|note| note.contains("--font-dirs")),
             "the render used the configured directory: {notes:?}"
         );
+    }
+
+    /// A shared-form edit refuses without a scope and saves with one.
+    ///
+    /// The two halves of S1.15's honesty: an ordinary edit of a form object is
+    /// answered as a failure naming the form, and the same edit with an explicit
+    /// scope saves, names the scope in its notice, and redraws the file as saved.
+    #[test]
+    fn a_shared_form_edit_refuses_then_saves_with_a_scope() {
+        let form = "BT /F1 12 Tf 1 0 0 1 20 750 Tm (Shared Header) Tj ET";
+        let body = "BT /F1 12 Tf 1 0 0 1 20 700 Tm (Page body) Tj ET";
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = vec![0usize];
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>\nendobj\n",
+        );
+        for (num, contents) in [(3usize, 5usize), (4, 6)] {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(
+                format!(
+                    "{num} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 800] \
+                     /Resources 7 0 R /Contents {contents} 0 R >>\nendobj\n"
+                )
+                .as_bytes(),
+            );
+        }
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!(
+                "5 0 obj\n<< /Length {} >>\nstream\nq /Fm0 Do Q {body}\nendstream\nendobj\n",
+                body.len() + 12
+            )
+            .as_bytes(),
+        );
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!(
+                "6 0 obj\n<< /Length {} >>\nstream\nq /Fm0 Do Q {body}\nendstream\nendobj\n",
+                body.len() + 12
+            )
+            .as_bytes(),
+        );
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            b"7 0 obj\n<< /XObject << /Fm0 8 0 R >> /Font << /F1 9 0 R >> >>\nendobj\n",
+        );
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!(
+                "8 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 800] \
+                 /Resources << /Font << /F1 9 0 R >> >> /Length {} >>\nstream\n{form}\nendstream\nendobj\n",
+                form.len()
+            )
+            .as_bytes(),
+        );
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            b"9 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n",
+        );
+        let startxref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 10\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n")
+                .as_bytes(),
+        );
+
+        let path =
+            std::env::temp_dir().join(format!("mangle-shared-form-{}.pdf", std::process::id()));
+        std::fs::write(&path, &pdf).expect("writes the test file");
+        let supervisor = Supervisor::start();
+        supervisor.ask(Job::Open(path.clone()));
+        let at = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => objects
+                    .iter()
+                    .position(|o| o.form.as_deref() == Some("Fm0")),
+                _ => None,
+            })
+            .expect("a form object");
+        supervisor.ask(Job::Edit {
+            page: 0,
+            object: at,
+            request: EditRequest::Move { dx: 9.0, dy: 0.0 },
+        });
+        let mut refused = false;
+        for result in collect(&supervisor, 1) {
+            if let JobResult::Failed { reason } = result {
+                refused = reason.contains("Fm0");
+            }
+        }
+        assert!(refused, "the scopeless edit names the form it cannot touch");
+        supervisor.ask(Job::EditShared {
+            page: 0,
+            object: at,
+            request: EditRequest::Move { dx: 9.0, dy: 0.0 },
+            scope: mangle_edit::SharedFormScope::ThisPageOnly,
+        });
+        let mut saved = false;
+        let mut redrawn = false;
+        for result in collect(&supervisor, 2) {
+            match result {
+                JobResult::Saved { notice, .. } => {
+                    saved =
+                        notice.is_some_and(|n| n.contains("Fm0") && n.contains("this page only"));
+                }
+                JobResult::Page { .. } => redrawn = true,
+                JobResult::Failed { reason } => panic!("the scoped edit failed: {reason}"),
+                JobResult::Opened { .. } => {}
+            }
+        }
+        std::fs::remove_file(&path).ok();
+        assert!(saved, "the save names the form and its scope");
+        assert!(redrawn, "the file is drawn as saved");
     }
 
     /// An edit on a real page is saved and the saved file is re-opened and drawn.

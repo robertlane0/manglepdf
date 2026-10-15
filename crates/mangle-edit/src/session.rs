@@ -233,6 +233,8 @@ pub enum SessionError {
     Install(InstallError),
     /// The edited stream no longer divides into the page's content streams.
     Reason(Reason),
+    /// A shared-form edit could not be written.
+    Save(SaveError),
 }
 
 impl std::fmt::Display for SessionError {
@@ -241,6 +243,7 @@ impl std::fmt::Display for SessionError {
             Self::Change(e) => write!(f, "{e}"),
             Self::Arrange(e) => write!(f, "{e}"),
             Self::Install(e) => write!(f, "{e}"),
+            Self::Save(e) => write!(f, "{e}"),
             Self::Reason(r) => write!(f, "{r}"),
         }
     }
@@ -388,6 +391,11 @@ impl Editor {
     ///
     /// Returns what was done: the label recorded for it — the same string a history
     /// panel shows — and the change as executed, which a fallback resolves.
+    ///
+    /// Objects drawn inside a Form XObject are refused by name: their spans are
+    /// offsets into the form's stream, so patching the page's stream at them would
+    /// wrap unrelated page bytes. Those edits go through [`Editor::apply_shared`]
+    /// with an explicit scope instead.
     pub fn apply(&mut self, index: usize, change: &Change) -> Result<Outcome, SessionError> {
         let model = self.model();
         let Some(object) = model.objects().get(index) else {
@@ -395,6 +403,19 @@ impl Editor {
                 crate::Refusal::NoSpans,
             )));
         };
+        // Either the object or one of its runs was drawn inside a form: the spans are
+        // offsets into the form's stream either way, so both shapes refuse alike.
+        if let Some(form) = object
+            .form
+            .as_deref()
+            .or_else(|| object.records.iter().find_map(|r| r.form.as_deref()))
+        {
+            return Err(SessionError::Change(crate::ChangeError::Refused(
+                crate::Refusal::InsideForm {
+                    form: form.to_string(),
+                },
+            )));
+        }
         let patches = match patches_for_with(
             &self.stream(),
             object,
@@ -427,6 +448,58 @@ impl Editor {
             change: change.clone(),
             notice: None,
         })
+    }
+
+    /// Apply a change to an object drawn inside a shared Form XObject (S1.15).
+    ///
+    /// The object's spans are offsets into the *form's* stream, so the patches are
+    /// built against the form's decoded bytes — never the page's — with the form's
+    /// own font table, then written with the chosen scope: this page only
+    /// (copy-on-write) or everywhere the form is used. The save bypasses the
+    /// session history, which only snapshots page streams: undo integration for
+    /// form edits is still open, and the worker says so in its notice.
+    pub fn apply_shared(
+        &mut self,
+        index: usize,
+        change: &Change,
+        scope: crate::SharedFormScope,
+    ) -> Result<Save, SessionError> {
+        let model = self.model();
+        let Some(object) = model.objects().get(index) else {
+            return Err(SessionError::Change(crate::ChangeError::Refused(
+                crate::Refusal::NoSpans,
+            )));
+        };
+        let form = object
+            .form
+            .clone()
+            .or(object.records.iter().find_map(|r| r.form.clone()))
+            .ok_or(SessionError::Change(crate::ChangeError::Refused(
+                crate::Refusal::NoSpans,
+            )))?;
+        let info =
+            crate::inspect_shared_form(&self.doc, &self.page, &form).map_err(SessionError::Save)?;
+        let form_stream = self
+            .doc
+            .object(info.form_ref)
+            .and_then(|o| match o {
+                Object::Stream(stream) => Some(stream),
+                _ => None,
+            })
+            .ok_or(SessionError::Save(SaveError::ContentsNotIndirect))?;
+        let decoded = mangle_syntax::stream::decode_stream(&form_stream);
+        let table = self
+            .resources
+            .form_resources(&form)
+            .unwrap_or_else(|| std::sync::Arc::new(self.resources.clone()));
+        let fonts = Fonts {
+            resources: &table,
+            resolve: &|o| self.doc.resolve_object(o),
+        };
+        let patches = patches_for_with(&decoded.data, object, change, Some(&fonts))
+            .map_err(|e| SessionError::Change(crate::ChangeError::Refused(e)))?;
+        crate::edit_shared_form(&self.doc, &self.page, &form, &patches, scope)
+            .map_err(SessionError::Save)
     }
 
     /// Retype through an embedded fallback face, for a character the run's own font lacks.
@@ -1085,7 +1158,10 @@ mod tests {
 
     use super::{SessionError, change_label, joined};
     use crate::Change;
+    use crate::page_objects::{PageModel, page_text};
+    use mangle_content::ContentStream;
     use mangle_content::Resources;
+    use mangle_content::interp::run_with;
     use mangle_doc::Page;
     use mangle_syntax::object::Object;
     use mangle_syntax::{Document, OpenOptions};
@@ -1520,10 +1596,7 @@ mod tests {
         };
         let map = to_unicode_map(&text);
         let stream2 = page2.decoded_contents(&doc2);
-        let after = mangle_content::interp::run_with(
-            &mangle_content::ContentStream::parse(&stream2),
-            &resources2,
-        );
+        let after = run_with(&ContentStream::parse(&stream2), &resources2);
         let mut found = false;
         for record in &after.records {
             let mangle_content::interp::Mark::Glyphs { text: raw, .. } = &record.mark else {
@@ -1711,6 +1784,154 @@ mod tests {
         );
     }
 
+    /// Two pages sharing one header form, for the shared-form tests: the S1.15 shape.
+    fn doc_with_shared_header() -> Vec<u8> {
+        use std::fmt::Write as _;
+        let form = "BT /F1 12 Tf 1 0 0 1 20 750 Tm (Shared Header) Tj ET";
+        let body = "BT /F1 12 Tf 1 0 0 1 20 700 Tm (Page body) Tj ET";
+        let mut out = String::from("%PDF-1.7\n");
+        let mut offsets = vec![0usize];
+        offsets.push(out.len());
+        out.push_str("1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n");
+        offsets.push(out.len());
+        out.push_str("2 0 obj\n<</Type /Pages /Kids [3 0 R 4 0 R] /Count 2>>\nendobj\n");
+        for (num, contents) in [(3, 5), (4, 6)] {
+            offsets.push(out.len());
+            let _ = write!(
+                out,
+                "{num} 0 obj\n<</Type /Page /Parent 2 0 R /MediaBox [0 0 200 800] \
+                 /Resources 7 0 R /Contents {contents} 0 R >>\nendobj\n",
+            );
+        }
+        offsets.push(out.len());
+        let _ = write!(
+            out,
+            "5 0 obj\n<< /Length {} >>\nstream\nq /Fm0 Do Q {body}\nendstream\nendobj\n",
+            body.len() + 12
+        );
+        offsets.push(out.len());
+        let _ = write!(
+            out,
+            "6 0 obj\n<< /Length {} >>\nstream\nq /Fm0 Do Q {body}\nendstream\nendobj\n",
+            body.len() + 12
+        );
+        offsets.push(out.len());
+        out.push_str("7 0 obj\n<< /XObject << /Fm0 8 0 R >> /Font << /F1 9 0 R >> >>\nendobj\n");
+        offsets.push(out.len());
+        let _ = write!(
+            out,
+            "8 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 800] \
+             /Resources << /Font << /F1 9 0 R >> >> /Length {} >>\nstream\n{form}\nendstream\nendobj\n",
+            form.len()
+        );
+        offsets.push(out.len());
+        out.push_str(
+            "9 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n",
+        );
+        let startxref = out.len();
+        let _ = write!(out, "xref\n0 10\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            let _ = writeln!(out, "{offset:010} 00000 n ");
+        }
+        let _ = write!(
+            out,
+            "trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n"
+        );
+        out.into_bytes()
+    }
+
+    /// Read every page's text, in order, through the installed resources.
+    fn page_texts(bytes: &[u8]) -> Vec<String> {
+        let doc = Document::open(bytes.to_vec(), OpenOptions::default()).expect("reopens");
+        let cat = doc.catalog().expect("a catalogue");
+        let root = cat
+            .get("Pages")
+            .and_then(Object::as_ref_id)
+            .expect("a tree");
+        let tree = mangle_doc::PageTree::build(&doc, root).expect("the walk");
+        tree.pages()
+            .iter()
+            .map(|page| {
+                let resources = page
+                    .inherited
+                    .resources
+                    .as_ref()
+                    .and_then(|o| doc.resolve_object(o))
+                    .and_then(|o| o.as_dict().cloned())
+                    .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+                    .unwrap_or_default();
+                let stream = page.decoded_contents(&doc);
+                let run = run_with(&ContentStream::parse(&stream), &resources);
+                let model = PageModel::build(&run.records);
+                page_text(&resources, &doc, &model)
+            })
+            .collect()
+    }
+
+    /// A shared-form edit applies with a scope: this page only, or everywhere.
+    ///
+    /// Retyping the header through the session rewrites the form's own stream —
+    /// copy-on-write for one page, in place for both — and each reopened page
+    /// reads back what its scope promises.
+    #[test]
+    fn a_shared_form_edit_applies_with_its_scope() {
+        use crate::SharedFormScope;
+        for (scope, second) in [
+            (SharedFormScope::ThisPageOnly, "Shared Header"),
+            (SharedFormScope::Everywhere, "Page 1 Header"),
+        ] {
+            let doc =
+                Document::open(doc_with_shared_header(), OpenOptions::default()).expect("opens");
+            let cat = doc.catalog().expect("a catalogue");
+            let root = cat
+                .get("Pages")
+                .and_then(Object::as_ref_id)
+                .expect("a tree");
+            let tree = mangle_doc::PageTree::build(&doc, root).expect("the walk");
+            let page = tree.pages().first().expect("a page").clone();
+            let resources = page
+                .inherited
+                .resources
+                .as_ref()
+                .and_then(|o| doc.resolve_object(o))
+                .and_then(|o| o.as_dict().cloned())
+                .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+                .unwrap_or_default();
+            let mut editor =
+                crate::Editor::open(std::sync::Arc::new(doc), &page, &resources).expect("editable");
+            let at = editor
+                .model()
+                .objects()
+                .iter()
+                .position(|o| {
+                    o.form.as_deref() == Some("Fm0")
+                        || o.records.iter().any(|r| r.form.as_deref() == Some("Fm0"))
+                })
+                .expect("a form object");
+            let save = editor
+                .apply_shared(
+                    at,
+                    &Change::Retype {
+                        text: "Page 1 Header!".to_string(),
+                    },
+                    scope,
+                )
+                .expect("applies with a scope");
+            let texts = page_texts(&save.bytes);
+            assert_eq!(texts.len(), 2);
+            assert!(
+                texts[0].contains("Page 1 Header!") && texts[1].contains(second),
+                "{scope:?}: [{}, {}], first must hold the edit",
+                texts[0],
+                texts[1]
+            );
+            assert!(
+                !texts[0].contains("Shared Header"),
+                "{scope:?}: the edited page no longer shows the old header"
+            );
+        }
+    }
+
     /// Bitmap text is replaced whole rather than retyped: the run's codes name glyph
     /// programs, and the replacement installs a live-text subset for the new string.
     #[test]
@@ -1777,10 +1998,7 @@ mod tests {
             .map(|d| Resources::from_dict(&d, &|o| doc2.resolve_object(o)))
             .expect("resources");
         let stream2 = page2.decoded_contents(&doc2);
-        let after = mangle_content::interp::run_with(
-            &mangle_content::ContentStream::parse(&stream2),
-            &resources2,
-        );
+        let after = run_with(&ContentStream::parse(&stream2), &resources2);
         // The run's new bytes decode through some installed ToUnicode as "Hi".
         let mut found = false;
         for font in resources2.fonts.values() {
@@ -1885,10 +2103,7 @@ mod tests {
             .map(|d| Resources::from_dict(&d, &|o| doc2.resolve_object(o)))
             .expect("resources");
         let stream2 = page2.decoded_contents(&doc2);
-        let after = mangle_content::interp::run_with(
-            &mangle_content::ContentStream::parse(&stream2),
-            &resources2,
-        );
+        let after = run_with(&ContentStream::parse(&stream2), &resources2);
         // F2 shows α at code 225, so the decoded run reads back as "Hα" with no CMap.
         let mut found = false;
         for record in &after.records {
@@ -1954,7 +2169,7 @@ mod tests {
         let mut editor2 =
             crate::Editor::open(std::sync::Arc::new(doc2), &page2, &resources2).expect("editable");
         assert_eq!(
-            crate::page_objects::page_text(&resources2, editor2.document(), &editor2.model()),
+            page_text(&resources2, editor2.document(), &editor2.model()),
             "Hα",
             "ToUnicode decodes the Type0 run"
         );
@@ -1986,7 +2201,7 @@ mod tests {
         let editor3 =
             crate::Editor::open(std::sync::Arc::new(doc3), &page3, &resources3).expect("editable");
         assert_eq!(
-            crate::page_objects::page_text(&resources3, editor3.document(), &editor3.model()),
+            page_text(&resources3, editor3.document(), &editor3.model()),
             "αH"
         );
     }

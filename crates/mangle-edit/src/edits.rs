@@ -690,17 +690,6 @@ pub fn patches_for_with(
     if object.spans.is_empty() {
         return Err(Refusal::NoSpans);
     }
-    // Either the object or one of its runs was drawn inside a form: the spans are
-    // offsets into the form's stream either way, so both shapes refuse alike.
-    let form = object
-        .form
-        .as_deref()
-        .or_else(|| object.records.iter().find_map(|r| r.form.as_deref()));
-    if let Some(form) = form {
-        return Err(Refusal::InsideForm {
-            form: form.to_string(),
-        });
-    }
     for span in &object.spans {
         if span.end > stream.len() || span.start > span.end {
             return Err(Refusal::ForeignSpan {
@@ -2523,6 +2512,7 @@ mod tests {
         patches_for, patches_for_with, region_holds_an_operation, verify, verify_with, wrappers,
     };
     use crate::page_objects::{Kind, PageModel, PageObject};
+    use crate::{Editor, SessionError};
 
     /// A record whose mark is the one given.
     fn record(mark: Mark, span: std::ops::Range<usize>) -> Record {
@@ -4035,7 +4025,7 @@ mod tests {
     /// names the form.
     #[test]
     fn an_edit_inside_an_unopened_form_is_refused() {
-        let (_doc, _page, _resources, model, page_stream) = form_page();
+        let (doc, page, resources, model, page_stream) = form_page();
         let at = model
             .objects()
             .iter()
@@ -4048,11 +4038,17 @@ mod tests {
             object.spans,
             page_stream.len()
         );
-        let err = patches_for_with(&page_stream, object, &Change::move_by(1.0, 0.0), None)
+        let mut editor = Editor::open(Arc::new(doc), &page, &resources).expect("editable");
+        let err = editor
+            .apply(at, &Change::move_by(1.0, 0.0))
             .expect_err("refused");
         assert!(
-            matches!(err, Refusal::InsideForm { ref form } if form == "Fm0"),
-            "{err}"
+            matches!(
+                err,
+                SessionError::Change(ChangeError::Refused(Refusal::InsideForm { ref form }))
+                    if form == "Fm0"
+            ),
+            "{err:?}"
         );
     }
 
