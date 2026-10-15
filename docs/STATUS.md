@@ -71,7 +71,7 @@ the full two-hour Tier-B corpus run).
 
 ## Open gaps (in priority order)
 
-1. **M5 UI remains (engine done)** — Threading `--font-dirs` into the edit fallback call sites, font/colour pickers in the Text Properties panel, and UI prompt wiring for the landed shared Form XObject copy-on-write.
+1. **M5 UI remains (engine done)** — Forms/annotations appearance embedding with `--font-dirs`, UI option plumbing (`Options::font_dirs` into the worker session and renders), font/colour pickers in the Text Properties panel, and UI prompt wiring for the landed shared Form XObject copy-on-write.
 2. **Stroke `closepath` state (`D14`, closed) and Type 3 glyph execution (landed)** — Open polylines keep their caps and rings keep their inner boundary (`a_closepath_is_carried_through_to_the_polygon`, `an_open_subpath_is_one_outline_and_a_ring_is_two`); Type 3 `/CharProcs` execute under `MAX_TYPE3_DEPTH = 8`.
 3. **Viewer sidebar & panels (M1/M2/M3)** — Clickable thumbnail navigation, Bookmarks/Outlines
    tree navigation, OCG Layers toggle panel, Attachments/Signatures panels, and Developer

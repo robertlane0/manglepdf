@@ -78,6 +78,11 @@ pub struct Editor {
     /// the saved one. Without this a second install would extend a stale copy and drop
     /// the first install's fonts.
     current_res: Option<(u32, Dict)>,
+    /// Replacement system font directories (`--font-dirs`), consulted before the
+    /// bundled faces by the fallback paths. Empty is bundled-only. Set with
+    /// [`Editor::set_system_dirs`]; the render side reads the same configuration
+    /// from `RenderOptions::font_dirs`.
+    system_dirs: Vec<std::path::PathBuf>,
 }
 
 /// Why a session could not be built.
@@ -295,6 +300,7 @@ impl Editor {
                     parts: views,
                     staged: Vec::new(),
                     current_res: None,
+                    system_dirs: Vec::new(),
                 })
             }
             Err(why) => Err(OpenError::NotSavable(why)),
@@ -307,6 +313,15 @@ impl Editor {
     #[must_use]
     pub fn base(&self) -> Vec<Vec<u8>> {
         self.parts.iter().map(|p| p.decoded.clone()).collect()
+    }
+
+    /// Configure replacement system font directories (`--font-dirs`).
+    ///
+    /// The fallback paths consult these before the bundled faces, so S1.3's
+    /// "font unavailable" case (`--font-dirs` empty) and a custom system face
+    /// are both reproducible through a session.
+    pub fn set_system_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
+        self.system_dirs = dirs;
     }
 
     /// The page's content streams as they now stand, after every undo and redo.
@@ -383,7 +398,8 @@ impl Editor {
 
     /// Retype through an embedded fallback face, for a character the run's own font lacks.
     ///
-    /// The run's family resolves to a bundled metric-compatible face, which is subset for
+    /// The run's family resolves to a metric-compatible face — a configured `--font-dirs`
+    /// file first, else bundled — which is subset for
     /// exactly the new text's characters, installed under a free name, and switched to
     /// for the one operation. The label carries the notice the charter requires — which
     /// face stood in and which character needed it — because a substitution no notice
@@ -406,14 +422,14 @@ impl Editor {
                 crate::Refusal::NoSpans,
             )));
         };
-        let Some((family, program)) = mangle_font::substitute_named("Helvetica") else {
+        let Some(face) = mangle_font::resolve_fallback("Helvetica", &self.system_dirs) else {
             return Err(SessionError::Change(crate::ChangeError::Refused(
                 crate::Refusal::NoSuchFont {
                     font: "Helvetica".to_string(),
                 },
             )));
         };
-        self.fallback_to(object, text, program, family, None)
+        self.fallback_to(object, text, &face.bytes, &face.family, None)
     }
 
     fn apply_fallback(
@@ -475,10 +491,16 @@ impl Editor {
         if let Some(outcome) = self.apply_family(object, text, &base_font, missing) {
             return outcome;
         }
-        let Some((family, program)) = mangle_font::substitute_named(&base_font) else {
+        let Some(face) = mangle_font::resolve_fallback(&base_font, &self.system_dirs) else {
             return Err(original());
         };
-        self.fallback_to(object, text, program, family, Some((missing, base_font)))
+        self.fallback_to(
+            object,
+            text,
+            &face.bytes,
+            &face.family,
+            Some((missing, base_font)),
+        )
     }
 
     /// Read an embedded `/FontFile2` program from `dict` (or its `/DescendantFonts` entry).
@@ -1488,6 +1510,55 @@ mod tests {
             }
         }
         assert!(found, "the page says Hα through {name}");
+    }
+
+    /// A configured `--font-dirs` file answers the fallback before the bundled face.
+    ///
+    /// Same shape as the test above, but the session is pointed at the repository's
+    /// own bundled directory standing in as a system directory: the file's own
+    /// family (`Liberation Sans`) names the substitution instead of the bundled
+    /// alias, while the installed subset stays the same program.
+    #[test]
+    fn a_configured_font_dir_answers_the_fallback_first() {
+        let (doc, page) = doc_with_helvetica("BT /F1 12 Tf (Hi) Tj ET");
+        let resources = page
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .unwrap_or_default();
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &resources).expect("editable");
+        editor.set_system_dirs(vec![std::path::PathBuf::from("../../assets/fonts")]);
+        let at = editor
+            .model()
+            .objects()
+            .iter()
+            .position(|o| {
+                matches!(
+                    o.kind,
+                    crate::Kind::Line | crate::Kind::Block | crate::Kind::LooseRun
+                )
+            })
+            .expect("a text object");
+        let outcome = editor
+            .apply(
+                at,
+                &Change::Retype {
+                    text: "Hα".to_string(),
+                },
+            )
+            .expect("a fallback answers");
+        assert!(
+            outcome.label.contains("fallback")
+                && outcome.label.contains("Liberation Sans")
+                && outcome.label.contains('α'),
+            "the notice names the system file's own family: {}",
+            outcome.label
+        );
+        editor.save().expect("saves");
     }
 
     /// Bitmap text is replaced whole rather than retyped: the run's codes name glyph
