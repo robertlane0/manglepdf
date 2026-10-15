@@ -57,7 +57,8 @@ pub fn mark_redaction_rect(
 ) -> Result<Vec<u8>, SaveError> {
     let mut spec = AnnotationSpec::new(rect, AnnotationBody::Redact { overlay_text });
     spec.color = [0.8, 0.0, 0.0];
-    Ok(add_annotation(doc, page, &spec)?.save.bytes)
+    // Redact appearances embed no fallback fonts, so no `--font-dirs` travel here.
+    Ok(add_annotation(doc, page, &spec, &[])?.save.bytes)
 }
 
 /// Irreversibly apply all `/Redact` annotations and scrub `options.tokens` across the

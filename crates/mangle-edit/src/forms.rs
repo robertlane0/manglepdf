@@ -333,7 +333,14 @@ pub fn field_values(doc: &Document) -> BTreeMap<String, String> {
 
 /// Fill a single form field by its hierarchical name, regenerate its appearance stream,
 /// recompute `/CO` calculated fields, and set `/NeedAppearances false`.
-pub fn fill_field(doc: &Document, field_name: &str, value: &str) -> Result<Save, FormError> {
+///
+/// `system_dirs` configures `--font-dirs` for the Unicode appearance embedding.
+pub fn fill_field(
+    doc: &Document,
+    field_name: &str,
+    value: &str,
+    system_dirs: &[std::path::PathBuf],
+) -> Result<Save, FormError> {
     if doc.info().encryption.encrypted {
         return Err(FormError::Save(SaveError::Encrypted));
     }
@@ -361,7 +368,7 @@ pub fn fill_field(doc: &Document, field_name: &str, value: &str) -> Result<Save,
     };
 
     let mut extra = Vec::new();
-    let updated_target = write_field_value(doc, target, &final_value, &mut extra);
+    let updated_target = write_field_value(doc, target, &final_value, &mut extra, system_dirs);
     extra.push((target.obj_ref.num, Object::Dict(updated_target)));
 
     let mut current_vals: BTreeMap<String, String> = fields
@@ -390,7 +397,7 @@ pub fn fill_field(doc: &Document, field_name: &str, value: &str) -> Result<Save,
                 None => fmt_num(raw_val),
             };
             current_vals.insert(f.full_name.clone(), formatted.clone());
-            let updated_calc = write_field_value(doc, f, &formatted, &mut extra);
+            let updated_calc = write_field_value(doc, f, &formatted, &mut extra, system_dirs);
             extra.push((f.obj_ref.num, Object::Dict(updated_calc)));
         }
     }
@@ -400,7 +407,7 @@ pub fn fill_field(doc: &Document, field_name: &str, value: &str) -> Result<Save,
 }
 
 /// Reset all form fields to their `/DV` default value (or empty if no `/DV` is present).
-pub fn reset_form(doc: &Document) -> Result<Save, FormError> {
+pub fn reset_form(doc: &Document, system_dirs: &[std::path::PathBuf]) -> Result<Save, FormError> {
     if doc.info().encryption.encrypted {
         return Err(FormError::Save(SaveError::Encrypted));
     }
@@ -408,7 +415,7 @@ pub fn reset_form(doc: &Document) -> Result<Save, FormError> {
     let mut extra = Vec::new();
     for f in &fields {
         let dv = f.default_value.clone().unwrap_or_default();
-        let updated = write_field_value(doc, f, &dv, &mut extra);
+        let updated = write_field_value(doc, f, &dv, &mut extra, system_dirs);
         extra.push((f.obj_ref.num, Object::Dict(updated)));
     }
     clear_need_appearances(doc, &mut extra);
@@ -416,7 +423,7 @@ pub fn reset_form(doc: &Document) -> Result<Save, FormError> {
 }
 
 /// Clear all form fields to empty / `/Off`.
-pub fn clear_form(doc: &Document) -> Result<Save, FormError> {
+pub fn clear_form(doc: &Document, system_dirs: &[std::path::PathBuf]) -> Result<Save, FormError> {
     if doc.info().encryption.encrypted {
         return Err(FormError::Save(SaveError::Encrypted));
     }
@@ -424,7 +431,7 @@ pub fn clear_form(doc: &Document) -> Result<Save, FormError> {
     let mut extra = Vec::new();
     for f in &fields {
         let empty = if f.field_type == "Btn" { "Off" } else { "" };
-        let updated = write_field_value(doc, f, empty, &mut extra);
+        let updated = write_field_value(doc, f, empty, &mut extra, system_dirs);
         extra.push((f.obj_ref.num, Object::Dict(updated)));
     }
     clear_need_appearances(doc, &mut extra);
@@ -447,7 +454,11 @@ pub fn export_form_xfdf(doc: &Document) -> String {
 }
 
 /// Import form field values from an XFDF string (`S6.4`).
-pub fn import_form_xfdf(doc: &Document, xfdf: &str) -> Result<Save, FormError> {
+pub fn import_form_xfdf(
+    doc: &Document,
+    xfdf: &str,
+    system_dirs: &[std::path::PathBuf],
+) -> Result<Save, FormError> {
     let mut current_bytes = doc.bytes().to_vec();
     for line in xfdf.lines() {
         let line = line.trim();
@@ -469,7 +480,7 @@ pub fn import_form_xfdf(doc: &Document, xfdf: &str) -> Result<Save, FormError> {
         let val = &after_val[..val_end];
         let cur_doc = Document::open(current_bytes.clone(), mangle_syntax::OpenOptions::default())
             .map_err(|_| FormError::Save(SaveError::ContentsNotIndirect))?;
-        let saved = fill_field(&cur_doc, name, val)?;
+        let saved = fill_field(&cur_doc, name, val, system_dirs)?;
         current_bytes = saved.bytes;
     }
     Ok(Save {
@@ -543,7 +554,14 @@ impl NewFieldSpec {
 }
 
 /// Create a new interactive form field widget on `page` and register it in `/AcroForm` (`S6.5`).
-pub fn create_field(doc: &Document, page: &Page, spec: &NewFieldSpec) -> Result<Save, FormError> {
+///
+/// `system_dirs` configures `--font-dirs` for the Unicode appearance embedding.
+pub fn create_field(
+    doc: &Document,
+    page: &Page,
+    spec: &NewFieldSpec,
+    system_dirs: &[std::path::PathBuf],
+) -> Result<Save, FormError> {
     if doc.info().encryption.encrypted {
         return Err(FormError::Save(SaveError::Encrypted));
     }
@@ -682,6 +700,7 @@ pub fn create_field(doc: &Document, page: &Page, spec: &NewFieldSpec) -> Result<
         flags,
         None,
         &mut extra,
+        system_dirs,
     );
     let ap_num = doc.alloc().num;
     extra.push((ap_num, Object::Stream(ap_stream)));
@@ -922,6 +941,7 @@ fn write_field_value(
     field: &ResolvedField,
     value: &str,
     extra: &mut Vec<(u32, Object)>,
+    system_dirs: &[std::path::PathBuf],
 ) -> Dict {
     let mut d = field.dict.clone();
     if field.field_type == "Btn" {
@@ -939,6 +959,7 @@ fn write_field_value(
         field.flags,
         field.max_len,
         extra,
+        system_dirs,
     );
     let ap_num = doc.alloc().num;
     extra.push((ap_num, Object::Stream(ap_stream)));
@@ -956,6 +977,7 @@ fn build_widget_appearance(
     flags: i64,
     max_len: Option<usize>,
     extra: &mut Vec<(u32, Object)>,
+    system_dirs: &[std::path::PathBuf],
 ) -> Stream {
     let mut dict = Dict::new();
     dict.set("Type", Object::name("XObject"));
@@ -982,12 +1004,15 @@ fn build_widget_appearance(
 
     let chars: Vec<char> = shown.chars().collect();
     let needs_unicode = chars.iter().any(|c| !c.is_ascii());
-    if needs_unicode && let Some((family, program)) = mangle_font::substitute_named("Helvetica") {
+    let fallback = needs_unicode
+        .then(|| mangle_font::resolve_fallback("Helvetica", system_dirs))
+        .flatten();
+    if let Some(face) = fallback.as_ref() {
         let first = doc.alloc().num;
         for _ in 1..EMBEDDED_OBJECTS {
             doc.alloc();
         }
-        if let Ok(embedded) = embed_truetype(program, &chars, family, first) {
+        if let Ok(embedded) = embed_truetype(&face.bytes, &chars, &face.family, first) {
             font_table.set("F1", Object::Ref(Ref::new(embedded.type0, 0)));
             for (num, obj) in embedded.numbered {
                 extra.push((num, obj));
@@ -1218,7 +1243,7 @@ mod tests {
         );
         p1.default_value = "10".to_string();
         p1.validate_script = Some("AFRange_Validate(true, 0, true, 1000)".to_string());
-        let s1 = create_field(&doc, &page, &p1).expect("creates price1");
+        let s1 = create_field(&doc, &page, &p1, &[]).expect("creates price1");
 
         // 2. Create price2
         let (doc2, page2) = open_doc(s1.bytes);
@@ -1232,7 +1257,7 @@ mod tests {
             },
         );
         p2.default_value = "25".to_string();
-        let s2 = create_field(&doc2, &page2, &p2).expect("creates price2");
+        let s2 = create_field(&doc2, &page2, &p2, &[]).expect("creates price2");
 
         // 3. Create total with AFSimple_Calculate("SUM", ...) and AFNumber_Format
         let (doc3, page3) = open_doc(s2.bytes);
@@ -1248,15 +1273,15 @@ mod tests {
         total.calc_script =
             Some("AFSimple_Calculate(\"SUM\", new Array(\"price1\", \"price2\"))".to_string());
         total.format_script = Some("AFNumber_Format(2, 0, 0, 0, \"$\", true)".to_string());
-        let s3 = create_field(&doc3, &page3, &total).expect("creates total");
+        let s3 = create_field(&doc3, &page3, &total, &[]).expect("creates total");
 
         let (doc4, _) = open_doc(s3.bytes);
         // Validation rejects out-of-range value:
-        let err = fill_field(&doc4, "price1", "2500").expect_err("out of range");
+        let err = fill_field(&doc4, "price1", "2500", &[]).expect_err("out of range");
         assert!(matches!(err, FormError::ValidationFailed { .. }));
 
         // Valid fill updates `price1` and recalculates `total` as "$1,025.00"!
-        let filled = fill_field(&doc4, "price1", "1000").expect("fills price1");
+        let filled = fill_field(&doc4, "price1", "1000", &[]).expect("fills price1");
         let (doc5, _) = open_doc(filled.bytes);
         let vals = field_values(&doc5);
         assert_eq!(vals.get("price1").map(String::as_str), Some("1000"));
@@ -1266,21 +1291,21 @@ mod tests {
         let xfdf = export_form_xfdf(&doc5);
         assert!(xfdf.contains("$1,025.00"));
 
-        let reset = reset_form(&doc5).expect("resets form");
+        let reset = reset_form(&doc5, &[]).expect("resets form");
         let (doc_reset, _) = open_doc(reset.bytes);
         assert_eq!(
             field_values(&doc_reset).get("price1").map(String::as_str),
             Some("10")
         );
 
-        let cleared = clear_form(&doc_reset).expect("clears form");
+        let cleared = clear_form(&doc_reset, &[]).expect("clears form");
         let (doc_clear, _) = open_doc(cleared.bytes);
         assert_eq!(
             field_values(&doc_clear).get("price1").map(String::as_str),
             Some("")
         );
 
-        let reimported = import_form_xfdf(&doc_clear, &xfdf).expect("imports xfdf");
+        let reimported = import_form_xfdf(&doc_clear, &xfdf, &[]).expect("imports xfdf");
         let (doc_imp, _) = open_doc(reimported.bytes);
         assert_eq!(
             field_values(&doc_imp).get("price1").map(String::as_str),
@@ -1304,9 +1329,9 @@ mod tests {
                 comb_len: None,
             },
         );
-        let created = create_field(&doc, &page, &spec).expect("creates guest");
+        let created = create_field(&doc, &page, &spec, &[]).expect("creates guest");
         let (doc2, _) = open_doc(created.bytes);
-        let filled = fill_field(&doc2, "guest", "Зоя — Ζωή").expect("unicode fill");
+        let filled = fill_field(&doc2, "guest", "Зоя — Ζωή", &[]).expect("unicode fill");
         let (doc3, _) = open_doc(filled.bytes);
         assert_eq!(
             field_values(&doc3).get("guest").map(String::as_str),

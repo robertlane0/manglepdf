@@ -212,10 +212,13 @@ pub struct AddedAnnotation {
 
 /// Add a new annotation (with its deterministic `/AP /N` stream) to `page` incrementally,
 /// leaving all existing annotations and page streams untouched.
+///
+/// `system_dirs` configures `--font-dirs` for the Unicode FreeType appearance embedding.
 pub fn add_annotation(
     doc: &Document,
     page: &Page,
     spec: &AnnotationSpec,
+    system_dirs: &[std::path::PathBuf],
 ) -> Result<AddedAnnotation, SaveError> {
     if doc.info().encryption.encrypted {
         return Err(SaveError::Encrypted);
@@ -231,7 +234,7 @@ pub fn add_annotation(
     let ap_ref = if matches!(spec.body, AnnotationBody::Link { .. }) {
         None
     } else {
-        let (ap_stream, ap_extra) = build_appearance_stream(doc, spec);
+        let (ap_stream, ap_extra) = build_appearance_stream(doc, spec, system_dirs);
         extra.extend(ap_extra);
         let ap_num = doc.alloc().num;
         extra.push((ap_num, Object::Stream(ap_stream)));
@@ -535,7 +538,12 @@ pub fn export_xfdf(doc: &Document, page: &Page, page_index: usize) -> String {
 }
 
 /// Import annotations from an XFDF string produced by [`export_xfdf`] onto `page`.
-pub fn import_xfdf(doc: &Document, page: &Page, xfdf: &str) -> Result<Save, SaveError> {
+pub fn import_xfdf(
+    doc: &Document,
+    page: &Page,
+    xfdf: &str,
+    system_dirs: &[std::path::PathBuf],
+) -> Result<Save, SaveError> {
     let mut current_bytes = doc.bytes().to_vec();
     for line in xfdf.lines() {
         let line = line.trim();
@@ -643,7 +651,7 @@ pub fn import_xfdf(doc: &Document, page: &Page, xfdf: &str) -> Result<Save, Save
         } else {
             page.clone()
         };
-        let added = add_annotation(&cur_doc, &cur_page, &spec)?;
+        let added = add_annotation(&cur_doc, &cur_page, &spec, system_dirs)?;
         current_bytes = added.save.bytes;
     }
     Ok(Save {
@@ -891,7 +899,11 @@ fn build_annot_dict(spec: &AnnotationSpec, ap_ref: Option<Ref>) -> Dict {
 }
 
 /// Build the deterministic `/AP /N` Form XObject stream (plus any embedded font objects).
-fn build_appearance_stream(doc: &Document, spec: &AnnotationSpec) -> (Stream, Vec<(u32, Object)>) {
+fn build_appearance_stream(
+    doc: &Document,
+    spec: &AnnotationSpec,
+    system_dirs: &[std::path::PathBuf],
+) -> (Stream, Vec<(u32, Object)>) {
     let mut dict = Dict::new();
     dict.set("Type", Object::name("XObject"));
     dict.set("Subtype", Object::name("Form"));
@@ -998,14 +1010,15 @@ fn build_appearance_stream(doc: &Document, spec: &AnnotationSpec) -> (Stream, Ve
             let mut font_table = Dict::new();
             let chars: Vec<char> = spec.contents.chars().collect();
             let needs_unicode = chars.iter().any(|c| !c.is_ascii());
-            if needs_unicode
-                && let Some((family, program)) = mangle_font::substitute_named("Helvetica")
-            {
+            let fallback = needs_unicode
+                .then(|| mangle_font::resolve_fallback("Helvetica", system_dirs))
+                .flatten();
+            if let Some(face) = fallback.as_ref() {
                 let first = doc.alloc().num;
                 for _ in 1..EMBEDDED_OBJECTS {
                     doc.alloc();
                 }
-                if let Ok(embedded) = embed_truetype(program, &chars, family, first) {
+                if let Ok(embedded) = embed_truetype(&face.bytes, &chars, &face.family, first) {
                     font_table.set("F1", Object::Ref(Ref::new(embedded.type0, 0)));
                     for (num, obj) in embedded.numbered {
                         extra.push((num, obj));
@@ -1447,7 +1460,7 @@ mod tests {
                 quads: vec![[20.0, 100.0, 140.0, 100.0, 140.0, 120.0, 20.0, 120.0]],
             },
         );
-        let added = add_annotation(&doc, &page, &hl).expect("adds highlight");
+        let added = add_annotation(&doc, &page, &hl, &[]).expect("adds highlight");
         assert!(added.ap_ref.is_some());
 
         let (doc2, page2, _) = open_page(added.save.bytes);
@@ -1460,12 +1473,54 @@ mod tests {
             },
         );
         ft.contents = "Café — Ζωή €".to_string();
-        let added2 = add_annotation(&doc2, &page2, &ft).expect("adds unicode freetext");
+        let added2 = add_annotation(&doc2, &page2, &ft, &[]).expect("adds unicode freetext");
 
         let (doc3, page3, res3) = open_page(added2.save.bytes);
         assert_eq!(page3.annots(&doc3).len(), 2);
         let rendered = render_page(&doc3, &page3, &res3, RenderOptions::default());
         assert!(rendered.notes.is_empty(), "notes: {:?}", rendered.notes);
+    }
+
+    /// A configured `--font-dirs` names the embedded appearance font.
+    ///
+    /// Same Unicode FreeText as above, but resolved through the repository's own
+    /// bundled directory standing in as a system directory: the installed font's
+    /// `/BaseFont` carries the file's own family (`Liberation Sans`) rather than
+    /// the bundled alias, proving the configured file was embedded.
+    #[test]
+    fn a_configured_font_dir_names_the_embedded_appearance_font() {
+        let (doc, page, _) = open_page(blank_pdf());
+        let mut ft = AnnotationSpec::new(
+            PageRect::new(20.0, 40.0, 180.0, 80.0),
+            AnnotationBody::FreeText {
+                font_size: 12.0,
+                align: 0,
+                callout_line: None,
+            },
+        );
+        ft.contents = "Café — Ζωή €".to_string();
+        let dirs = [std::path::PathBuf::from("../../assets/fonts")];
+        let added = add_annotation(&doc, &page, &ft, &dirs).expect("adds freetext");
+        let doc2 = Document::open(added.save.bytes, OpenOptions::default()).expect("reopens");
+        let mut names = Vec::new();
+        for num in doc2.object_numbers() {
+            let Some(obj) = doc2.object(mangle_syntax::object::Ref::new(num, 0)) else {
+                continue;
+            };
+            let Some(dict) = obj.as_dict() else {
+                continue;
+            };
+            if let Some(base) = dict
+                .get("BaseFont")
+                .and_then(mangle_syntax::object::Object::as_name)
+            {
+                names.push(String::from_utf8_lossy(base).into_owned());
+            }
+        }
+        assert!(
+            names.iter().any(|n| n.contains("Liberation Sans")),
+            "the system file's own family was embedded: {names:?}"
+        );
     }
 
     #[test]
@@ -1482,7 +1537,7 @@ mod tests {
         );
         note.author = "Reviewer".to_string();
         note.contents = "Looks good".to_string();
-        let added = add_annotation(&doc, &page, &note).expect("adds note + popup");
+        let added = add_annotation(&doc, &page, &note, &[]).expect("adds note + popup");
 
         let (doc2, page2, _) = open_page(added.save.bytes);
         let reply = AnnotationSpec::new(
@@ -1494,7 +1549,7 @@ mod tests {
                 with_popup: false,
             },
         );
-        let added_reply = add_annotation(&doc2, &page2, &reply).expect("adds reply");
+        let added_reply = add_annotation(&doc2, &page2, &reply, &[]).expect("adds reply");
 
         let (doc3, page3, _) = open_page(added_reply.save.bytes);
         assert_eq!(page3.annots(&doc3).len(), 3, "note, popup, and reply");
@@ -1504,7 +1559,7 @@ mod tests {
         assert!(xfdf.contains("Looks good"));
 
         let (fresh_doc, fresh_page, _) = open_page(blank_pdf());
-        let imported = import_xfdf(&fresh_doc, &fresh_page, &xfdf).expect("imports xfdf");
+        let imported = import_xfdf(&fresh_doc, &fresh_page, &xfdf, &[]).expect("imports xfdf");
         let (doc_imp, page_imp, _) = open_page(imported.bytes);
         assert_eq!(page_imp.annots(&doc_imp).len(), 2);
 
