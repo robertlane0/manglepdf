@@ -2,10 +2,11 @@
 //!
 //! `--font-dirs PATH[,PATH]` replaces the default system font discovery so
 //! font-fallback behaviour is testable and reproducible. This module is the
-//! enumeration half: given replacement directories, list the candidate font
-//! files inside them deterministically. Deciding which candidate backs which
-//! `/BaseFont` (the fallback chain into `substitutes`) comes next and is still
-//! open.
+//! system half of fallback: enumerate candidate files deterministically
+//! ([`discover_font_files`]), match a `/BaseFont` to a file
+//! ([`find_system_font`]), and resolve the full fallback order
+//! ([`resolve_fallback`]). Threading the configured directories into the
+//! render and edit fallback call sites is still open.
 //!
 //! Hostile-input discipline applies to directories too: the walk is bounded in
 //! roots, depth, visited entries, and reported files; symlinks are never
@@ -117,11 +118,7 @@ pub struct SystemFontInfo {
 /// as a match.
 #[must_use]
 pub fn inspect_font_file(path: &Path) -> Option<SystemFontInfo> {
-    let size = std::fs::metadata(path).ok()?.len();
-    if size == 0 || size > MAX_FONT_FILE_BYTES {
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = read_bounded(path)?;
     let face = ttf_parser::Face::parse(&bytes, 0).ok()?;
     let mut family: Option<String> = None;
     let mut subfamily: Option<String> = None;
@@ -192,6 +189,64 @@ pub fn find_system_font(requested: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Where a resolved fallback face came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceSource {
+    /// An explicitly configured `--font-dirs` file, which wins.
+    System,
+    /// A bundled Liberation face.
+    Bundled,
+}
+
+/// A fallback face, resolved and ready to embed or rasterize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FallbackFace {
+    /// The face's own family (`LiberationSans`, not the `Helvetica` asked for),
+    /// which is what notices and embeddings must name.
+    pub family: String,
+    /// The font program.
+    pub bytes: Vec<u8>,
+    /// Which of the two above it is.
+    pub source: FaceSource,
+}
+
+/// Resolve the fallback face for `/BaseFont` `requested` (GOAL.md §4.4 rung 3).
+///
+/// Order: an explicitly configured system file first — the user named those
+/// directories — then the bundled metric-compatible face. Empty `dirs` is
+/// today's behaviour exactly (bundled only). Unknown families and styles are
+/// refused rather than guessed at, like [`crate::substitute`].
+#[must_use]
+pub fn resolve_fallback(requested: &str, dirs: &[PathBuf]) -> Option<FallbackFace> {
+    if let Some(path) = find_system_font(requested, dirs) {
+        if let Some(bytes) = read_bounded(&path) {
+            let family = inspect_font_file(&path)
+                .map(|info| info.family)
+                .unwrap_or_default();
+            return Some(FallbackFace {
+                family,
+                bytes,
+                source: FaceSource::System,
+            });
+        }
+    }
+    let (family, bytes) = crate::substitutes::substitute_named(requested)?;
+    Some(FallbackFace {
+        family: family.to_string(),
+        bytes: bytes.to_vec(),
+        source: FaceSource::Bundled,
+    })
+}
+
+/// Read a whole font file, refusing absurd sizes.
+fn read_bounded(path: &Path) -> Option<Vec<u8>> {
+    let size = std::fs::metadata(path).ok()?.len();
+    if size == 0 || size > MAX_FONT_FILE_BYTES {
+        return None;
+    }
+    std::fs::read(path).ok()
 }
 
 #[cfg(test)]
@@ -347,5 +402,30 @@ mod tests {
         touch(&text);
         assert!(inspect_font_file(&text).is_none());
         assert!(inspect_font_file(&tmp.path().join("missing.ttf")).is_none());
+    }
+
+    #[test]
+    fn fallback_prefers_system_files_and_falls_back_to_bundled() {
+        let system = [bundled_fonts_dir()];
+        let empty: [PathBuf; 0] = [];
+        let face = resolve_fallback("Helvetica-Bold", &system).expect("a face");
+        assert_eq!(face.source, FaceSource::System);
+        assert_eq!(
+            face.bytes,
+            crate::substitute("Helvetica-Bold").unwrap_or_default(),
+            "the system file is the same program the bundle carries"
+        );
+        assert!(
+            !face.family.is_empty(),
+            "the notice names the program's own family"
+        );
+
+        let bundled = resolve_fallback("Helvetica-Bold", &empty).expect("a face");
+        assert_eq!(bundled.source, FaceSource::Bundled);
+        assert_eq!(bundled.bytes, face.bytes);
+        assert_eq!(bundled.family, "LiberationSans");
+
+        assert!(resolve_fallback("NoSuchFont", &system).is_none());
+        assert!(resolve_fallback("NoSuchFont", &empty).is_none());
     }
 }
