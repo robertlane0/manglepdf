@@ -38,7 +38,7 @@ The spine is where the architecture is decided, so it is built first and deeply.
 | **M2** | Interpreter, paths/clips/text, tiles, viewer shell with thumbnails/zoom/nav | M2 exit: F31 p1 composition | **Mostly done** |
 | **M3** | All fonts + CMaps, colour spaces, patterns, shadings, transparency, CCITT/JBIG2/JPX, OCGs | Gate 3 render fidelity | **Substantially done** (Type 3, all 16 blend modes, and `ToUnicode` landed) |
 | **M4** | Page objects + provenance, select/move/scale/delete/recolour/Arrange, undo/redo, first save→reopen-elsewhere loop | U1/U2/U3 | **Done** |
-| **M5** | Text model, editing, reflow, font resolution/embedding/`ToUnicode`, Text Properties panel | Gauntlet S1 | **Substantially done** |
+| **M5** | Text model, editing, reflow, font resolution/embedding/`ToUnicode`, Text Properties panel | Gauntlet S1 | **Done at engine level** |
 | **M6** | AP generators, foreign annotations, comments, add text/image/shape/link, header/footer/watermark, flatten | Gauntlet S3–S5 | **Substantially done** |
 | **M7** | Fill, calculation/format/validate, Prepare Form, FDF/XFDF | Gauntlet S6 | **Substantially done** (`mangle-edit::forms` landed) |
 | **M8** | Organizer, import/merge/split, retargeting | Gauntlet S7 | **Substantially done** (`mangle-edit::organize` landed) |
@@ -62,16 +62,16 @@ The spine is where the architecture is decided, so it is built first and deeply.
   - Tokeniser and interpreter with byte-span provenance, Form XObject recursion (`MAX_FORM_DEPTH = 12`), and all 4 PDF function types.
   - Analytic scanline rasterizer, per-pixel region clips (`W`/`W*`), all 16 PDF blend modes (12 separable + 4 non-separable `Hue`/`Saturation`/`Color`/`Luminosity`), Device/Cal/ICCBased/Indexed/Separation/DeviceN/Pattern colour spaces, axial/radial shadings, tiled patterns (`PaintType` 1 & 2), images with `/Decode`/`/ImageMask`/`/SMask` and pre-allocation bounds checks ([D18](docs/known-diffs.md#d18--an-smask-was-never-checked-against-the-image-it-masks-and-a-hostile-one-cost-a-gigabyte)), and annotation `/AP /N` rendering.
   - `PageModel` grouping, byte-range `surgery` with `q`/`Q` balance checks, surgical `edits` (move, scale, rotate, delete, recolour, crop, text state `Tf`/`Tc`/`Tw`/`Tz`/`TL`/`Ts`/`Tr`), `arrange` z-order movement with state re-materialisation, bounded `Arc`-snapshot `History`, and `Editor` session.
-  - Text retyping across rungs 1–3 (`Change::Retype` in own simple or `/Type0` font via `/ToUnicode`, `Change::RetypeFace` in same-family document font, own-`/FontFile2` subset re-embedding with no notice, and `Change::RetypeIn` with bundled TrueType subset and status-bar notice) plus `replace_with_live_text` for Type 3 bitmap fonts.
+  - Text retyping across rungs 1–3 (`Change::Retype` in own simple or `/Type0` font via `/ToUnicode`, `Change::RetypeFace` in same-family document font, own-`/FontFile2` subset re-embedding with no notice, and `Change::RetypeIn` with bundled TrueType subset and status-bar notice) plus `replace_with_live_text` for Type 3 bitmap fonts, and paragraph `reflow` (`layout_paragraph`, `reflow_patches` with `Left`/`Center`/`Right`/`Justify` and overflow flag) plus shared-Form `inspect_shared_form`/`edit_shared_form` copy-on-write.
   - Annotations, `/AP /N` appearance generation (`Highlight` with `/BM /Multiply`, `Underline`, `StrikeOut`, `Squiggly`, `StickyNote` + `Popup` + `/IRT` replies, Unicode `FreeText`, `Line`/`Square`/`Circle`/`Polygon`/`PolyLine`/`Ink`/`Stamp`/`Caret`/`Link`/`Redact`), XFDF export/import, `/Artifact` headers/footers/watermarks, and pixel-equivalent idempotent `flatten_page` (`All`, `MarkupOnly`, `FormsOnly`, by index, `Hidden`/`NoView` skipping, and signed-document confirmation).
 
 ## Active & upcoming work queue
 
-1. **Finish M5 (Text editing & reflow):**
-   - Paragraph/block width reflow and alignment (`Left`, `Center`, `Right`, `Justify` via `Tw` / line positioning) when inserted or deleted text changes line length (S1.9).
+1. **Finish M5 UI remains (engine done):**
+   - Paragraph/block width reflow and alignment (`Left`, `Center`, `Right`, `Justify` via `Tw` / line positioning) when inserted or deleted text changes line length (S1.9) — engine landed in `mangle-edit::reflow`.
    - Paragraph deletion cleanup ensuring `BT`/`ET` and `q`/`Q` remain balanced without shifting unrelated blocks (S1.10).
-   - Shared Form XObject copy-on-write ("edit this page only" vs "edit everywhere", S1.15).
-   - Custom `--font-dirs` fallback discovery for missing fonts (S1.3).
+   - Shared Form XObject copy-on-write ("edit this page only" vs "edit everywhere", S1.15) — engine landed (`inspect_shared_form`, `edit_shared_form`); UI prompt wiring remains.
+   - Custom `--font-dirs` fallback discovery for missing fonts (S1.3) and font/colour pickers in the Text Properties panel.
 2. **Close open M2/M3 rendering items:**
    - Preserve open vs closed subpath state through `transform_path` and `Device::stroke_outline` so open polylines of ≥3 points do not close as rings ([D14](docs/known-diffs.md)).
    - Execute Type 3 glyph procedures (`/CharProcs`, `/FontMatrix`, `/Resources`) with recursion depth bound (`MAX_TYPE3_DEPTH`) in `mangle-render`.

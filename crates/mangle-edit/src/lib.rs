@@ -28,6 +28,7 @@ pub mod history;
 pub mod organize;
 pub mod page_objects;
 pub mod protect;
+pub mod reflow;
 pub mod session;
 pub mod surgery;
 pub mod writeback;
@@ -72,6 +73,10 @@ pub use protect::{
     RedactionOptions, RedactionReport, SanitizeReport, SignatureSpec, SignatureStatus,
     apply_redactions, leak_scan, mark_redaction_rect, remove_security, sanitize_document,
     sign_document, verify_signatures,
+};
+pub use reflow::{
+    LaidOutLine, ReflowLayout, SharedFormInfo, SharedFormScope, TextAlignment, edit_shared_form,
+    inspect_shared_form, layout_paragraph, measure_space, measure_word, reflow_patches,
 };
 pub use session::{Editor, InstallError, OpenError, Outcome, Reason, SessionError};
 pub use surgery::{Applied, EditError, Patch};
