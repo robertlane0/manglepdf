@@ -90,12 +90,16 @@ impl PageRender {
 }
 
 /// How a page should be drawn.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderOptions {
     /// The desired pixels per point. Clamped to [`MAX_SCALE`].
     pub scale: f64,
     /// The paper colour, which is white unless the file says otherwise.
     pub paper: [u8; 4],
+    /// Replacement system font directories (`--font-dirs`), consulted before the
+    /// bundled faces when a font is not embedded. Empty is bundled-only, which
+    /// is also what every existing caller constructs.
+    pub font_dirs: Vec<std::path::PathBuf>,
 }
 
 impl Default for RenderOptions {
@@ -103,6 +107,7 @@ impl Default for RenderOptions {
         Self {
             scale: 1.0,
             paper: [255, 255, 255, 255],
+            font_dirs: Vec::new(),
         }
     }
 }
@@ -283,6 +288,7 @@ fn paint_annotations(
     placement: &Placement,
     device: &mut Device,
     notes: &mut Vec<String>,
+    system_dirs: &[std::path::PathBuf],
 ) {
     for (index, annot) in page.annots(doc).iter().enumerate() {
         let Some(object) = doc.resolve_object(annot) else {
@@ -477,7 +483,15 @@ fn paint_annotations(
             matrix: placement.matrix.concat(to_rect),
             size: placement.size,
         };
-        paint_records(&executed, device, &annot_placement, &own, doc, notes);
+        paint_records(
+            &executed,
+            device,
+            &annot_placement,
+            &own,
+            doc,
+            notes,
+            system_dirs,
+        );
     }
 }
 
@@ -590,12 +604,20 @@ pub fn render_page(
             resources,
             doc,
             &mut render.notes,
+            &options.font_dirs,
         );
     }
     // Annotations are drawn after the page's own content, in the order the page lists them,
     // and into the same device — so an annotation's ink lands on top of the text it annotates,
     // which is what a highlight is for.
-    paint_annotations(doc, page, &placement, &mut device, &mut render.notes);
+    paint_annotations(
+        doc,
+        page,
+        &placement,
+        &mut device,
+        &mut render.notes,
+        &options.font_dirs,
+    );
     render.image = device.into_image();
     render
 }
@@ -615,8 +637,18 @@ fn paint_records(
     resources: &Resources,
     doc: &Document,
     notes: &mut Vec<String>,
+    system_dirs: &[std::path::PathBuf],
 ) -> usize {
-    paint_records_at(executed, device, placement, resources, doc, notes, 0)
+    paint_records_at(
+        executed,
+        device,
+        placement,
+        resources,
+        doc,
+        notes,
+        system_dirs,
+        0,
+    )
 }
 
 /// Maximum recursion depth for Type 3 glyph procedures (`ContentStreamCycleType3insideType3`).
@@ -629,6 +661,7 @@ fn paint_records_at(
     resources: &Resources,
     doc: &Document,
     notes: &mut Vec<String>,
+    system_dirs: &[std::path::PathBuf],
     type3_depth: usize,
 ) -> usize {
     let mut drawn = 0usize;
@@ -642,7 +675,8 @@ fn paint_records_at(
     let mut lookup = |name: &str, in_resources: &Resources| image_for(name, in_resources, doc);
     let mut shade_lookup =
         |name: &str, in_resources: &Resources| shading_for(name, in_resources, doc);
-    let mut font_lookup = |name: &str, in_resources: &Resources| font_for(name, in_resources, doc);
+    let mut font_lookup =
+        |name: &str, in_resources: &Resources| font_for(name, in_resources, doc, system_dirs);
     let mut installed: Option<mangle_content::Clip> = None;
     for record in &executed.records {
         if installed.as_ref() != record.clip.as_ref() {
@@ -670,6 +704,7 @@ fn paint_records_at(
             &mut font_lookup,
             named_in,
             doc,
+            system_dirs,
             type3_depth,
         );
         drawn += 1;
@@ -997,6 +1032,7 @@ fn pattern_fill(
     resources: &Resources,
     doc: &Document,
     placement: &Matrix,
+    system_dirs: &[std::path::PathBuf],
     _uncoloured: Option<Rgba>,
 ) -> Result<FillColour, String> {
     let op = paint.name();
@@ -1004,7 +1040,15 @@ fn pattern_fill(
     match source.kind {
         PatternKind::Shading => {}
         PatternKind::Tiling => {
-            return tiling_fill(op, name, resources, doc, placement, _uncoloured);
+            return tiling_fill(
+                op,
+                name,
+                resources,
+                doc,
+                placement,
+                system_dirs,
+                _uncoloured,
+            );
         }
         PatternKind::Other(kind) => {
             return Err(format!(
@@ -1047,6 +1091,7 @@ fn tiling_fill(
     resources: &Resources,
     doc: &Document,
     placement: &Matrix,
+    system_dirs: &[std::path::PathBuf],
     uncoloured: Option<Rgba>,
 ) -> Result<FillColour, String> {
     let Some(object) = resources.patterns.get(name).cloned() else {
@@ -1117,6 +1162,7 @@ fn tiling_fill(
         scale,
         cell_w,
         cell_h,
+        system_dirs,
     )?;
 
     Ok(FillColour::Tiling {
@@ -1153,6 +1199,7 @@ fn render_cell(
     scale: f64,
     cell_w: usize,
     cell_h: usize,
+    system_dirs: &[std::path::PathBuf],
 ) -> Result<Image, String> {
     let decoded = decode_stream(stream);
     if decoded.encoded {
@@ -1206,6 +1253,7 @@ fn render_cell(
         &own,
         doc,
         &mut notes,
+        system_dirs,
     );
     let image = device.into_image();
     for note in &notes {
@@ -1437,7 +1485,12 @@ impl std::fmt::Debug for FontProgram {
 /// document that names one without embedding it is a document whose glyphs come from
 /// somewhere else — a substitution, or a font of its own that this does not draw. Either way
 /// the reason belongs in the report, and the page is still worth showing.
-fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontProgram, String> {
+fn font_for(
+    name: &str,
+    resources: &Resources,
+    doc: &Document,
+    system_dirs: &[std::path::PathBuf],
+) -> Result<FontProgram, String> {
     let Some(object) = resources.fonts.get(name).cloned() else {
         return Err(format!(
             "the page names a font `/{name}` that its resources do not define"
@@ -1500,7 +1553,7 @@ fn font_for(name: &str, resources: &Resources, doc: &Document) -> Result<FontPro
         // `Ok(None)` is "nothing to stand in", which leaves the reason below. `Err` is a
         // fault in the bundle rather than in the document, so it says so and is not folded
         // into the document's own finding.
-        match substitute_for(name, &font, composite, doc) {
+        match substitute_for(name, &font, composite, doc, system_dirs) {
             Ok(Some(program)) => return Ok(program),
             Err(why) => return Err(why),
             Ok(None) => {}
@@ -1591,11 +1644,13 @@ fn encoding_for(font: &Dict, composite: bool, doc: &Document) -> mangle_font::En
 /// naming nothing. Refusing it draws a page with a hole where the text was, and that is a
 /// worse answer than drawing the text in a face that agrees about every width.
 ///
-/// The name goes to [`mangle_font::substitute`] whole, which is where the subset prefix
+/// The name goes to [`mangle_font::resolve_fallback`] whole, which is where the subset prefix
 /// (`ABCDEF+`), the style suffix and the older comma spelling are already dealt with, so
 /// there is no second name parser here that can disagree with the first. A name with no
 /// metric-compatible stand-in — `Symbol`, `ZapfDingbats`, anything non-standard — answers
-/// `None`, and the refusal is then free to say so.
+/// `None`, and the refusal is then free to say so. Configured `--font-dirs` files are
+/// consulted before the bundled faces; with none configured the answer is the bundled
+/// one, exactly as before.
 ///
 /// The substitution is reported rather than made quietly: `substituted` carries the notice
 /// so the page can name the face standing in, which is the one fact about this that a user
@@ -1605,6 +1660,7 @@ fn substitute_for(
     font: &Dict,
     composite: bool,
     doc: &Document,
+    system_dirs: &[std::path::PathBuf],
 ) -> Result<Option<FontProgram>, String> {
     // A composite font's codes are CIDs the document chose itself, so a simple face is not a
     // stand-in for one however well the widths happen to agree.
@@ -1615,22 +1671,30 @@ fn substitute_for(
         return Ok(None);
     };
     let base = String::from_utf8_lossy(base).into_owned();
-    let Some(bytes) = mangle_font::substitute(&base) else {
+    let Some(face) = mangle_font::resolve_fallback(&base, system_dirs) else {
         return Ok(None);
     };
-    let mut program = mangle_font::Program::new(bytes.to_vec());
+    let mut program = mangle_font::Program::new(face.bytes);
     let units_per_em = program
         .inspect()
         .map_err(|why| format!("the face that stands in for `{base}` {why}"))?;
+    let notice = match face.source {
+        mangle_font::FaceSource::System => format!(
+            "the font `/{name}` is not embedded, so the system face `{}` stands in for \
+             `/{}`, from `--font-dirs`",
+            face.family, base
+        ),
+        mangle_font::FaceSource::Bundled => format!(
+            "the font `/{name}` is not embedded, so a metric-compatible face stands in for \
+             `/{base}`: the glyphs are that face's, not the original's"
+        ),
+    };
     Ok(Some(FontProgram {
         program,
         units_per_em,
         encoding: encoding_for(font, composite, doc),
         cid_to_gid: mangle_font::CidToGid::Identity,
-        substituted: Some(format!(
-            "the font `/{name}` is not embedded, so a metric-compatible face stands in for \
-             `/{base}`: the glyphs are that face's, not the original's"
-        )),
+        substituted: Some(notice),
     }))
 }
 
@@ -1748,6 +1812,7 @@ fn draw_mark(
     // information, taken directly, because it is needed in three arms rather than in one.
     resources: &Resources,
     doc: &Document,
+    system_dirs: &[std::path::PathBuf],
     type3_depth: usize,
 ) {
     match mark {
@@ -1796,6 +1861,7 @@ fn draw_mark(
                                 resources,
                                 doc,
                                 placement,
+                                system_dirs,
                                 colour.to_rgba(None),
                             ),
                     ) {
@@ -1832,7 +1898,15 @@ fn draw_mark(
                 // strokes came out blank.
                 if colour.space.name == "Pattern" {
                     match pattern_name(colour).and_then(|name| {
-                        pattern_fill(Paint::Stroke, name, resources, doc, placement, None)
+                        pattern_fill(
+                            Paint::Stroke,
+                            name,
+                            resources,
+                            doc,
+                            placement,
+                            system_dirs,
+                            None,
+                        )
                     }) {
                         Ok(paint) => {
                             fill::stroke(
@@ -1922,7 +1996,15 @@ fn draw_mark(
                             // is used, and a `Pattern` colour space has replaced that colour by
                             // now, so there is nothing here to give it. Refused by name in
                             // `tiling_fill` rather than guessed at.
-                            pattern_fill(Paint::Fill, name, resources, doc, placement, None)
+                            pattern_fill(
+                                Paint::Fill,
+                                name,
+                                resources,
+                                doc,
+                                placement,
+                                system_dirs,
+                                None,
+                            )
                         }) {
                             Ok(paint) => Some(paint),
                             Err(reason) => {
@@ -1995,6 +2077,7 @@ fn draw_mark(
                         resources,
                         doc,
                         notes,
+                        system_dirs,
                         type3_depth,
                     );
                     return;
@@ -2108,6 +2191,7 @@ fn draw_type3_glyphs(
     resources: &Resources,
     doc: &Document,
     notes: &mut Vec<String>,
+    system_dirs: &[std::path::PathBuf],
     type3_depth: usize,
 ) {
     if type3_depth >= MAX_TYPE3_DEPTH {
@@ -2197,6 +2281,7 @@ fn draw_type3_glyphs(
             &type3_resources,
             doc,
             notes,
+            system_dirs,
             type3_depth + 1,
         );
     }
@@ -3555,7 +3640,7 @@ mod tests {
         resources_dict.set("Font", Object::Dict(font_table));
         let resources = Resources::from_dict(&resources_dict, &|o| Some(o.clone()));
 
-        let reason = font_for("T3", &resources, &doc).expect_err("a Type 3 font is refused");
+        let reason = font_for("T3", &resources, &doc, &[]).expect_err("a Type 3 font is refused");
         assert!(
             reason.contains("Type 3"),
             "the reason must name the kind of font, so a reader does not go looking for an \
@@ -3617,6 +3702,7 @@ mod tests {
             &resources,
             &doc,
             &mut notes,
+            &[],
         );
         let img = device.into_image();
         let inked = img.pixels.chunks_exact(4).filter(|px| px[0] < 128).count();
@@ -3636,6 +3722,7 @@ mod tests {
             &resources,
             &doc,
             &mut cycle_notes,
+            &[],
         );
         assert!(
             cycle_notes.iter().any(|n| n.contains("nested deeper than")),

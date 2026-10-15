@@ -71,7 +71,7 @@ The spine is where the architecture is decided, so it is built first and deeply.
    - Paragraph/block width reflow and alignment (`Left`, `Center`, `Right`, `Justify` via `Tw` / line positioning) when inserted or deleted text changes line length (S1.9) — engine landed in `mangle-edit::reflow`.
    - Paragraph deletion cleanup ensuring `BT`/`ET` and `q`/`Q` remain balanced without shifting unrelated blocks (S1.10).
    - Shared Form XObject copy-on-write ("edit this page only" vs "edit everywhere", S1.15) — engine landed (`inspect_shared_form`, `edit_shared_form`); UI prompt wiring remains.
-   - Custom `--font-dirs` fallback discovery for missing fonts (S1.3): flag parsing and the fallback resolver (`discover_font_files`, `inspect_font_file`, `find_system_font`, system-first `resolve_fallback`) landed; threading configured directories into the render/edit call sites and font/colour pickers in the Text Properties panel remain.
+   - Custom `--font-dirs` fallback discovery for missing fonts (S1.3): flag parsing, the fallback resolver, and render threading (`RenderOptions::font_dirs` through page, annotation, pattern-cell, and Type 3 paths into `substitute_for`) landed; threading configured directories into the edit call sites and font/colour pickers in the Text Properties panel remain.
 2. **Close open M2/M3 rendering items:**
    - Transparency groups, blend modes, and OCG visibility toggling in the renderer (`S0.3`).
    - Sidebar thumbnail navigation and Bookmarks/Layers panels in `mangle-ui` (`S0.1`–`S0.3`).

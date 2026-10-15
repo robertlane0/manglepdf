@@ -6975,6 +6975,63 @@ fn a_metric_compatible_alias_draws_exactly_as_the_family_it_stands_in_for() {
     }
 }
 
+fn render_with_dirs(bytes: Vec<u8>, scale: f64, dirs: &[PathBuf]) -> mangle_render::PageRender {
+    let doc = open(bytes);
+    let all = pages(&doc);
+    let page = all.first().expect("a page");
+    let resources = page
+        .inherited
+        .resources
+        .as_ref()
+        .and_then(|o| doc.resolve_object(o))
+        .and_then(|o| o.as_dict().cloned())
+        .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+        .unwrap_or_default();
+    render_page(
+        &doc,
+        page,
+        &resources,
+        RenderOptions {
+            scale,
+            font_dirs: dirs.to_vec(),
+            ..RenderOptions::default()
+        },
+    )
+}
+
+/// A configured `--font-dirs` file is used before the bundled face.
+///
+/// The repository's own bundled directory stands in as the configured one: it
+/// holds the same programs the bundle carries, so the assertion is that the
+/// system path draws *exactly* what the bundled path draws — same pixels — and
+/// the notice says where the face came from. With no directories the notice is
+/// the long-standing bundled wording, byte for byte.
+#[test]
+fn a_configured_font_dir_is_used_before_the_bundled_face() {
+    let scale = 4.0;
+    let dirs = [PathBuf::from("../../assets/fonts")];
+    let bytes = unembedded_standard_page("Helvetica-Bold", "WiWi", 48.0, 10.0);
+    let bundled = render(bytes.clone(), scale);
+    let system = render_with_dirs(bytes, scale, &dirs);
+    assert_eq!(
+        system.image.pixels, bundled.image.pixels,
+        "the system file is the same program, so it draws the same pixels"
+    );
+    assert!(
+        system.notes.iter().any(|note| note.contains("--font-dirs")),
+        "the system substitution must say where it came from: {:?}",
+        system.notes
+    );
+    assert!(
+        bundled.notes.iter().any(|note| note.contains(
+            "a metric-compatible face stands in for `/Helvetica-Bold`: the glyphs are that \
+             face's, not the original's"
+        )),
+        "with no directories the bundled notice is unchanged: {:?}",
+        bundled.notes
+    );
+}
+
 /// A name that stands in for nothing is still reported rather than drawn in someone's letters.
 ///
 /// The companion to the test above, and the one that keeps the alias table from growing: a
