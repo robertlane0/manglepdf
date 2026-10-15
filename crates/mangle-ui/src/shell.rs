@@ -1209,6 +1209,7 @@ impl App {
         // borrow began — so the clicks are remembered here and acted on after the loop.
         let mut clicked: Option<(mangle_edit::TextProperty, f64)> = None;
         let mut clicked_do: Option<panel::Do> = None;
+        let mut clicked_align: Option<mangle_edit::TextAlignment> = None;
         // Where the content field is, remembered for after the loop: the field needs the
         // buffer mutable while the loop holds the selection borrowed, and the two cannot
         // overlap.
@@ -1256,6 +1257,54 @@ impl App {
                 }
                 PanelRow::Hex { hex } => {
                     hex_field = Some((field, hex));
+                }
+                PanelRow::Align => {
+                    // Four segments sharing the field, each drawn as three text
+                    // lines in its own alignment — the mockup's metaphors, painted
+                    // rather than fonted, so the control needs no glyph the UI
+                    // font may lack. Stateless: the file holds no alignment, so
+                    // no segment shows active.
+                    let quarter = field.width() / 4.0;
+                    for (i, alignment) in panel::ALIGN_SEGMENTS.into_iter().enumerate() {
+                        let part = egui::Rect::from_min_size(
+                            egui::pos2(field.left() + quarter * i as f32, field.top()),
+                            egui::vec2(quarter, field.height()),
+                        );
+                        if hovered(ui, part) {
+                            p.rect_filled(part, s.field_radius, t.hover);
+                        }
+                        let inset = 5.0;
+                        let (x0, x1) = (part.left() + inset, part.right() - inset);
+                        let w = (x1 - x0).max(1.0);
+                        // Three lines per segment; the last of a justified block is
+                        // short and left, as the layout lays it.
+                        let lines: [[f32; 2]; 3] = match alignment {
+                            mangle_edit::TextAlignment::Left => {
+                                [[x0, x0 + w * 0.55], [x0, x0 + w * 0.8], [x0, x0 + w * 0.45]]
+                            }
+                            mangle_edit::TextAlignment::Center => [
+                                [x0 + w * 0.2, x0 + w * 0.8],
+                                [x0 + w * 0.1, x0 + w * 0.9],
+                                [x0 + w * 0.25, x0 + w * 0.75],
+                            ],
+                            mangle_edit::TextAlignment::Right => {
+                                [[x0 + w * 0.45, x1], [x0 + w * 0.2, x1], [x0 + w * 0.55, x1]]
+                            }
+                            mangle_edit::TextAlignment::Justify => {
+                                [[x0, x1], [x0, x1], [x0, x0 + w * 0.45]]
+                            }
+                        };
+                        for (j, [a, b]) in lines.into_iter().enumerate() {
+                            let y = field.top() + field.height() * (j as f32 + 1.0) / 4.0;
+                            p.line(
+                                vec![egui::pos2(a, y), egui::pos2(b, y)],
+                                egui::Stroke::new(2.0, t.text_muted),
+                            );
+                        }
+                        if hovered(ui, part) && ui.ctx().input(|k| k.pointer.any_released()) {
+                            clicked_align = Some(alignment);
+                        }
+                    }
                 }
                 PanelRow::Value(value) => {
                     p.text(
@@ -1315,6 +1364,15 @@ impl App {
         }
         if let Some(do_) = clicked_do {
             self.act(do_);
+        }
+        if let Some(alignment) = clicked_align
+            && let Some(object) = self.selected
+        {
+            self.worker.ask(Job::Edit {
+                page: self.state.page_index,
+                object,
+                request: EditRequest::Align { alignment },
+            });
         }
 
         // The content field, where a run's text is retyped. Drawn after the loop in a real

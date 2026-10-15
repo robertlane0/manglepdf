@@ -58,6 +58,12 @@ pub enum PanelRow {
         /// The fill as the panel shows it.
         hex: String,
     },
+    /// Four alignment segments sharing one row: left, centre, right, justify.
+    ///
+    /// Stateless — alignment is layout, not an operator, so the file holds no
+    /// current value to show. Clicking a segment asks the worker to relay out
+    /// the block that way.
+    Align,
     /// A row with nothing to say yet: a field with no value in it.
     Empty,
 }
@@ -205,6 +211,8 @@ pub fn panel_row(
                 Some(hex) => PanelRow::Hex { hex },
                 None => PanelRow::Empty,
             },
+            // The alignment segments. Stateless: the file holds no alignment to show.
+            5 => PanelRow::Align,
             _ => PanelRow::Empty,
         };
     };
@@ -301,6 +309,17 @@ pub fn stepped(property: TextProperty, state: &TextState, by: f64) -> Option<Tex
     }
     property.with_value(current + by)
 }
+/// The alignment each quarter of the segmented control asks for, left to right.
+///
+/// Beside the shell code that draws the quarters in this order: a segment moved
+/// without its meaning is a control that lies about what it does, and nothing
+/// else would notice.
+pub const ALIGN_SEGMENTS: [mangle_edit::TextAlignment; 4] = [
+    mangle_edit::TextAlignment::Left,
+    mangle_edit::TextAlignment::Center,
+    mangle_edit::TextAlignment::Right,
+    mangle_edit::TextAlignment::Justify,
+];
 /// Which panel a selection opens.
 ///
 /// The panel is contextual — it is about what is selected — so a click on a run of text has to
@@ -483,6 +502,25 @@ mod tests {
         );
     }
 
+    /// The alignment segments run left to right in layout order.
+    ///
+    /// The shell draws the quarters in this order beside the decision, so a
+    /// segment moved without its meaning is a control that lies about what it
+    /// does, and nothing else would notice.
+    #[test]
+    fn alignment_segments_run_left_to_right() {
+        use mangle_edit::TextAlignment;
+        assert_eq!(
+            ALIGN_SEGMENTS,
+            [
+                TextAlignment::Left,
+                TextAlignment::Center,
+                TextAlignment::Right,
+                TextAlignment::Justify,
+            ]
+        );
+    }
+
     /// Every label names the control beside it.
     ///
     /// The panel once listed the mockup's nouns in the mockup's order while the
@@ -514,6 +552,7 @@ mod tests {
                 PanelRow::Value(_) => "value",
                 PanelRow::Stepper { .. } => "stepper",
                 PanelRow::Hex { .. } => "hex",
+                PanelRow::Align => "align",
                 PanelRow::Empty => "blank",
             };
             let (want_label, want_kind) = match row {
@@ -522,7 +561,7 @@ mod tests {
                 2 => ("Style", "blank"),
                 3 => ("Size", "stepper"),
                 4 => ("Colour", "hex"),
-                5 => ("Alignment", "blank"),
+                5 => ("Alignment", "align"),
                 6 => ("Line Spacing", "stepper"),
                 7 => ("Character Spacing", "stepper"),
                 8 => ("Baseline Shift", "stepper"),
