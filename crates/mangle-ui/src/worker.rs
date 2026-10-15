@@ -192,6 +192,26 @@ pub enum JobResult {
         /// What the status line shows about a substitution, if the edit made one.
         notice: Option<String>,
     },
+    /// An edit hit an object drawn inside a form used on several pages.
+    ///
+    /// Nothing was written: the scope choice (this page only or everywhere) is
+    /// the user's, so the window asks with a prompt and sends `Job::EditShared`.
+    /// The request travels back untouched so the prompt answers the edit that
+    /// was actually asked for.
+    SharePrompt {
+        /// Which page the object was selected on.
+        page: usize,
+        /// Which object, in the session model.
+        object: usize,
+        /// The edit that was asked for.
+        request: EditRequest,
+        /// The form, as the `Do` named it.
+        form: String,
+        /// The pages using it, from zero.
+        pages: Vec<usize>,
+        /// What the prompt says, naming the form and its pages.
+        prompt: String,
+    },
     /// The file could not be opened, or the job could not be done.
     Failed {
         /// What went wrong, in a sentence a user can read.
@@ -388,6 +408,9 @@ impl Worker {
         };
         let notice = match editor.apply(object, &change) {
             Ok(outcome) => outcome.notice,
+            Err(mangle_edit::SessionError::Change(mangle_edit::ChangeError::Refused(
+                mangle_edit::Refusal::InsideForm { form },
+            ))) => return self.form_choice(outbox, page, object, request, form),
             Err(e) => {
                 let _ = outbox.send(JobResult::Failed {
                     reason: e.to_string(),
@@ -396,6 +419,62 @@ impl Worker {
             }
         };
         self.save_and_redraw(outbox, page, notice);
+    }
+
+    /// Route an edit that landed inside a form: prompt when the form is shared,
+    /// apply everywhere when it is used once.
+    ///
+    /// A form on one page has no scope to choose — editing it in place is the
+    /// same drawing either way — so only a form on several pages interrupts with
+    /// a prompt. Either way nothing is written here: the prompt answers with a
+    /// scoped job, and the single-use form takes the everywhere scope directly.
+    fn form_choice(
+        &mut self,
+        outbox: &Sender<JobResult>,
+        page: usize,
+        object: usize,
+        request: &EditRequest,
+        form: String,
+    ) {
+        let (Some(page_dict), Some(_)) = (self.pages.get(page), self.resources.get(page)) else {
+            let _ = outbox.send(JobResult::Failed {
+                reason: format!("this document has no page {}", page + 1),
+            });
+            return;
+        };
+        let info = match mangle_edit::inspect_shared_form(self.doc.as_ref(), page_dict, &form) {
+            Ok(info) => info,
+            Err(e) => {
+                let _ = outbox.send(JobResult::Failed {
+                    reason: e.to_string(),
+                });
+                return;
+            }
+        };
+        if info.pages_using.len() < 2 {
+            self.edit_shared(
+                outbox,
+                page,
+                object,
+                request,
+                mangle_edit::SharedFormScope::Everywhere,
+            );
+            return;
+        }
+        let prompt = info.prompt.unwrap_or_else(|| {
+            format!(
+                "Form XObject /{form} is used on {} pages; edit on this page only or everywhere?",
+                info.pages_using.len()
+            )
+        });
+        let _ = outbox.send(JobResult::SharePrompt {
+            page,
+            object,
+            request: request.clone(),
+            form,
+            pages: info.pages_using,
+            prompt,
+        });
     }
 
     /// Edit an object drawn inside a shared form, then draw the file as saved.
@@ -834,6 +913,7 @@ mod tests {
                 } => page = Some((index, width, height, objects.len())),
                 JobResult::Failed { reason } => panic!("the worker failed: {reason}"),
                 JobResult::Saved { .. } => {}
+                JobResult::SharePrompt { .. } => panic!("unexpected share prompt"),
             }
         }
         let (name, pages) = opened.expect("the file opened");
@@ -1005,13 +1085,33 @@ mod tests {
             object: at,
             request: EditRequest::Move { dx: 9.0, dy: 0.0 },
         });
-        let mut refused = false;
+        let mut prompted = None;
         for result in collect(&supervisor, 1) {
-            if let JobResult::Failed { reason } = result {
-                refused = reason.contains("Fm0");
+            match result {
+                JobResult::SharePrompt {
+                    form,
+                    pages,
+                    prompt,
+                    request,
+                    ..
+                } => {
+                    prompted = Some((form, pages, prompt, request));
+                }
+                JobResult::Failed { reason } => panic!("the prompt failed: {reason}"),
+                JobResult::Opened { .. } | JobResult::Page { .. } | JobResult::Saved { .. } => {}
             }
         }
-        assert!(refused, "the scopeless edit names the form it cannot touch");
+        let (form, pages, prompt, request) = prompted.expect("the scopeless edit prompts");
+        assert_eq!(form, "Fm0");
+        assert_eq!(pages, vec![0, 1], "both pages share the form");
+        assert!(
+            prompt.contains("2 pages"),
+            "the prompt names the sharing: {prompt}"
+        );
+        assert!(
+            matches!(request, EditRequest::Move { .. }),
+            "the prompt echoes the edit that was asked for"
+        );
         supervisor.ask(Job::EditShared {
             page: 0,
             object: at,
@@ -1029,6 +1129,7 @@ mod tests {
                 JobResult::Page { .. } => redrawn = true,
                 JobResult::Failed { reason } => panic!("the scoped edit failed: {reason}"),
                 JobResult::Opened { .. } => {}
+                JobResult::SharePrompt { .. } => panic!("a scoped edit does not prompt"),
             }
         }
         std::fs::remove_file(&path).ok();
@@ -1076,6 +1177,7 @@ mod tests {
                 }
                 JobResult::Failed { reason } => panic!("the edit failed: {reason}"),
                 JobResult::Opened { .. } => {}
+                JobResult::SharePrompt { .. } => panic!("unexpected share prompt"),
             }
         }
         assert!(saved.is_some(), "the edit was saved");
@@ -1400,6 +1502,7 @@ mod tests {
                 JobResult::Page { objects, .. } => after = Some(objects),
                 JobResult::Failed { reason } => panic!("the arrange failed: {reason}"),
                 JobResult::Opened { .. } => {}
+                JobResult::SharePrompt { .. } => panic!("unexpected share prompt"),
             }
         }
         assert!(saved.is_some(), "the arrange was saved");

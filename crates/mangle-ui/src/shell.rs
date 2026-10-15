@@ -151,6 +151,24 @@ impl DrawnPage {
     }
 }
 
+/// A shared-form choice waiting on the user: the edit that was asked for, and
+/// where it may go.
+#[derive(Debug, Clone)]
+struct PendingShare {
+    /// Which page the object was selected on.
+    page: usize,
+    /// Which object, in the session model.
+    object: usize,
+    /// The edit that prompted.
+    request: EditRequest,
+    /// The form, as the `Do` named it.
+    form: String,
+    /// The pages using it, from zero.
+    pages: Vec<usize>,
+    /// What the prompt says.
+    prompt: String,
+}
+
 /// The application: the theme, the state, the worker and the pages it has drawn.
 ///
 /// `Debug` by hand rather than derived: a `Supervisor` holds a channel to a thread and a `Pages`
@@ -183,6 +201,8 @@ pub struct App {
     /// buffer shape as the retype field, because the resync and commit rules
     /// are the same and only what a commit asks the worker differs.
     hex: Retype,
+    /// A shared-form scope choice waiting on the user, if the last edit hit one.
+    share: Option<PendingShare>,
     /// Whether the window has left the desktop, which is the one piece of windowing state the
     /// shell has to keep: the toggle is sent to the frame, and the frame does not answer back.
     full_screen: bool,
@@ -306,6 +326,7 @@ impl std::fmt::Debug for App {
             .field("search", &self.search)
             .field("retype", &self.retype)
             .field("hex", &self.hex)
+            .field("share", &self.share)
             .field("full_screen", &self.full_screen)
             .field("state", &self.state)
             .field("pages", &self.pages.len())
@@ -373,6 +394,7 @@ impl App {
             search: Search::default(),
             retype: Retype::default(),
             hex: Retype::default(),
+            share: None,
             full_screen: false,
         }
     }
@@ -387,6 +409,7 @@ impl App {
         self.state.bookmarks.clear();
         self.pages_pixels.drawn.clear();
         self.notes.clear();
+        self.share = None;
         self.worker.ask(Job::Open(path.into()));
     }
 
@@ -516,6 +539,26 @@ impl App {
                 JobResult::Failed { reason } => {
                     self.tell(reason);
                 }
+                JobResult::SharePrompt {
+                    page,
+                    object,
+                    request,
+                    form,
+                    pages,
+                    prompt,
+                } => {
+                    // The prompt is the choice, and the notice carries its words for
+                    // screen readers and logs; the dialog below holds the buttons.
+                    self.tell(&prompt);
+                    self.share = Some(PendingShare {
+                        page,
+                        object,
+                        request,
+                        form,
+                        pages,
+                        prompt,
+                    });
+                }
             }
         }
     }
@@ -592,6 +635,12 @@ impl eframe::App for App {
         self.right_region(ui, &p, &t, screen);
         self.thumbnails(ui, &p, &t, screen);
         self.bottom_bar(ui, &p, &t, screen);
+
+        // A pending shared-form choice draws above the panels but below the
+        // notice, so the prompt's own words stay visible while its buttons answer.
+        if self.share.is_some() {
+            self.share_dialog(ui, &p, &t, screen);
+        }
 
         // A notice is drawn last so it is never hidden behind a panel.
         if let Some(notice) = self.state.notice.clone() {
@@ -711,6 +760,7 @@ impl App {
     /// box was drawn around a run of text.
     fn select(&mut self, object: Option<usize>) {
         self.selected = object;
+        self.share = None;
         self.state.right = panel::panel_for(object.and_then(|i| self.objects.get(i)));
     }
 
@@ -1791,6 +1841,107 @@ impl App {
                 egui::StrokeKind::Middle,
             );
             y += thumb_h + s.item_gap;
+        }
+    }
+
+    /// The shared-form prompt: what was asked, where it is used, and the two scopes.
+    ///
+    /// A modal in shape but not in input: the window keeps drawing under it, and
+    /// Escape or a new selection dismisses without answering. Either button sends
+    /// the echoed request with its scope and dismisses, so one prompt answers one
+    /// edit and never a later one.
+    fn share_dialog(&mut self, ui: &egui::Ui, p: &Painter, t: &Theme, screen: egui::Rect) {
+        let Some(pending) = self.share.clone() else {
+            return;
+        };
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.share = None;
+            return;
+        }
+        p.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(60));
+        let size = egui::vec2(480.0, 148.0);
+        let card = egui::Rect::from_center_size(screen.center(), size);
+        p.rect_filled(card, 12.0, t.panel);
+        p.rect_stroke(
+            card,
+            12.0,
+            egui::Stroke::new(1.0, t.border),
+            egui::StrokeKind::Middle,
+        );
+        let pad = t.spacing.window_inset;
+        p.text(
+            card.left_top() + egui::vec2(pad, pad + 4.0),
+            egui::Align2::LEFT_TOP,
+            format!("Shared form /{}", pending.form),
+            t.type_scale.font_id(Size::Heading),
+            t.text,
+        );
+        p.text(
+            card.left_top() + egui::vec2(pad, pad + 30.0),
+            egui::Align2::LEFT_TOP,
+            &pending.prompt,
+            t.type_scale.font_id(Size::Row),
+            t.text,
+        );
+        let pages = pending
+            .pages
+            .iter()
+            .map(|i| (i + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        p.text(
+            card.left_top() + egui::vec2(pad, pad + 52.0),
+            egui::Align2::LEFT_TOP,
+            format!("Used on pages {pages}"),
+            t.type_scale.font_id(Size::Row),
+            t.text_muted,
+        );
+        let row = egui::Rect::from_min_size(
+            egui::pos2(card.left() + pad, card.bottom() - 40.0),
+            egui::vec2(card.width() - pad * 2.0, 28.0),
+        );
+        let half = row.width() / 2.0;
+        for (label, scope, left) in [
+            (
+                "This page only",
+                mangle_edit::SharedFormScope::ThisPageOnly,
+                row.left(),
+            ),
+            (
+                "Everywhere",
+                mangle_edit::SharedFormScope::Everywhere,
+                row.left() + half,
+            ),
+        ] {
+            let button = egui::Rect::from_min_size(
+                egui::pos2(left + 4.0, row.top()),
+                egui::vec2(half - 8.0, row.height()),
+            );
+            if hovered(ui, button) {
+                p.rect_filled(button, 8.0, t.hover);
+            }
+            p.rect_stroke(
+                button,
+                8.0,
+                egui::Stroke::new(1.0, t.border),
+                egui::StrokeKind::Middle,
+            );
+            p.text(
+                button.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                t.type_scale.font_id(Size::Row),
+                t.text,
+            );
+            if hovered(ui, button) && ui.ctx().input(|i| i.pointer.any_released()) {
+                self.worker.ask(Job::EditShared {
+                    page: pending.page,
+                    object: pending.object,
+                    request: pending.request.clone(),
+                    scope,
+                });
+                self.share = None;
+            }
         }
     }
 
