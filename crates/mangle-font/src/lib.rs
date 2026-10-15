@@ -38,6 +38,9 @@ pub use metrics::{
 pub use outline::{Outline, Program, Segment, em_scale, from_cff, from_true_type, from_type1};
 pub use subset::{glyph_for_unicode, subset_truetype};
 pub use substitutes::{substitute, substitute_named};
-pub use system::{MAX_DEPTH, MAX_FILES, MAX_ROOTS, MAX_VISITED, discover_font_files};
+pub use system::{
+    MAX_DEPTH, MAX_FILES, MAX_FONT_FILE_BYTES, MAX_ROOTS, MAX_VISITED, SystemFontInfo,
+    discover_font_files, find_system_font, inspect_font_file,
+};
 pub use tounicode::{MAX_TO_UNICODE_ENTRIES, ToUnicode};
 pub use type1::{MAX_DEPTH as TYPE1_MAX_DEPTH, MAX_STACK as TYPE1_MAX_STACK, Type1};

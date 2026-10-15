@@ -23,6 +23,8 @@ pub const MAX_DEPTH: usize = 8;
 pub const MAX_FILES: usize = 4096;
 /// The most directory entries inspected, bounding walks of huge trees.
 pub const MAX_VISITED: usize = 65_536;
+/// The most bytes read from one candidate file to parse its names.
+pub const MAX_FONT_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Font file extensions recognised by the scan, matched case-insensitively.
 fn is_font_file(path: &Path) -> bool {
@@ -95,6 +97,101 @@ pub fn discover_font_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+/// A system font file with the names read out of its `name` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemFontInfo {
+    /// Where the file lives.
+    pub path: PathBuf,
+    /// Name ID 16 (or 1): e.g. `Liberation Sans`.
+    pub family: String,
+    /// Name ID 17 (or 2): e.g. `Bold`.
+    pub subfamily: String,
+}
+
+/// Read a font file's family and subfamily names.
+///
+/// `None` for anything that is not a readable, sensibly sized, parseable font
+/// with Unicode names — a hostile or foreign file is skipped, never reported
+/// as a match.
+#[must_use]
+pub fn inspect_font_file(path: &Path) -> Option<SystemFontInfo> {
+    let size = std::fs::metadata(path).ok()?.len();
+    if size == 0 || size > MAX_FONT_FILE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let face = ttf_parser::Face::parse(&bytes, 0).ok()?;
+    let mut family: Option<String> = None;
+    let mut subfamily: Option<String> = None;
+    for name in face.names() {
+        let slot = match name.name_id {
+            ttf_parser::name_id::TYPOGRAPHIC_FAMILY => &mut family,
+            ttf_parser::name_id::TYPOGRAPHIC_SUBFAMILY => &mut subfamily,
+            ttf_parser::name_id::FAMILY if family.is_none() => &mut family,
+            ttf_parser::name_id::SUBFAMILY if subfamily.is_none() => &mut subfamily,
+            _ => continue,
+        };
+        if slot.is_none() {
+            *slot = name.to_string();
+        }
+    }
+    Some(SystemFontInfo {
+        path: path.to_path_buf(),
+        family: family?,
+        subfamily: subfamily?,
+    })
+}
+
+/// The Standard 14 family a program family stands in for, or the name itself.
+///
+/// The file-side mirror of the request-side alias table: a system `Arial`
+/// stands in for Helvetica through [`crate::metrics::canonical_family`], and
+/// the bundled Liberation programs name their own families (`Liberation Sans`)
+/// rather than the ones they stand in for (see `substitutes`).
+fn candidate_canonical(family: &str) -> &str {
+    let flat: String = family.chars().filter(|c| *c != ' ').collect();
+    for (program, target) in [
+        ("LiberationSans", "Helvetica"),
+        ("LiberationSerif", "Times"),
+        ("LiberationMono", "Courier"),
+    ] {
+        if flat == program {
+            return target;
+        }
+    }
+    crate::metrics::canonical_family(family)
+}
+
+/// Find the system file backing `/BaseFont` `requested` (S1.3 rung 3).
+///
+/// The name is split with the shared [`crate::metrics::split_name`] parser, the
+/// family is resolved through the same alias table the bundled substitution
+/// uses, and the style must match exactly — an unknown style is refused rather
+/// than guessed at, exactly like [`crate::substitute`]. First match in sorted
+/// discovery order wins, so the answer is deterministic.
+#[must_use]
+pub fn find_system_font(requested: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    let (family, style) = crate::metrics::split_name(requested)?;
+    let want_family = crate::metrics::canonical_family(family);
+    let want_style = crate::metrics::style_words(&style)?;
+    for path in discover_font_files(dirs) {
+        let Some(info) = inspect_font_file(&path) else {
+            continue;
+        };
+        if candidate_canonical(&info.family) != want_family {
+            continue;
+        }
+        let flat: String = info.subfamily.chars().filter(|c| *c != ' ').collect();
+        let Some(got_style) = crate::metrics::style_words(&flat) else {
+            continue;
+        };
+        if got_style == want_style {
+            return Some(path);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -195,5 +292,60 @@ mod tests {
             discover_font_files(&[tmp.path().to_path_buf()]).is_empty(),
             "a font deeper than MAX_DEPTH is not reported"
         );
+    }
+
+    fn bundled_fonts_dir() -> PathBuf {
+        // Unit tests run with the package directory as cwd, unlike `include_bytes!`
+        // paths which resolve from the source file.
+        PathBuf::from("../../assets/fonts")
+    }
+
+    #[test]
+    fn the_bundled_liberation_files_match_their_standard_names() {
+        let dirs = [bundled_fonts_dir()];
+        for (requested, file) in [
+            ("Helvetica", "LiberationSans-Regular.ttf"),
+            ("Helvetica-Bold", "LiberationSans-Bold.ttf"),
+            ("Helvetica-Oblique", "LiberationSans-Italic.ttf"),
+            ("Helvetica-BoldOblique", "LiberationSans-BoldItalic.ttf"),
+            ("Times-Roman", "LiberationSerif-Regular.ttf"),
+            ("Times-BoldItalic", "LiberationSerif-BoldItalic.ttf"),
+            ("Courier-Bold", "LiberationMono-Bold.ttf"),
+            ("ABCDEF+Helvetica-Bold", "LiberationSans-Bold.ttf"),
+            ("Arial-Bold", "LiberationSans-Bold.ttf"),
+            ("TimesNewRomanPS-ItalicMT", "LiberationSerif-Italic.ttf"),
+        ] {
+            let found = find_system_font(requested, &dirs);
+            assert_eq!(
+                found.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+                Some(file.to_string()),
+                "{requested} should resolve to {file}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_families_and_styles_are_refused_rather_than_guessed() {
+        let dirs = [bundled_fonts_dir()];
+        for requested in [
+            "Symbol",
+            "NoSuchFont",
+            "Helvetica-Extrabold",
+            "HelveticaNeue-Bold",
+        ] {
+            assert!(
+                find_system_font(requested, &dirs).is_none(),
+                "{requested} must still refuse"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_font_file_inspects_as_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let text = tmp.path().join("readme.txt");
+        touch(&text);
+        assert!(inspect_font_file(&text).is_none());
+        assert!(inspect_font_file(&tmp.path().join("missing.ttf")).is_none());
     }
 }
