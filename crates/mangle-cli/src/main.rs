@@ -624,8 +624,33 @@ fn check(args: &[String]) -> Result<(), String> {
     std::process::exit(2);
 }
 
-fn render(_args: &[String]) -> Result<(), String> {
-    Err("render is not implemented yet; it lands with the renderer".into())
+fn render(args: &[String]) -> Result<(), String> {
+    let path = args.first().ok_or("render needs a file")?;
+    let out_path = value(args, "-o").ok_or("render needs -o FILE")?;
+    let page_idx = value(args, "-page")
+        .or_else(|| value(args, "--page"))
+        .and_then(|p| p.parse::<usize>().ok())
+        .unwrap_or(0);
+    let dpi = value(args, "-dpi")
+        .or_else(|| value(args, "--dpi"))
+        .and_then(|d| d.parse::<f64>().ok())
+        .unwrap_or(150.0);
+    let doc = open(path)?;
+    let tree = page_tree(&doc)?;
+    let Some(page) = tree.get(page_idx) else {
+        return Err(format!("the file has no page {page_idx}"));
+    };
+    let resources = page_resources(&doc, page);
+    let is_jpeg = Path::new(&out_path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
+    let bytes = if is_jpeg {
+        mangle_edit::export_page_jpeg(&doc, page, &resources, dpi, 90)?
+    } else {
+        mangle_edit::export_page_png(&doc, page, &resources, dpi)
+    };
+    std::fs::write(&out_path, &bytes).map_err(|e| format!("{out_path}: {e}"))?;
+    Ok(())
 }
 
 /// The text of a page, in the order a reader would read it.

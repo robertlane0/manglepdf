@@ -19,6 +19,7 @@ mangle-font.workspace = true
 mangle-content.workspace = true
 mangle-render.workspace = true
 mangle-text.workspace = true
+jpeg-encoder.workspace = true
 
 [lints]
 workspace = true

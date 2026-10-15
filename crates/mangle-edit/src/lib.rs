@@ -21,11 +21,13 @@ pub mod annotations;
 pub mod arrange;
 pub mod edits;
 pub mod embed;
+pub mod export;
 pub mod flatten;
 pub mod forms;
 pub mod history;
 pub mod organize;
 pub mod page_objects;
+pub mod protect;
 pub mod session;
 pub mod surgery;
 pub mod writeback;
@@ -41,6 +43,11 @@ pub use edits::{
     line_spacing, map_point, patches_for, patches_for_with, text_value, verify, verify_with,
 };
 pub use embed::{EMBEDDED_OBJECTS, EmbedError, EmbeddedFont, embed_truetype};
+pub use export::{
+    ExtractedImage, ImageFormat, ImageInput, OptimizePreset, OptimizeReport, PageFit,
+    create_pdf_from_images, encode_png, export_page_jpeg, export_page_png, extract_images,
+    optimize_document,
+};
 pub use flatten::{
     FlattenError, FlattenFilter, FlattenOptions, FlattenReport, flatten_page, has_digital_signature,
 };
@@ -60,6 +67,11 @@ pub use organize::{
 pub use page_objects::{
     Kind, LineBreak, PageModel, PageObject, Provenance, Summary, content, page_text, provenance_of,
     summarise,
+};
+pub use protect::{
+    RedactionOptions, RedactionReport, SanitizeReport, SignatureSpec, SignatureStatus,
+    apply_redactions, leak_scan, mark_redaction_rect, remove_security, sanitize_document,
+    sign_document, verify_signatures,
 };
 pub use session::{Editor, InstallError, OpenError, Outcome, Reason, SessionError};
 pub use surgery::{Applied, EditError, Patch};

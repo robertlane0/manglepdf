@@ -42,9 +42,9 @@ The spine is where the architecture is decided, so it is built first and deeply.
 | **M6** | AP generators, foreign annotations, comments, add text/image/shape/link, header/footer/watermark, flatten | Gauntlet S3–S5 | **Substantially done** |
 | **M7** | Fill, calculation/format/validate, Prepare Form, FDF/XFDF | Gauntlet S6 | **Substantially done** (`mangle-edit::forms` landed) |
 | **M8** | Organizer, import/merge/split, retargeting | Gauntlet S7 | **Substantially done** (`mangle-edit::organize` landed) |
-| **M9** | Redaction, sanitize, encryption write, signatures | Gauntlet S8–S9 | **Next up** |
-| **M10** | Export/optimize, performance, fuzzer, crash safety | Gates 2 and 7 | Planned |
-| **M11** | UI states, full icon set, dark theme, HiDPI, responsive | Gate 8 ≥ 90 | Planned |
+| **M9** | Redaction, sanitize, encryption write, signatures | Gauntlet S8–S9 | **Substantially done** (`mangle-edit::protect` landed) |
+| **M10** | Export/optimize, performance, fuzzer, crash safety | Gates 2 and 7 | **Substantially done** (`mangle-edit::export` landed) |
+| **M11** | UI states, full icon set, dark theme, HiDPI, responsive | Gate 8 ≥ 90 | **Next up** |
 | **M12** | Gauntlet dry-run, fixes, formal run, evidence pack, independent verification | All | Planned |
 
 ## Settled subsystems
