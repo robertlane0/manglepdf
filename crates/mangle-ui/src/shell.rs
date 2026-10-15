@@ -315,6 +315,11 @@ impl std::fmt::Debug for App {
 impl App {
     #[must_use]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::new_with(cc, Vec::new())
+    }
+
+    /// Build the window with replacement system font directories (`--font-dirs`).
+    pub fn new_with(cc: &eframe::CreationContext<'_>, font_dirs: Vec<PathBuf>) -> Self {
         let theme = Theme::light();
         // The reference window is 1536x1024 logical; the canvas is what is left over.
         install_fonts(&cc.egui_ctx, &theme);
@@ -353,7 +358,7 @@ impl App {
             theme,
             state: State::new(),
             pages: Vec::new(),
-            worker: Supervisor::start(),
+            worker: Supervisor::start_with(font_dirs),
             pages_pixels: Pages::default(),
             notes: Vec::new(),
             pending_open: false,

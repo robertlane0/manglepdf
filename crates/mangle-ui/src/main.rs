@@ -40,7 +40,8 @@ fn main() -> eframe::Result<()> {
         "ManglePDF",
         native_options,
         Box::new(move |cc| {
-            let mut app = mangle_ui::App::new(cc);
+            let mut app =
+                mangle_ui::App::new_with(cc, options.font_dirs.clone().unwrap_or_default());
             if let Some(path) = open.clone() {
                 app.open(path);
             }

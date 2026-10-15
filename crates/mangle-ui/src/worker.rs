@@ -176,11 +176,13 @@ struct Worker {
     resources: Vec<Resources>,
     /// The edit session, one page at a time.
     session: Option<mangle_edit::Editor>,
+    /// Replacement system font directories (`--font-dirs`) for renders and fallbacks.
+    system_dirs: Vec<PathBuf>,
 }
 
 impl Worker {
     /// Open `path` and read everything a job needs from it.
-    fn open(path: &PathBuf) -> Result<Self, String> {
+    fn open(path: &PathBuf, system_dirs: Vec<PathBuf>) -> Result<Self, String> {
         let bytes = std::fs::read(path).unwrap_or_default();
         let doc = Document::open(bytes, OpenOptions::default()).map_err(|e| e.to_string())?;
         let doc = Arc::new(doc);
@@ -196,6 +198,7 @@ impl Worker {
             pages,
             resources,
             session: None,
+            system_dirs,
         })
     }
 
@@ -219,6 +222,7 @@ impl Worker {
             resources,
             RenderOptions {
                 scale,
+                font_dirs: self.system_dirs.clone(),
                 ..RenderOptions::default()
             },
         );
@@ -274,7 +278,10 @@ impl Worker {
                 return false;
             };
             match mangle_edit::Editor::open(Arc::clone(&self.doc), page_dict, page_resources) {
-                Ok(editor) => self.session = Some(editor),
+                Ok(mut editor) => {
+                    editor.set_system_dirs(self.system_dirs.clone());
+                    self.session = Some(editor);
+                }
                 Err(e) => {
                     let _ = outbox.send(JobResult::Failed {
                         reason: e.to_string(),
@@ -454,11 +461,20 @@ impl Supervisor {
     /// Start a worker.
     #[must_use]
     pub fn start() -> Self {
+        Self::start_with(Vec::new())
+    }
+
+    /// Start a worker with replacement system font directories (`--font-dirs`).
+    ///
+    /// The directories reach page renders and edit-session fallbacks, so the
+    /// window draws and embeds what the flag names. Empty is bundled-only.
+    #[must_use]
+    pub fn start_with(font_dirs: Vec<PathBuf>) -> Self {
         let (jobs, inbox) = channel();
         let (outbox, results) = channel();
         let worker = thread::Builder::new()
             .name("mangle-document".to_string())
-            .spawn(move || run(inbox, outbox))
+            .spawn(move || run(inbox, outbox, font_dirs))
             .ok();
         Self {
             jobs,
@@ -490,7 +506,7 @@ impl Drop for Supervisor {
 }
 
 /// The worker's own loop: one document at a time, answered in order.
-fn run(inbox: Receiver<Job>, outbox: Sender<JobResult>) {
+fn run(inbox: Receiver<Job>, outbox: Sender<JobResult>, font_dirs: Vec<PathBuf>) {
     let mut open: Option<Worker> = None;
     while let Ok(job) = inbox.recv() {
         match job {
@@ -498,7 +514,7 @@ fn run(inbox: Receiver<Job>, outbox: Sender<JobResult>) {
             Job::Close => return,
             Job::Open(path) => {
                 open = None;
-                match Worker::open(&path) {
+                match Worker::open(&path, font_dirs.clone()) {
                     Ok(worker) => {
                         let _ = outbox.send(JobResult::Opened {
                             name: path
@@ -658,6 +674,69 @@ mod tests {
         assert!(
             objects > 0,
             "and what is on it, so the window can hit-test without holding the document"
+        );
+    }
+
+    /// A configured `--font-dirs` reaches the worker's renders.
+    ///
+    /// A one-page file naming an unembedded Helvetica is opened through a
+    /// supervisor started with the repository's own bundled directory standing
+    /// in as a system directory: the page's notes must name `--font-dirs` as
+    /// the face's source rather than the bundled default.
+    #[test]
+    fn a_configured_font_dir_reaches_worker_renders() {
+        let content = b"BT /F1 24 Tf 1 0 0 1 20 50 Tm (Hi) Tj ET";
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = vec![0usize];
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 100] >>\nendobj\n",
+        );
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> \
+              /Contents 4 0 R >>\nendobj\n",
+        );
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+        );
+        pdf.extend_from_slice(content);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        );
+        let startxref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n")
+                .as_bytes(),
+        );
+
+        let path =
+            std::env::temp_dir().join(format!("mangle-font-dirs-{}.pdf", std::process::id()));
+        std::fs::write(&path, &pdf).expect("writes the test file");
+        let supervisor = Supervisor::start_with(vec![PathBuf::from("../../assets/fonts")]);
+        supervisor.ask(Job::Open(path.clone()));
+        let mut notes = None;
+        for result in collect(&supervisor, 2) {
+            match result {
+                JobResult::Page { notes: n, .. } => notes = Some(n),
+                JobResult::Failed { reason } => panic!("the worker failed: {reason}"),
+                _ => {}
+            }
+        }
+        std::fs::remove_file(&path).ok();
+        let notes = notes.expect("a page came back");
+        assert!(
+            notes.iter().any(|note| note.contains("--font-dirs")),
+            "the render used the configured directory: {notes:?}"
         );
     }
 
