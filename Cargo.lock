@@ -2096,6 +2096,7 @@ dependencies = [
  "mangle-doc",
  "mangle-syntax",
  "rustybuzz",
+ "tempfile",
  "thiserror 2.0.21",
  "ttf-parser",
  "unicode-bidi",
