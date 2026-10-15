@@ -623,12 +623,20 @@ impl LineGroup {
     fn into_object(self) -> PageObject {
         let mut spans: Vec<Range<usize>> = self.records.iter().map(|r| r.span.clone()).collect();
         spans.sort_by_key(|r| r.start);
+        // The form the line was drawn inside, when the whole line was: a line joining
+        // runs from two scopes carries spans from two streams, and no single scope owns
+        // it — which the edit guard reads as uneditable either way.
+        let form = self
+            .records
+            .first()
+            .and_then(|r| r.form.clone())
+            .filter(|f| self.records.iter().all(|r| r.form.as_deref() == Some(f)));
         PageObject {
             kind: Kind::Line,
             bounds: self.bounds,
             records: self.records,
             spans,
-            form: None,
+            form,
             parent: None,
             line_break: None,
         }

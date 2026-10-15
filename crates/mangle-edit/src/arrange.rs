@@ -107,6 +107,12 @@ pub enum ArrangeRefusal {
         /// How long the stream is.
         len: usize,
     },
+    /// The object was drawn inside a Form XObject, whose bytes live in the form's own
+    /// stream rather than the page's — see [`crate::Refusal::InsideForm`].
+    InsideForm {
+        /// The form XObject, as the `Do` named it.
+        form: String,
+    },
 }
 
 impl fmt::Display for ArrangeRefusal {
@@ -151,6 +157,11 @@ impl fmt::Display for ArrangeRefusal {
                 f,
                 "this object covers bytes {span:?} of a stream that is {len} bytes long, so it \
                  came from somewhere else"
+            ),
+            Self::InsideForm { form } => write!(
+                f,
+                "this object was drawn inside the form XObject `/{form}`, whose bytes live in \
+                 the form's own stream rather than the page's, so it cannot be moved here"
             ),
         }
     }
@@ -220,6 +231,16 @@ pub fn arrange_patches(
             considered: objects.len(),
         });
     };
+    // Same hole as in `edits`: the spans are offsets into the form's stream.
+    let form = object
+        .form
+        .as_deref()
+        .or_else(|| object.records.iter().find_map(|r| r.form.as_deref()));
+    if let Some(form) = form {
+        return Err(ArrangeRefusal::InsideForm {
+            form: form.to_string(),
+        });
+    }
     if object.spans.len() > 1 {
         return Err(ArrangeRefusal::Scattered {
             spans: object.spans.len(),

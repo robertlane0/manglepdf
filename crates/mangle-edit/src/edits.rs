@@ -363,6 +363,17 @@ pub enum Refusal {
         /// How long the stream is.
         len: usize,
     },
+    /// The object was drawn inside a Form XObject, whose bytes live in the form's own
+    /// stream rather than the page's.
+    ///
+    /// Its spans are offsets into that stream, so patching the page's stream at them
+    /// would wrap unrelated page bytes. Editing it means opening the form — S1.15's
+    /// this-page-only/everywhere choice — and until that wiring lands the honest
+    /// answer is a refusal that names the form.
+    InsideForm {
+        /// The form XObject, as the `Do` named it.
+        form: String,
+    },
     /// The object has no bytes at all, so there is nothing to edit.
     NoSpans,
     /// The page holds an inline image our tokeniser could not read, so the meaning of a byte
@@ -448,6 +459,11 @@ impl fmt::Display for Refusal {
                 f,
                 "this object covers bytes {span:?} of a stream that is {len} bytes long, so it \
                  came from somewhere else"
+            ),
+            Self::InsideForm { form } => write!(
+                f,
+                "this object was drawn inside the form XObject `/{form}`, whose bytes live in \
+                 the form's own stream rather than the page's, so it cannot be edited here"
             ),
             Self::NoSpans => write!(
                 f,
@@ -657,6 +673,17 @@ pub fn patches_for_with(
 
     if object.spans.is_empty() {
         return Err(Refusal::NoSpans);
+    }
+    // Either the object or one of its runs was drawn inside a form: the spans are
+    // offsets into the form's stream either way, so both shapes refuse alike.
+    let form = object
+        .form
+        .as_deref()
+        .or_else(|| object.records.iter().find_map(|r| r.form.as_deref()));
+    if let Some(form) = form {
+        return Err(Refusal::InsideForm {
+            form: form.to_string(),
+        });
     }
     for span in &object.spans {
         if span.end > stream.len() || span.start > span.end {
@@ -3803,6 +3830,128 @@ mod tests {
         assert_eq!(
             applied.bytes,
             b"BT /F1 12 Tf q /F7 12 Tf (\x00\x01\x00\x02) Tj Q /F1 20 Tf q /F7 20 Tf (\x00\x03\x00\x04) Tj Q ET".as_slice(),
+        );
+    }
+
+    /// A page drawing a shared header form plus its own body text, for the form tests.
+    fn form_page() -> (
+        mangle_syntax::Document,
+        mangle_doc::Page,
+        mangle_content::Resources,
+        PageModel,
+        Vec<u8>,
+    ) {
+        use std::fmt::Write as _;
+        let form = "BT /F1 12 Tf 1 0 0 1 20 750 Tm (Shared Header) Tj ET";
+        let body = "BT /F1 12 Tf 1 0 0 1 20 700 Tm (Page body text here and here) Tj ET";
+        let page_stream = format!("q /Fm0 Do Q {body}");
+        let mut pdf = String::from("%PDF-1.7\n");
+        let mut offsets = vec![0usize];
+        offsets.push(pdf.len());
+        pdf.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        offsets.push(pdf.len());
+        pdf.push_str("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        offsets.push(pdf.len());
+        pdf.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 800] \
+             /Resources 5 0 R /Contents 4 0 R >>\nendobj\n",
+        );
+        offsets.push(pdf.len());
+        let _ = write!(
+            pdf,
+            "4 0 obj\n<< /Length {} >>\nstream\n{page_stream}\nendstream\nendobj\n",
+            page_stream.len()
+        );
+        offsets.push(pdf.len());
+        pdf.push_str("5 0 obj\n<< /XObject << /Fm0 6 0 R >> /Font << /F1 7 0 R >> >>\nendobj\n");
+        offsets.push(pdf.len());
+        let _ = write!(
+            pdf,
+            "6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 800] \
+             /Resources << /Font << /F1 7 0 R >> >> /Length {} >>\nstream\n{form}\nendstream\nendobj\n",
+            form.len()
+        );
+        offsets.push(pdf.len());
+        pdf.push_str(
+            "7 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n",
+        );
+        let startxref = pdf.len();
+        pdf.push_str("xref\n0 8\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            let _ = writeln!(pdf, "{offset:010} 00000 n ");
+        }
+        let _ = write!(
+            pdf,
+            "trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n"
+        );
+        let doc =
+            mangle_syntax::Document::open(pdf.into_bytes(), mangle_syntax::OpenOptions::default())
+                .expect("opens");
+        let cat = doc.catalog().expect("a catalogue");
+        let root = cat
+            .get("Pages")
+            .and_then(mangle_syntax::object::Object::as_ref_id)
+            .expect("a tree");
+        let tree = mangle_doc::PageTree::build(&doc, root).expect("the walk");
+        let page = tree.pages().first().expect("a page").clone();
+        let resources = page
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| mangle_content::Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .expect("resources");
+        let decoded = page.decoded_contents(&doc);
+        let run = mangle_content::interp::run_with(&ContentStream::parse(&decoded), &resources);
+        let model = PageModel::build(&run.records);
+        (doc, page, resources, model, decoded)
+    }
+
+    /// An edit inside an unopened form is refused rather than written into the page.
+    ///
+    /// A form's records carry spans into the *form's* stream, and the page stream here
+    /// is long enough that the bounds check alone would pass — so without the guard
+    /// the wrapper would land on unrelated page bytes. S1.15's this-page-only /
+    /// everywhere choice will one day unlock these edits; until then the refusal
+    /// names the form.
+    #[test]
+    fn an_edit_inside_an_unopened_form_is_refused() {
+        let (_doc, _page, _resources, model, page_stream) = form_page();
+        let at = model
+            .objects()
+            .iter()
+            .position(|o| o.form.as_deref() == Some("Fm0"))
+            .expect("a form object");
+        let object = &model.objects()[at];
+        assert!(
+            object.spans.iter().all(|s| s.end <= page_stream.len()),
+            "the fixture is only a proof if the bounds check would pass: {:?} in {}",
+            object.spans,
+            page_stream.len()
+        );
+        let err = patches_for_with(&page_stream, object, &Change::move_by(1.0, 0.0), None)
+            .expect_err("refused");
+        assert!(
+            matches!(err, Refusal::InsideForm { ref form } if form == "Fm0"),
+            "{err}"
+        );
+    }
+
+    /// Moving an object inside an unopened form is refused for the same reason.
+    #[test]
+    fn an_arrange_inside_an_unopened_form_is_refused() {
+        let (_doc, _page, _resources, model, page_stream) = form_page();
+        let at = model
+            .objects()
+            .iter()
+            .position(|o| o.form.as_deref() == Some("Fm0"))
+            .expect("a form object");
+        let err = crate::arrange_patches(&page_stream, &model, at, crate::Arrange::ToFront)
+            .expect_err("refused");
+        assert!(
+            matches!(err, crate::ArrangeRefusal::InsideForm { ref form } if form == "Fm0"),
+            "{err}"
         );
     }
 }
