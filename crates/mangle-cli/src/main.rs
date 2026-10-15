@@ -72,6 +72,9 @@ manglepdf-cli <command> <file.pdf> [options]
                             --size N               the font size, points
                             --crop x0,y0,x1,y1      keep that part of an image, in page space
                             --retype TEXT          replace the run's string, in its own font
+                            --reflow TEXT          relay out the block in its own width
+                            --align MODE           left|center|right|justify (with --reflow, or alone)
+                            --scope SCOPE          this-page|everywhere: edit a shared form object
                             --replace TEXT         replace bitmap text with live text
                             --flatten              flatten all annotations on the page
                             --flatten-markup       flatten markup annotations (keep links/forms)
@@ -200,11 +203,7 @@ fn edit(args: &[String]) -> Result<(), String> {
         let report =
             mangle_edit::flatten_page(&doc, page, &options).map_err(|e| format!("{path}: {e}"))?;
         let out_path = value(args, "-o").unwrap_or_else(|| format!("{path}.edited.pdf"));
-        let target = Path::new(&out_path);
-        let temp = target.with_extension("pdf.part");
-        std::fs::write(&temp, &report.save.bytes)
-            .map_err(|e| format!("{}: {e}", temp.display()))?;
-        std::fs::rename(&temp, target).map_err(|e| format!("{}: {e}", target.display()))?;
+        write_atomic(&out_path, &report.save.bytes)?;
         let _ = writeln!(
             out,
             "flattened {} annotation(s), skipped {} hidden, kept {}, wrote {out_path}",
@@ -248,6 +247,80 @@ fn edit(args: &[String]) -> Result<(), String> {
     // CIDs, and checking the requested change instead would fail a correct file.
     // Arrange takes no such path, so only the edit arm sets it.
     let mut executed: Option<mangle_edit::Change> = None;
+    // A shared-form edit saves outside the session history: it needs the form's own
+    // stream and an explicit scope, so it never goes through `session.apply`.
+    if let Some(scope) = value(args, "--scope")
+        .map(|s| parse_scope(&s))
+        .transpose()?
+    {
+        if value(args, "--replace").is_some() {
+            return Err(
+                "--replace cannot target a shared form; use --retype with --scope".to_string(),
+            );
+        }
+        if object.form.is_none() && object.records.iter().all(|r| r.form.is_none()) {
+            return Err(format!(
+                "--scope needs an object drawn inside a shared form, and object {which} is on \
+                 the page itself; drop --scope to edit it"
+            ));
+        }
+        let change = match value(args, "--align") {
+            Some(mode) if value(args, "--reflow").is_none() => session
+                .align_change(which, parse_alignment(&mode)?)
+                .map_err(|e| format!("{path}: {e}"))?,
+            _ => change_from_args(args, session.document(), &resources, object)?,
+        };
+        let save = session
+            .apply_shared(which, &change, scope)
+            .map_err(|e| format!("{path}: {e}"))?;
+        let out_path = value(args, "-o").unwrap_or_else(|| format!("{path}.edited.pdf"));
+        write_atomic(&out_path, &save.bytes)?;
+        let _ = writeln!(
+            out,
+            "selected {which} on page {}, a {kind:?} at {x0:.2} {y0:.2}",
+            index + 1,
+            kind = object.kind,
+            x0 = object.bounds.x0,
+            y0 = object.bounds.y0,
+        );
+        let _ = writeln!(out, "did       shared-form edit with {scope:?}");
+        let _ = writeln!(out, "wrote     {out_path}");
+        let _ = writeln!(
+            out,
+            "bytes     {}, {} of them new",
+            save.bytes.len(),
+            save.bytes.len() - size_before
+        );
+        let _ = writeln!(
+            out,
+            "rewrote   {} object(s), installed {} object(s)",
+            save.rewritten.len(),
+            save.installed.len()
+        );
+        let _ = writeln!(
+            out,
+            "appended  {}",
+            if save.appended_only(&original) {
+                "the file's existing bytes are untouched"
+            } else {
+                "NO: the file was rewritten, which a save must never be"
+            }
+        );
+        let reopened = Document::open(save.bytes.clone(), OpenOptions::default())
+            .map_err(|e| format!("{out_path}: {e}"))?;
+        let _ = writeln!(
+            out,
+            "reopened  the file opens and has {} page(s)",
+            reopened
+                .page_count()
+                .map_err(|e| format!("{out_path}: {e}"))?
+        );
+        let _ = writeln!(
+            out,
+            "verified  skipped: the edit is in the form's stream, not the page's"
+        );
+        return Ok(());
+    }
     let report = match arrange {
         Some(arrange) => session
             .arrange(which, arrange)
@@ -264,8 +337,27 @@ fn edit(args: &[String]) -> Result<(), String> {
                     .map_err(|e| format!("{path}: {e}"))?;
                 executed = Some(outcome.change);
                 outcome.label
+            } else if value(args, "--reflow").is_none() {
+                if let Some(mode) = value(args, "--align") {
+                    let alignment = parse_alignment(&mode)?;
+                    let change = session
+                        .align_change(which, alignment)
+                        .map_err(|e| format!("{path}: {e}"))?;
+                    let outcome = session
+                        .apply(which, &change)
+                        .map_err(|e| format!("{path}: {e}"))?;
+                    executed = Some(outcome.change);
+                    outcome.label
+                } else {
+                    let change = change_from_args(args, session.document(), &resources, object)?;
+                    let outcome = session
+                        .apply(which, &change)
+                        .map_err(|e| format!("{path}: {e}"))?;
+                    executed = Some(outcome.change);
+                    outcome.label
+                }
             } else {
-                let change = change_from_args(args, object)?;
+                let change = change_from_args(args, session.document(), &resources, object)?;
                 let outcome = session
                     .apply(which, &change)
                     .map_err(|e| format!("{path}: {e}"))?;
@@ -281,10 +373,7 @@ fn edit(args: &[String]) -> Result<(), String> {
     // Write beside the target and rename, so an interrupted save never leaves a half-written file
     // where the real one was.
     let out_path = value(args, "-o").unwrap_or_else(|| format!("{path}.edited.pdf"));
-    let target = Path::new(&out_path);
-    let temp = target.with_extension("pdf.part");
-    std::fs::write(&temp, &save.bytes).map_err(|e| format!("{}: {e}", temp.display()))?;
-    std::fs::rename(&temp, target).map_err(|e| format!("{}: {e}", target.display()))?;
+    write_atomic(&out_path, &save.bytes)?;
 
     let _ = writeln!(
         out,
@@ -361,7 +450,7 @@ fn edit(args: &[String]) -> Result<(), String> {
         None => {
             let change = match executed {
                 Some(change) => change,
-                None => change_from_args(args, object)?,
+                None => change_from_args(args, session.document(), &resources, object)?,
             };
             // The reopened page's own font table checks a retype: the edit never touches
             // the fonts, so the table is the same one the edit read.
@@ -388,6 +477,8 @@ fn edit(args: &[String]) -> Result<(), String> {
 /// The change the arguments ask for, read out of them once so the verification can use the same.
 fn change_from_args(
     args: &[String],
+    doc: &Document,
+    resources: &mangle_content::Resources,
     object: &mangle_edit::PageObject,
 ) -> Result<mangle_edit::Change, String> {
     if flag(args, "--delete") {
@@ -454,6 +545,24 @@ fn change_from_args(
         }
         return Ok(mangle_edit::Change::Retype { text });
     }
+    if let Some(text) = value(args, "--reflow") {
+        if text.is_empty() {
+            return Err("--reflow needs the replacement string".to_string());
+        }
+        let summary = mangle_edit::summarise(doc, resources, object);
+        let base_font = summary
+            .font_family
+            .unwrap_or_else(|| "Helvetica".to_string());
+        let alignment = match value(args, "--align") {
+            Some(mode) => parse_alignment(&mode)?,
+            None => mangle_edit::TextAlignment::Left,
+        };
+        return Ok(mangle_edit::Change::Reflow {
+            text,
+            base_font,
+            alignment,
+        });
+    }
     if let Some(colour) = value(args, "--colour") {
         let parts: Vec<f64> = colour.split(',').filter_map(|p| p.parse().ok()).collect();
         match (
@@ -474,10 +583,40 @@ fn change_from_args(
     }
     Err(
         "say what to do: --move dx,dy, --scale s, --delete, --colour r,g,b, a text property \
-         (--tc/--tw/--tz/--tl/--ts/--size), --crop x0,y0,x1,y1, --retype TEXT, --replace TEXT,
-         or an arrange flag"
+         (--tc/--tw/--tz/--tl/--ts/--size), --crop x0,y0,x1,y1, --retype TEXT, --reflow TEXT, \
+         --replace TEXT, or an arrange flag"
             .to_string(),
     )
+}
+
+/// An alignment mode as the `--align` flag spells it.
+fn parse_alignment(mode: &str) -> Result<mangle_edit::TextAlignment, String> {
+    match mode.to_ascii_lowercase().as_str() {
+        "left" => Ok(mangle_edit::TextAlignment::Left),
+        "center" | "centre" => Ok(mangle_edit::TextAlignment::Center),
+        "right" => Ok(mangle_edit::TextAlignment::Right),
+        "justify" | "justified" => Ok(mangle_edit::TextAlignment::Justify),
+        _ => Err("--align needs left|center|right|justify".to_string()),
+    }
+}
+
+/// A shared-form scope as the `--scope` flag spells it.
+fn parse_scope(scope: &str) -> Result<mangle_edit::SharedFormScope, String> {
+    match scope.to_ascii_lowercase().as_str() {
+        "this-page" | "this-page-only" => Ok(mangle_edit::SharedFormScope::ThisPageOnly),
+        "everywhere" => Ok(mangle_edit::SharedFormScope::Everywhere),
+        _ => Err("--scope needs this-page|everywhere".to_string()),
+    }
+}
+
+/// Write beside the target and rename, so an interrupted save never leaves a half-written file
+/// where the real one was.
+fn write_atomic(out_path: &str, bytes: &[u8]) -> Result<(), String> {
+    let target = Path::new(out_path);
+    let temp = target.with_extension("pdf.part");
+    std::fs::write(&temp, bytes).map_err(|e| format!("{}: {e}", temp.display()))?;
+    std::fs::rename(&temp, target).map_err(|e| format!("{}: {e}", target.display()))?;
+    Ok(())
 }
 
 /// Parse a number argument, saying which flag it came from.

@@ -528,6 +528,19 @@ impl Editor {
                 crate::Refusal::NoSpans,
             )));
         };
+        // Same hole as `apply`: a bitmap run inside a form carries spans into the
+        // form's stream, so replacing it here would write the page's stream.
+        if let Some(form) = object
+            .form
+            .as_deref()
+            .or_else(|| object.records.iter().find_map(|r| r.form.as_deref()))
+        {
+            return Err(SessionError::Change(crate::ChangeError::Refused(
+                crate::Refusal::InsideForm {
+                    form: form.to_string(),
+                },
+            )));
+        }
         let Some(face) = mangle_font::resolve_fallback("Helvetica", &self.system_dirs) else {
             return Err(SessionError::Change(crate::ChangeError::Refused(
                 crate::Refusal::NoSuchFont {
