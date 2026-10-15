@@ -1196,6 +1196,7 @@ impl App {
         let content = selected.and_then(|o| o.content.as_deref());
         let family = selected.and_then(|o| o.font_family.as_deref());
         let style = selected.and_then(|o| o.font_style.as_deref());
+        let fill = selected.and_then(|o| o.fill_colour.as_ref());
 
         // What a control was clicked by, applied after the loop rather than inside it. The loop
         // holds a borrow of the selected object to read its values, and the edit ends what that
@@ -1240,7 +1241,7 @@ impl App {
                 p.rect_filled(field, s.field_radius, t.hover);
             }
             let ink = if enabled { t.text } else { t.text_muted };
-            let which = panel::panel_row(self.state.right, row, text, content, family, style);
+            let which = panel::panel_row(self.state.right, row, text, content, family, style, fill);
             match which {
                 PanelRow::Empty => {}
                 PanelRow::Retype => {
@@ -1953,6 +1954,7 @@ mod tests {
             content: None,
             font_family: None,
             font_style: None,
+            fill_colour: None,
         }
     }
 

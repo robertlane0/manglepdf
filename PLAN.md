@@ -56,7 +56,7 @@ The spine is where the architecture is decided, so it is built first and deeply.
 - **Fonts & Text (`mangle-font`, `mangle-text`):**
   - Embedded TrueType (`glyf` + composite glyphs), CFF Type 2 charstrings (local/global subrs, bias, `FDArray`/`FDSelect`, all 3 charset formats + Standard Strings), Type 1 (`eexec` + charstring decryption, `hsbw`, flex), Type 3 `/CharProcs` content-stream execution (`MAX_TYPE3_DEPTH = 8`), and 12 bundled OFL Liberation faces for unembedded Standard-14 and metric-compatible alias (`Arial`, `TimesNewRoman`, `CourierNew`) substitution.
   - Standard/WinAnsi/MacRoman/PDFDoc encodings, `/Differences`, 912-entry AGL, `/ToUnicode` CMap parsing (`beginbfchar` and `beginbfrange` contiguous + array targets), composite `/Type0` two-byte CIDs, `/W`/`/DW`, and `/CIDToGIDMap`.
-  - TrueType subsetter (`subset_truetype`) and 5-object `/Type0` CID font embedding (`embed_truetype`) with `/ToUnicode` CMaps, plus the `--font-dirs` fallback resolver (`discover_font_files`, `inspect_font_file`, `find_system_font`, `resolve_fallback` with system-first order; threading configured directories into the render/edit call sites remains).
+  - TrueType subsetter (`subset_truetype`) and 5-object `/Type0` CID font embedding (`embed_truetype`) with `/ToUnicode` CMaps, plus the `--font-dirs` fallback resolver (`discover_font_files`, `inspect_font_file`, `find_system_font`, system-first `resolve_fallback`) threaded through render, session, appearance, and UI paths.
   - Geometric text extraction (both simple and `/Type0` composite fonts via `/ToUnicode`) and case-insensitive search (`mangle-text`) with byte offsets and UI search bar integration.
 - **Content, Rendering & Surgical Editing (`mangle-content`, `mangle-render`, `mangle-edit`, `mangle-ui`):**
   - Tokeniser and interpreter with byte-span provenance, Form XObject recursion (`MAX_FORM_DEPTH = 12`), and all 4 PDF function types.
@@ -71,7 +71,7 @@ The spine is where the architecture is decided, so it is built first and deeply.
    - Paragraph/block width reflow and alignment (`Left`, `Center`, `Right`, `Justify` via `Tw` / line positioning) when inserted or deleted text changes line length (S1.9) — engine landed in `mangle-edit::reflow`.
    - Paragraph deletion cleanup ensuring `BT`/`ET` and `q`/`Q` remain balanced without shifting unrelated blocks (S1.10).
    - Shared Form XObject copy-on-write ("edit this page only" vs "edit everywhere", S1.15) — engine landed (`inspect_shared_form`, `edit_shared_form`); UI prompt wiring remains.
-   - Custom `--font-dirs` fallback discovery for missing fonts (S1.3): flag parsing, the fallback resolver, render threading, session threading, AP embedding threading, UI plumbing, and panel family/style display (`Summary::font_family`/`font_style` resolved from the font dictionary) landed; colour picker and alignment control in the Text Properties panel remain.
+   - Custom `--font-dirs` fallback discovery for missing fonts (S1.3): flag parsing, the fallback resolver, render threading, session threading, AP embedding threading, UI plumbing, and panel family/style/colour display (`Summary::font_family`/`font_style`/`fill_colour` with hex readout) landed; colour picker interaction and alignment control in the Text Properties panel remain.
 2. **Close open M2/M3 rendering items:**
    - Transparency groups, blend modes, and OCG visibility toggling in the renderer (`S0.3`).
    - Sidebar thumbnail navigation and Bookmarks/Layers panels in `mangle-ui` (`S0.1`–`S0.3`).

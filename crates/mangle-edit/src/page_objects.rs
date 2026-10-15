@@ -305,6 +305,12 @@ pub struct Summary {
     ///
     /// `None` for an unrecognised suffix — the panel shows a blank rather than a guess.
     pub font_style: Option<String>,
+    /// The fill colour the object was drawn in, for the Text panel's Colour row.
+    ///
+    /// Text paints in the current non-stroking colour and paths in their fill; an
+    /// image's own pixels are its colour, so only text and filled paths carry one.
+    /// `None` is a blank row rather than an invented black.
+    pub fill_colour: Option<mangle_content::state::Colour>,
 }
 
 impl Summary {
@@ -342,6 +348,19 @@ pub fn summarise(
         content: content(resources, doc, object),
         font_family,
         font_style,
+        fill_colour: object.records.first().and_then(record_fill),
+    }
+}
+
+/// The fill colour a record was drawn in, when the record has one of its own.
+///
+/// Text and filled paths do; images carry only the current colour for stencil
+/// masks, which is not the image's colour and is not shown.
+fn record_fill(record: &Record) -> Option<mangle_content::state::Colour> {
+    match &record.mark {
+        Mark::Glyphs { fill, .. } => Some(fill.clone()),
+        Mark::Path { fill, .. } => fill.clone(),
+        _ => None,
     }
 }
 

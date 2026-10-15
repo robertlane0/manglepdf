@@ -130,11 +130,21 @@ const LINE_SPACING_STEP: f64 = 0.1;
 /// One click of the baseline-shift stepper, in points.
 const BASELINE_STEP: f64 = 1.0;
 
+/// A colour as the panel shows it: `#RRGGBB` in sRGB.
+///
+/// `None` when the space does not convert here (spot colours without a transform,
+/// patterns), which is when the row stays blank rather than showing a wrong hex.
+#[must_use]
+pub fn colour_hex(colour: &mangle_content::state::Colour) -> Option<String> {
+    let [r, g, b, _] = colour.to_rgba(None)?.to_rgba8(1.0);
+    Some(format!("#{r:02X}{g:02X}{b:02X}"))
+}
+
 /// What row `row` of a panel is, for an object drawn in `text`.
 ///
 /// `family` and `style` are the `/BaseFont` names the worker resolved for the
-/// run's font resource — `None` when the resource did not resolve, which is
-/// when the rows show the resource name and a blank.
+/// run's font resource, and `fill` is the colour it was drawn in — each `None`
+/// when unknown, which is when the rows show the resource name and blanks.
 ///
 /// Only the Text Properties panel reads anything out yet, because only its four numbers are on
 /// the records the interpreter already carries. Every row of every other panel is
@@ -149,6 +159,7 @@ pub fn panel_row(
     content: Option<&str>,
     family: Option<&str>,
     style: Option<&str>,
+    fill: Option<&mangle_content::state::Colour>,
 ) -> PanelRow {
     let Some(state) = text else {
         return PanelRow::Empty;
@@ -177,6 +188,11 @@ pub fn panel_row(
             // The resolved weight, blank when the suffix was unrecognised.
             2 => match style {
                 Some(style) => PanelRow::Value(style.to_string()),
+                None => PanelRow::Empty,
+            },
+            // The fill as hex, blank when the space does not convert here.
+            4 => match fill.and_then(colour_hex) {
+                Some(hex) => PanelRow::Value(hex),
                 None => PanelRow::Empty,
             },
             _ => PanelRow::Empty,
@@ -346,13 +362,14 @@ mod tests {
             content: None,
             font_family: None,
             font_style: None,
+            fill_colour: None,
         }
     }
 
     /// A size is read out of the state the object was drawn with, in the file's own units.
     #[test]
     fn the_size_row_reads_the_size_the_file_drew() {
-        let row = panel_row(RightPanel::Text, 3, Some(&state()), None, None, None);
+        let row = panel_row(RightPanel::Text, 3, Some(&state()), None, None, None, None);
         match row {
             PanelRow::Stepper {
                 shown,
@@ -371,7 +388,7 @@ mod tests {
     /// edit it writes is a `TL` in points — and the conversion is done in one place.
     #[test]
     fn line_spacing_is_shown_as_a_multiple_and_written_as_points() {
-        match panel_row(RightPanel::Text, 6, Some(&state()), None, None, None) {
+        match panel_row(RightPanel::Text, 6, Some(&state()), None, None, None, None) {
             PanelRow::Stepper {
                 shown,
                 step,
@@ -397,11 +414,11 @@ mod tests {
     #[test]
     fn an_object_that_is_not_text_has_nothing_to_show() {
         assert_eq!(
-            panel_row(RightPanel::Text, 3, None, None, None, None),
+            panel_row(RightPanel::Text, 3, None, None, None, None, None),
             PanelRow::Empty
         );
         assert_eq!(
-            panel_row(RightPanel::Text, 6, None, None, None, None),
+            panel_row(RightPanel::Text, 6, None, None, None, None, None),
             PanelRow::Empty
         );
     }
@@ -417,12 +434,13 @@ mod tests {
                 Some(&state()),
                 None,
                 Some("Helvetica"),
-                Some("Bold")
+                Some("Bold"),
+                None
             ),
             PanelRow::Value("Helvetica".to_string())
         );
         assert_eq!(
-            panel_row(RightPanel::Text, 1, Some(&state()), None, None, None),
+            panel_row(RightPanel::Text, 1, Some(&state()), None, None, None, None),
             PanelRow::Value("/F3".to_string())
         );
         assert_eq!(
@@ -430,6 +448,7 @@ mod tests {
                 RightPanel::Text,
                 1,
                 Some(&TextState::default()),
+                None,
                 None,
                 None,
                 None
@@ -443,12 +462,13 @@ mod tests {
                 Some(&state()),
                 None,
                 Some("Helvetica"),
-                Some("Bold")
+                Some("Bold"),
+                None
             ),
             PanelRow::Value("Bold".to_string())
         );
         assert_eq!(
-            panel_row(RightPanel::Text, 2, Some(&state()), None, None, None),
+            panel_row(RightPanel::Text, 2, Some(&state()), None, None, None, None),
             PanelRow::Empty
         );
     }
@@ -468,6 +488,7 @@ mod tests {
                 row,
                 Some(&state),
                 Some("text"),
+                None,
                 None,
                 None,
             );
@@ -500,7 +521,7 @@ mod tests {
     fn a_stepper_writes_the_value_it_read_plus_one_step() {
         let s = state();
         let PanelRow::Stepper { property, .. } =
-            panel_row(RightPanel::Text, 3, Some(&state()), None, None, None)
+            panel_row(RightPanel::Text, 3, Some(&state()), None, None, None, None)
         else {
             panic!("size should be a stepper");
         };
@@ -519,7 +540,7 @@ mod tests {
             ..TextState::default()
         };
         assert_eq!(
-            panel_row(RightPanel::Text, 6, Some(&s), None, None, None),
+            panel_row(RightPanel::Text, 6, Some(&s), None, None, None, None),
             PanelRow::Empty
         );
     }
@@ -534,7 +555,7 @@ mod tests {
         let s = state();
         // The size row, which shows 48 and moves by a whole point.
         let PanelRow::Stepper { property, .. } =
-            panel_row(RightPanel::Text, 3, Some(&state()), None, None, None)
+            panel_row(RightPanel::Text, 3, Some(&state()), None, None, None, None)
         else {
             panic!("size should be a stepper");
         };
@@ -550,7 +571,7 @@ mod tests {
     fn a_click_of_the_line_spacing_row_moves_a_multiple() {
         let s = state();
         let PanelRow::Stepper { property, .. } =
-            panel_row(RightPanel::Text, 6, Some(&state()), None, None, None)
+            panel_row(RightPanel::Text, 6, Some(&state()), None, None, None, None)
         else {
             panic!("line spacing should be a stepper");
         };
@@ -598,7 +619,7 @@ mod tests {
     #[test]
     fn a_picture_has_no_state_to_step_from() {
         assert_eq!(
-            panel_row(RightPanel::Text, 3, None, None, None, None),
+            panel_row(RightPanel::Text, 3, None, None, None, None, None),
             PanelRow::Empty
         );
         // The image kind never reaches `stepped`, because `panel_row` answered Empty first.
@@ -681,14 +702,72 @@ mod tests {
                 Some(&state()),
                 Some("Explore"),
                 None,
+                None,
                 None
             ),
             PanelRow::Retype
         );
         // And a run with nothing to say says so rather than showing an empty field.
         assert_eq!(
-            panel_row(RightPanel::Text, 0, Some(&state()), None, None, None),
+            panel_row(RightPanel::Text, 0, Some(&state()), None, None, None, None),
             PanelRow::Value("No text".to_string())
+        );
+    }
+
+    /// The colour row shows the fill as hex, and stays blank when the space does
+    /// not convert here rather than showing a wrong hex.
+    #[test]
+    fn the_colour_row_shows_the_fill_as_hex() {
+        use mangle_content::state::{Colour, ColourSpace};
+        let red = Colour {
+            space: ColourSpace::device_rgb(),
+            components: vec![1.0, 0.0, 0.0],
+            under: None,
+        };
+        assert_eq!(
+            panel_row(
+                RightPanel::Text,
+                4,
+                Some(&state()),
+                None,
+                None,
+                None,
+                Some(&red)
+            ),
+            PanelRow::Value("#FF0000".to_string())
+        );
+        assert_eq!(
+            panel_row(
+                RightPanel::Text,
+                4,
+                Some(&state()),
+                None,
+                None,
+                None,
+                Some(&Colour::black())
+            ),
+            PanelRow::Value("#000000".to_string())
+        );
+        let broken = Colour {
+            space: ColourSpace::device_rgb(),
+            components: Vec::new(),
+            under: None,
+        };
+        assert_eq!(
+            panel_row(
+                RightPanel::Text,
+                4,
+                Some(&state()),
+                None,
+                None,
+                None,
+                Some(&broken)
+            ),
+            PanelRow::Empty
+        );
+        assert_eq!(
+            panel_row(RightPanel::Text, 4, Some(&state()), None, None, None, None),
+            PanelRow::Empty
         );
     }
 
