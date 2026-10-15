@@ -1561,6 +1561,69 @@ mod tests {
         editor.save().expect("saves");
     }
 
+    /// A recolour through a session saves, and the reopened stream sets the colour.
+    ///
+    /// The run starts with no colour operator, so its space is the default gray:
+    /// recolouring it red writes red's luminance as a gray fill (`0.2126 g`),
+    /// which is the edit written in the object's own space rather than a space
+    /// invented for it. That conversion is what the panel's hex field commits.
+    #[test]
+    fn a_recolour_through_a_session_saves_and_reopens() {
+        let (doc, page) = doc_with_helvetica("BT /F1 12 Tf (Hi) Tj ET");
+        let resources = page
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .unwrap_or_default();
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &resources).expect("editable");
+        let at = editor
+            .model()
+            .objects()
+            .iter()
+            .position(|o| {
+                matches!(
+                    o.kind,
+                    crate::Kind::Line | crate::Kind::Block | crate::Kind::LooseRun
+                )
+            })
+            .expect("a text object");
+        let outcome = editor
+            .apply(
+                at,
+                &Change::recolour(mangle_content::state::Rgba {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                }),
+            )
+            .expect("recolours");
+        assert!(
+            outcome.label.contains("recolour"),
+            "the label says what happened: {}",
+            outcome.label
+        );
+        let save = editor.save().expect("saves");
+        let doc2 = Document::open(save.bytes.clone(), OpenOptions::default()).expect("reopens");
+        let cat = doc2.catalog().expect("a catalogue");
+        let root = cat
+            .get("Pages")
+            .and_then(Object::as_ref_id)
+            .expect("a tree");
+        let tree = mangle_doc::PageTree::build(&doc2, root).expect("the walk");
+        let page2 = tree.pages().first().expect("a page").clone();
+        let decoded = page2.decoded_contents(&doc2);
+        let stream = String::from_utf8_lossy(&decoded);
+        assert!(
+            stream.contains("0.2126 g"),
+            "the saved stream sets a gray fill at red's luminance: {stream}"
+        );
+    }
+
     /// Bitmap text is replaced whole rather than retyped: the run's codes name glyph
     /// programs, and the replacement installs a live-text subset for the new string.
     #[test]

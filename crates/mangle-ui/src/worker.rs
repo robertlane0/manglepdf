@@ -110,6 +110,15 @@ pub enum EditRequest {
         /// What the run should say instead.
         text: String,
     },
+    /// Recolour the object with this `#RRGGBB`, in its own colour space.
+    ///
+    /// The hex travels unparsed: the worker parses it, and what does not parse is
+    /// answered as a failure rather than written, so garbage in the field can never
+    /// become an edit.
+    Recolour {
+        /// What the colour field held when it was committed.
+        hex: String,
+    },
 }
 
 /// What came back.
@@ -315,6 +324,17 @@ impl Worker {
             }
             EditRequest::Text(property) => mangle_edit::Change::Text(*property),
             EditRequest::Retype { text } => mangle_edit::Change::Retype { text: text.clone() },
+            EditRequest::Recolour { hex } => match parse_hex_colour(hex) {
+                Some(colour) => mangle_edit::Change::recolour(colour),
+                None => {
+                    let _ = outbox.send(JobResult::Failed {
+                        reason: format!(
+                            "{hex:?} is not a `#RRGGBB` colour, so nothing was recoloured"
+                        ),
+                    });
+                    return;
+                }
+            },
         };
         let notice = match editor.apply(object, &change) {
             Ok(outcome) => outcome.notice,
@@ -600,6 +620,29 @@ fn root_of(doc: &Document) -> Ref {
         .unwrap_or_else(|| Ref::new(1, 0))
 }
 
+/// Parse `#RRGGBB` (with or without the `#`) into sRGB, `None` for anything else.
+///
+/// Seven characters would be an alpha the file's own spaces cannot hold uniformly,
+/// and three would be a guess about doubling — so exactly six hex digits or refusal.
+fn parse_hex_colour(hex: &str) -> Option<mangle_content::state::Rgba> {
+    let digits = hex.strip_prefix('#').unwrap_or(hex);
+    if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |at: usize| {
+        digits
+            .get(at..at + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .map(|v| f64::from(v) / 255.0)
+    };
+    Some(mangle_content::state::Rgba {
+        r: channel(0)?,
+        g: channel(2)?,
+        b: channel(4)?,
+        a: 1.0,
+    })
+}
+
 /// A page's resources, resolved the way the renderer needs them.
 fn resources_of(doc: &Document, page: &mangle_doc::Page) -> Resources {
     page.inherited
@@ -633,6 +676,19 @@ mod tests {
             thread::sleep(std::time::Duration::from_millis(50));
         }
         out
+    }
+
+    #[test]
+    fn only_six_hex_digits_are_a_colour() {
+        let red = parse_hex_colour("#FF0000").expect("six digits with a hash");
+        assert!((red.r - 1.0).abs() < 1e-9 && red.g == 0.0 && red.b == 0.0);
+        assert!(parse_hex_colour("00ff00").is_some(), "no hash is fine too");
+        for bad in ["", "#", "#FFF", "#FF0000FF", "red", "#GGGGGG", "# FF0000"] {
+            assert!(
+                parse_hex_colour(bad).is_none(),
+                "{bad:?} must not parse as a colour"
+            );
+        }
     }
 
     #[test]

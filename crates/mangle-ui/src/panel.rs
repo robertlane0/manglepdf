@@ -49,6 +49,15 @@ pub enum PanelRow {
         /// Which property a click sets.
         property: TextProperty,
     },
+    /// A `#RRGGBB` field the user can type a colour into.
+    ///
+    /// Committing it asks the worker for a recolour in the object's own space;
+    /// garbage stays in the field and writes nothing, which is why this is a
+    /// field and not a swatch that could only ever hold a colour.
+    Hex {
+        /// The fill as the panel shows it.
+        hex: String,
+    },
     /// A row with nothing to say yet: a field with no value in it.
     Empty,
 }
@@ -190,9 +199,10 @@ pub fn panel_row(
                 Some(style) => PanelRow::Value(style.to_string()),
                 None => PanelRow::Empty,
             },
-            // The fill as hex, blank when the space does not convert here.
+            // The fill as hex in a field the user can retype: committing it
+            // recolours in the object's own space, and garbage writes nothing.
             4 => match fill.and_then(colour_hex) {
-                Some(hex) => PanelRow::Value(hex),
+                Some(hex) => PanelRow::Hex { hex },
                 None => PanelRow::Empty,
             },
             _ => PanelRow::Empty,
@@ -481,8 +491,15 @@ mod tests {
     /// the four steppers, and honest blanks for the rest.
     #[test]
     fn every_label_names_the_control_beside_it() {
+        use mangle_content::state::{Colour, ColourSpace};
         let state = state();
+        let red = Colour {
+            space: ColourSpace::device_rgb(),
+            components: vec![1.0, 0.0, 0.0],
+            under: None,
+        };
         for (row, label) in TEXT_ROWS.iter().enumerate() {
+            let fill = (row == 4).then_some(&red);
             let control = panel_row(
                 RightPanel::Text,
                 row,
@@ -490,12 +507,13 @@ mod tests {
                 Some("text"),
                 None,
                 None,
-                None,
+                fill,
             );
             let kind = match control {
                 PanelRow::Retype => "content",
                 PanelRow::Value(_) => "value",
                 PanelRow::Stepper { .. } => "stepper",
+                PanelRow::Hex { .. } => "hex",
                 PanelRow::Empty => "blank",
             };
             let (want_label, want_kind) = match row {
@@ -503,7 +521,7 @@ mod tests {
                 1 => ("Font", "value"),
                 2 => ("Style", "blank"),
                 3 => ("Size", "stepper"),
-                4 => ("Colour", "blank"),
+                4 => ("Colour", "hex"),
                 5 => ("Alignment", "blank"),
                 6 => ("Line Spacing", "stepper"),
                 7 => ("Character Spacing", "stepper"),
@@ -714,10 +732,10 @@ mod tests {
         );
     }
 
-    /// The colour row shows the fill as hex, and stays blank when the space does
-    /// not convert here rather than showing a wrong hex.
+    /// The colour row is a hex field the user can retype, and stays blank when the
+    /// space does not convert here rather than showing a wrong hex.
     #[test]
-    fn the_colour_row_shows_the_fill_as_hex() {
+    fn the_colour_row_is_a_hex_field() {
         use mangle_content::state::{Colour, ColourSpace};
         let red = Colour {
             space: ColourSpace::device_rgb(),
@@ -734,7 +752,9 @@ mod tests {
                 None,
                 Some(&red)
             ),
-            PanelRow::Value("#FF0000".to_string())
+            PanelRow::Hex {
+                hex: "#FF0000".to_string()
+            }
         );
         assert_eq!(
             panel_row(
@@ -746,7 +766,9 @@ mod tests {
                 None,
                 Some(&Colour::black())
             ),
-            PanelRow::Value("#000000".to_string())
+            PanelRow::Hex {
+                hex: "#000000".to_string()
+            }
         );
         let broken = Colour {
             space: ColourSpace::device_rgb(),

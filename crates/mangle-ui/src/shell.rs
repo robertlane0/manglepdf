@@ -179,6 +179,10 @@ pub struct App {
     search: Search,
     /// What the content field holds while a run's text is being retyped.
     retype: Retype,
+    /// What the colour field holds while a `#RRGGBB` is being typed: the same
+    /// buffer shape as the retype field, because the resync and commit rules
+    /// are the same and only what a commit asks the worker differs.
+    hex: Retype,
     /// Whether the window has left the desktop, which is the one piece of windowing state the
     /// shell has to keep: the toggle is sent to the frame, and the frame does not answer back.
     full_screen: bool,
@@ -301,6 +305,7 @@ impl std::fmt::Debug for App {
             .field("drag", &self.drag)
             .field("search", &self.search)
             .field("retype", &self.retype)
+            .field("hex", &self.hex)
             .field("full_screen", &self.full_screen)
             .field("state", &self.state)
             .field("pages", &self.pages.len())
@@ -367,6 +372,7 @@ impl App {
             drag: None,
             search: Search::default(),
             retype: Retype::default(),
+            hex: Retype::default(),
             full_screen: false,
         }
     }
@@ -1207,6 +1213,7 @@ impl App {
         // buffer mutable while the loop holds the selection borrowed, and the two cannot
         // overlap.
         let mut retype_field: Option<egui::Rect> = None;
+        let mut hex_field: Option<(egui::Rect, String)> = None;
 
         for (row, name) in rows_for(self.state.right).into_iter().enumerate() {
             let r = egui::Rect::from_min_size(
@@ -1246,6 +1253,9 @@ impl App {
                 PanelRow::Empty => {}
                 PanelRow::Retype => {
                     retype_field = Some(field);
+                }
+                PanelRow::Hex { hex } => {
+                    hex_field = Some((field, hex));
                 }
                 PanelRow::Value(value) => {
                     p.text(
@@ -1359,6 +1369,14 @@ impl App {
             }
         }
 
+        // The colour field, where a `#RRGGBB` is typed. Same shape as the content
+        // field above — a real `TextEdit`, one id, resync except while typing,
+        // and Enter/Escape/click-away commits once — because the honesty rules
+        // are the same and only what a commit asks the worker differs.
+        if let Some((field, shown)) = hex_field {
+            self.colour_field(ui, field, &shown);
+        }
+
         // **Arrange is a section of this panel, not a panel of its own** — the mockup puts its
         // four buttons under the properties, and a right-hand side that swapped its whole
         // composition to move an object in the z-order would be a side that forgot what it was
@@ -1393,6 +1411,55 @@ impl App {
             if let Some(do_) = clicked_do {
                 self.act(do_);
             }
+        }
+    }
+
+    /// The colour row's hex field: type `#RRGGBB`, Enter commits a recolour.
+    ///
+    /// The resync and commit rules are the content field's: resync when the
+    /// selection changes or the page changed under a field that is not being
+    /// typed in, commit once on Enter/Escape/click-away when the text differs
+    /// from both what the page says and what was just asked. Garbage never
+    /// reaches the worker as an edit — the worker parses, and what does not
+    /// parse is answered as a failure rather than written.
+    fn colour_field(&mut self, ui: &egui::Ui, field: egui::Rect, shown: &str) {
+        if self.hex.for_selection != self.selected || (!self.hex.focused && self.hex.text != shown)
+        {
+            self.hex.text.clone_from(&shown.to_string());
+            self.hex.for_selection = self.selected;
+            self.hex.sent.clone_from(&self.hex.text);
+        }
+        let id = egui::Id::new("manglepdf-hex");
+        let area = egui::Area::new(id).order(egui::Order::Middle);
+        let response = area
+            .fixed_pos(field.min)
+            .constrain_to(field)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_size(field.size());
+                let edit = egui::TextEdit::singleline(&mut self.hex.text)
+                    .id(id)
+                    .hint_text("")
+                    .vertical_align(egui::Align::Center)
+                    .desired_width(field.width());
+                edit.show(ui)
+            });
+        self.hex.focused = response.inner.response.has_focus();
+        let commit = ui
+            .ctx()
+            .input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape))
+            || response.inner.response.lost_focus();
+        if commit
+            && self.hex.text != shown
+            && self.hex.text != self.hex.sent
+            && let Some(object) = self.selected
+        {
+            let hex = self.hex.text.clone();
+            self.hex.sent.clone_from(&hex);
+            self.worker.ask(Job::Edit {
+                page: self.state.page_index,
+                object,
+                request: EditRequest::Recolour { hex },
+            });
         }
     }
 
