@@ -74,7 +74,7 @@ The spine is where the architecture is decided, so it is built first and deeply.
    - Custom `--font-dirs` fallback discovery for missing fonts (S1.3): flag parsing, the fallback resolver, render threading, session threading, AP embedding threading, UI plumbing, and panel family/style/colour display landed; hex-field recolour (`PanelRow::Hex` → `EditRequest::Recolour` → `Change::Recolour` in the object's own space) landed; alignment control in the Text Properties panel remains.
 2. **Close open M2/M3 rendering items:**
    - Transparency groups, blend modes, and OCG visibility toggling in the renderer (`S0.3`).
-   - Sidebar thumbnail navigation and Bookmarks/Layers panels in `mangle-ui` (`S0.1`–`S0.3`).
+   - OCG Layers panel, Attachments/Signatures panels, and Developer Inspector in `mangle-ui` (thumbnail click navigation, bookmark rows with click navigation, and the share dialog landed).
 3. **M6 — Annotations, Add Content & Flatten (`mangle-edit`):**
    - Annotation data model, creation, editing, and pure deterministic `/AP /N` stream generators for all P0 types (Highlight/Underline/StrikeOut/Squiggly, Text/Note + Popup, FreeText, Line/Arrow, Square, Circle, Polygon/PolyLine/Cloud, Ink, Stamp, Caret, Link, FileAttachment, Redact).
    - Foreign annotation preservation (untouched annotations remain byte-identical on save).

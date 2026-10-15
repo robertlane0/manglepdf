@@ -22,7 +22,7 @@ use eframe::egui::Painter;
 
 use crate::panel::{self, PanelRow, stepped};
 use crate::theme::{Size, Theme};
-use crate::worker::{EditRequest, Job, JobResult, Supervisor};
+use crate::worker::{BookmarkRow, EditRequest, Job, JobResult, Supervisor};
 
 /// The six regions of the window, in the layout the mockup describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +80,7 @@ pub struct State {
     pub left: Option<LeftPanel>,
     pub right: RightPanel,
     /// The first row of the bookmark tree, until a document supplies its own.
-    pub bookmarks: Vec<String>,
+    pub bookmarks: Vec<BookmarkRow>,
     pub layers: Vec<(String, bool)>,
     /// What the user was told, and has not dismissed.
     pub notice: Option<String>,
@@ -198,6 +198,10 @@ pub struct App {
     thumb_press: Option<egui::Pos2>,
     /// The thumbnail rects drawn this frame, in page order, for hit-testing.
     thumbs: Vec<egui::Rect>,
+    /// Where a press started, for bookmark clicks.
+    mark_press: Option<egui::Pos2>,
+    /// The bookmark row rects drawn this frame, in row order, for hit-testing.
+    marks: Vec<egui::Rect>,
     /// What the search field holds, and where the page's text matched it.
     search: Search,
     /// What the content field holds while a run's text is being retyped.
@@ -330,6 +334,8 @@ impl std::fmt::Debug for App {
             .field("drag", &self.drag)
             .field("thumb_press", &self.thumb_press)
             .field("thumbs", &self.thumbs.len())
+            .field("mark_press", &self.mark_press)
+            .field("marks", &self.marks.len())
             .field("search", &self.search)
             .field("retype", &self.retype)
             .field("hex", &self.hex)
@@ -400,6 +406,8 @@ impl App {
             drag: None,
             thumb_press: None,
             thumbs: Vec::new(),
+            mark_press: None,
+            marks: Vec::new(),
             search: Search::default(),
             retype: Retype::default(),
             hex: Retype::default(),
@@ -574,7 +582,7 @@ impl App {
 
     /// Open a document. The caller supplies only what the shell draws; parsing
     /// happens on a worker and arrives as a message.
-    pub fn set_document(&mut self, name: String, page_count: usize, bookmarks: Vec<String>) {
+    pub fn set_document(&mut self, name: String, page_count: usize, bookmarks: Vec<BookmarkRow>) {
         self.state.file_name = Some(name);
         self.state.page_count = page_count;
         self.state.page_index = 0;
@@ -732,18 +740,32 @@ impl App {
         // rather than navigating away mid-gesture.
         if pressed {
             self.thumb_press = Some(hover);
+            self.mark_press = Some(hover);
         }
         if released && self.drag.is_none() {
-            if let Some(start) = self.thumb_press.take() {
-                if let (Some(a), Some(b)) = (
-                    thumbnail_hit(&self.thumbs, start),
-                    thumbnail_hit(&self.thumbs, hover),
-                ) {
-                    if a == b {
-                        self.goto_page(a);
-                        return;
-                    }
-                }
+            // Both presses are taken whatever hits: a press belongs to exactly
+            // one release, so nothing stale pairs with the next gesture.
+            let thumb = self.thumb_press.take();
+            let mark = self.mark_press.take();
+            if let Some(start) = thumb
+                && let (Some(a), Some(b)) = (
+                    stored_hit(&self.thumbs, start),
+                    stored_hit(&self.thumbs, hover),
+                )
+                && a == b
+            {
+                self.goto_page(a);
+                return;
+            }
+            if let Some(start) = mark
+                && let (Some(a), Some(b)) = (
+                    stored_hit(&self.marks, start),
+                    stored_hit(&self.marks, hover),
+                )
+                && a == b
+            {
+                self.follow_bookmark(a);
+                return;
             }
         }
         // The decision is pure and tested below; only the acting on it is here.
@@ -787,6 +809,25 @@ impl App {
     /// a window that updated one without the other would show a text panel for a photograph.
     /// Setting the selection directly is what left the panel on "Document Properties" while a
     /// box was drawn around a run of text.
+    /// Follow a bookmark row: navigate when it names a page, say so when not.
+    ///
+    /// A bookmark without a resolved destination is still drawn — its title is
+    /// real — so clicking it reports rather than navigating somewhere wrong.
+    fn follow_bookmark(&mut self, row: usize) {
+        let found = self
+            .state
+            .bookmarks
+            .get(row)
+            .map(|b| (b.title.clone(), b.page));
+        match found {
+            Some((_, Some(index))) => self.goto_page(index),
+            Some((title, None)) => {
+                self.tell(format!("{title:?} has no destination in this file"));
+            }
+            None => {}
+        }
+    }
+
     fn select(&mut self, object: Option<usize>) {
         self.selected = object;
         self.share = None;
@@ -1023,7 +1064,8 @@ impl App {
         // The list under the chosen tab.
         match self.state.left.unwrap_or_default() {
             LeftPanel::Bookmarks => {
-                for (i, name) in self.state.bookmarks.clone().iter().enumerate() {
+                self.marks.clear();
+                for row in self.state.bookmarks.clone() {
                     let r = egui::Rect::from_min_size(
                         egui::pos2(rect.left() + s.window_inset, y),
                         egui::vec2(
@@ -1034,13 +1076,14 @@ impl App {
                     if r.bottom() > rect.bottom() {
                         break;
                     }
+                    self.marks.push(r);
                     hoverable(ui, p, r, t);
-                    // Indent by depth; the mockout nests four levels.
-                    let indent = (i % 4) as f32 * s.item_gap * 1.5;
+                    // Indent by the outline's own depth, capped so deep trees stay readable.
+                    let indent = row.depth.min(4) as f32 * s.item_gap * 1.5;
                     p.text(
                         r.left_center() + egui::vec2(s.item_gap + indent, 0.0),
                         egui::Align2::LEFT_CENTER,
-                        name,
+                        &row.title,
                         t.type_scale.font_id(Size::Row),
                         t.text,
                     );
@@ -2174,12 +2217,12 @@ pub enum Pointer {
     },
 }
 
-/// Which thumbnail the pointer is over, if any.
+/// Which stored rect the pointer is over, if any.
 ///
-/// The rects are the ones `thumbnails` drew this frame — stored rather than
-/// recomputed, so a click can never disagree with the drawing about where a
-/// thumbnail is. Gaps between thumbs hit nothing.
-fn thumbnail_hit(rects: &[egui::Rect], point: egui::Pos2) -> Option<usize> {
+/// The rects are the ones the frame drew — thumbnails or bookmark rows — stored
+/// rather than recomputed, so a click can never disagree with the drawing about
+/// where a row is. Gaps between rows hit nothing.
+fn stored_hit(rects: &[egui::Rect], point: egui::Pos2) -> Option<usize> {
     rects.iter().position(|r| r.contains(point))
 }
 
@@ -2260,19 +2303,19 @@ mod tests {
     #[test]
     fn a_press_hits_the_thumbnail_drawn_there() {
         let rects = strip();
-        assert_eq!(thumbnail_hit(&rects, egui::pos2(50.0, 100.0)), Some(0));
-        assert_eq!(thumbnail_hit(&rects, egui::pos2(50.0, 250.0)), Some(1));
+        assert_eq!(stored_hit(&rects, egui::pos2(50.0, 100.0)), Some(0));
+        assert_eq!(stored_hit(&rects, egui::pos2(50.0, 250.0)), Some(1));
     }
 
     #[test]
     fn gaps_and_outside_hit_nothing() {
         let rects = strip();
         // Between the two thumbs.
-        assert_eq!(thumbnail_hit(&rects, egui::pos2(50.0, 191.0)), None);
+        assert_eq!(stored_hit(&rects, egui::pos2(50.0, 191.0)), None);
         // Left of the strip and past its end.
-        assert_eq!(thumbnail_hit(&rects, egui::pos2(5.0, 100.0)), None);
-        assert_eq!(thumbnail_hit(&rects, egui::pos2(50.0, 400.0)), None);
-        assert!(thumbnail_hit(&[], egui::pos2(50.0, 100.0)).is_none());
+        assert_eq!(stored_hit(&rects, egui::pos2(5.0, 100.0)), None);
+        assert_eq!(stored_hit(&rects, egui::pos2(50.0, 400.0)), None);
+        assert!(stored_hit(&[], egui::pos2(50.0, 100.0)).is_none());
     }
 
     /// A letter page drawn at one pixel per point, so a window point is a page point.

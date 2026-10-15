@@ -29,10 +29,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
 use mangle_content::Resources;
-use mangle_doc::PageTree;
+use mangle_doc::{NameTree, Outline, OutlineItem, PageTree, resolve_destination};
 use mangle_render::page::{PageRender, RenderOptions, render_page};
 use mangle_syntax::document::Document;
 use mangle_syntax::{OpenOptions, object::Ref};
+use std::collections::BTreeMap;
 
 /// What to do, as a message.
 #[derive(Debug, Clone)]
@@ -145,6 +146,121 @@ pub enum EditRequest {
     },
 }
 
+/// One bookmark row: title, nesting depth, and destination page.
+///
+/// Titles always resolve (lossy-decoded); destinations resolve when they name
+/// a page the tree knows. Anything else keeps its title with no page, and the
+/// window says so rather than navigating somewhere wrong.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BookmarkRow {
+    /// The title as text.
+    pub title: String,
+    /// Nesting depth, from zero.
+    pub depth: usize,
+    /// Destination page, from zero, when it resolved.
+    pub page: Option<usize>,
+}
+
+/// The document's outline as rows: titles with depths and resolved pages.
+///
+/// Explicit destinations, GoTo actions, and named destinations resolve through
+/// the same pages the worker draws; anything else keeps its title with no page.
+/// Rows are bounded by the outline reader's own caps, and the walk below it is
+/// bounded by the tree it built, so a hostile outline costs a walk, not a stack.
+fn bookmark_rows(doc: &Document, pages: &PageTree) -> Vec<BookmarkRow> {
+    let index_of: BTreeMap<Ref, usize> = pages
+        .pages()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.object_ref().map(|r| (r, i)))
+        .collect();
+    let outline = doc
+        .catalog_ref()
+        .and_then(|r| doc.object(r))
+        .and_then(|o| o.as_dict().cloned())
+        .and_then(|d| d.get("Outlines").and_then(|o| o.as_ref_id()))
+        .map(|r| Outline::build(doc, r))
+        .and_then(|o| o.ok());
+    let outline = outline.unwrap_or_default();
+    let destinations = name_destinations(doc);
+    let mut out = Vec::new();
+    walk_outline(&outline.items, 0, doc, &destinations, &index_of, &mut out);
+    out
+}
+
+/// The `/Names` and legacy `/Dests` destinations merged, as the catalogue reads them.
+fn name_destinations(doc: &Document) -> NameTree {
+    let mut tree = NameTree::default();
+    let Some(cat) = doc
+        .catalog_ref()
+        .and_then(|r| doc.object(r))
+        .and_then(|o| o.as_dict().cloned())
+    else {
+        return tree;
+    };
+    if let Some(names) = cat
+        .get("Names")
+        .and_then(|o| doc.resolve_object(o))
+        .and_then(|o| o.as_dict().cloned())
+        && let Some(dests) = names.get("Dests").and_then(|o| doc.resolve_object(o))
+        && let Ok(built) = NameTree::build_from_node(doc, dests)
+    {
+        tree = built;
+    }
+    if let Some(legacy) = cat
+        .get("Dests")
+        .and_then(|o| doc.resolve_object(o))
+        .and_then(|o| o.as_dict().cloned())
+    {
+        tree = tree.merged(NameTree::from_legacy(doc, &legacy));
+    }
+    tree
+}
+
+/// Walk the built outline tree, recording depth. The tree is already bounded by
+/// the reader (`MAX_TREE_DEPTH`), so the recursion below it is bounded too.
+fn walk_outline(
+    items: &[OutlineItem],
+    depth: usize,
+    doc: &Document,
+    dests: &NameTree,
+    index_of: &BTreeMap<Ref, usize>,
+    out: &mut Vec<BookmarkRow>,
+) {
+    for item in items {
+        out.push(BookmarkRow {
+            title: item.title_text(),
+            depth,
+            page: bookmark_page(doc, item.destination.as_ref(), dests, index_of),
+        });
+        walk_outline(&item.children, depth + 1, doc, dests, index_of, out);
+    }
+}
+
+/// The page an outline destination names, if it names one the tree knows.
+fn bookmark_page(
+    doc: &Document,
+    destination: Option<&mangle_syntax::object::Object>,
+    dests: &NameTree,
+    index_of: &BTreeMap<Ref, usize>,
+) -> Option<usize> {
+    let target = doc.resolve_object(destination?)?;
+    let array = match &target {
+        mangle_syntax::object::Object::Array(_) => target.clone(),
+        mangle_syntax::object::Object::Dict(d) => d
+            .get("D")
+            .and_then(|o| doc.resolve_object(o).or_else(|| Some(o.clone())))?,
+        mangle_syntax::object::Object::String(bytes) => dests
+            .get(bytes)
+            .and_then(|o| doc.resolve_object(o).or_else(|| Some(o.clone())))?,
+        mangle_syntax::object::Object::Name(name) => dests
+            .get(name.as_bytes())
+            .and_then(|o| doc.resolve_object(o).or_else(|| Some(o.clone())))?,
+        _ => return None,
+    };
+    resolve_destination(&array, &|r| index_of.get(&r).copied()).map(|d| d.page)
+}
+
 /// What came back.
 #[derive(Debug, Clone)]
 pub enum JobResult {
@@ -155,7 +271,7 @@ pub enum JobResult {
         /// How many pages it has.
         pages: usize,
         /// The first row of the bookmark tree, until a document supplies its own.
-        bookmarks: Vec<String>,
+        bookmarks: Vec<BookmarkRow>,
     },
     /// A page came back as pixels.
     Page {
@@ -727,7 +843,7 @@ fn run(inbox: Receiver<Job>, outbox: Sender<JobResult>, font_dirs: Vec<PathBuf>)
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .unwrap_or_else(|| path.to_string_lossy().into_owned()),
                             pages: worker.pages.len(),
-                            bookmarks: Vec::new(),
+                            bookmarks: bookmark_rows(&worker.doc, &worker.pages),
                         });
                         // The first page straight away, so the window is never blank on a file it
                         // did open.
@@ -993,6 +1109,87 @@ mod tests {
         assert!(
             notes.iter().any(|note| note.contains("--font-dirs")),
             "the render used the configured directory: {notes:?}"
+        );
+    }
+
+    /// An open reports the outline as rows with depths and pages.
+    ///
+    /// Two chapters sharing nothing but the catalogue, the first with a nested
+    /// section and the second with no destination at all: titles always resolve,
+    /// pages resolve when the destination names a page the tree knows.
+    #[test]
+    fn an_open_reports_the_outline_with_pages() {
+        let body = "BT /F1 12 Tf 1 0 0 1 20 700 Tm (Body) Tj ET";
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = vec![0usize];
+        let mut obj = |bytes: &[u8]| {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(bytes);
+        };
+        obj(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Outlines 9 0 R >>\nendobj\n");
+        obj(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>\nendobj\n");
+        obj(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 800] /Resources 7 0 R /Contents 5 0 R >>\nendobj\n");
+        obj(b"4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 800] /Resources 7 0 R /Contents 6 0 R >>\nendobj\n");
+        obj(&format!(
+            "5 0 obj\n<< /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+            body.len()
+        )
+        .into_bytes());
+        obj(&format!(
+            "6 0 obj\n<< /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+            body.len()
+        )
+        .into_bytes());
+        obj(b"7 0 obj\n<< /Font << /F1 8 0 R >> >>\nendobj\n");
+        obj(b"8 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n");
+        obj(b"9 0 obj\n<< /Type /Outlines /First 10 0 R /Last 12 0 R /Count 3 >>\nendobj\n");
+        obj(b"10 0 obj\n<< /Title (Chapter 1) /Parent 9 0 R /Next 12 0 R /First 11 0 R /Last 11 0 R /Count 1 /Dest [3 0 R /Fit] >>\nendobj\n");
+        obj(b"11 0 obj\n<< /Title (Section 1.1) /Parent 10 0 R /Dest [4 0 R /Fit] >>\nendobj\n");
+        obj(b"12 0 obj\n<< /Title (Chapter 2) /Parent 9 0 R /Prev 10 0 R >>\nendobj\n");
+        let startxref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 13\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 13 /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n")
+                .as_bytes(),
+        );
+
+        let path = std::env::temp_dir().join(format!("mangle-outline-{}.pdf", std::process::id()));
+        std::fs::write(&path, &pdf).expect("writes the test file");
+        let supervisor = Supervisor::start();
+        supervisor.ask(Job::Open(path.clone()));
+        let mut rows = None;
+        for result in collect(&supervisor, 2) {
+            match result {
+                JobResult::Opened { bookmarks, .. } => rows = Some(bookmarks),
+                JobResult::Page { .. } => {}
+                JobResult::Failed { reason } => panic!("the open failed: {reason}"),
+                JobResult::Saved { .. } => {}
+                JobResult::SharePrompt { .. } => panic!("unexpected share prompt"),
+            }
+        }
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            rows.expect("an outline came back"),
+            vec![
+                BookmarkRow {
+                    title: "Chapter 1".to_string(),
+                    depth: 0,
+                    page: Some(0),
+                },
+                BookmarkRow {
+                    title: "Section 1.1".to_string(),
+                    depth: 1,
+                    page: Some(1),
+                },
+                BookmarkRow {
+                    title: "Chapter 2".to_string(),
+                    depth: 0,
+                    page: None,
+                },
+            ]
         );
     }
 
