@@ -39,10 +39,10 @@ The spine is where the architecture is decided, so it is built first and deeply.
 | **M3** | All fonts + CMaps, colour spaces, patterns, shadings, transparency, CCITT/JBIG2/JPX, OCGs | Gate 3 render fidelity | **Substantially done** (Type 3, all 16 blend modes, and `ToUnicode` landed) |
 | **M4** | Page objects + provenance, select/move/scale/delete/recolour/Arrange, undo/redo, first save→reopen-elsewhere loop | U1/U2/U3 | **Done** |
 | **M5** | Text model, editing, reflow, font resolution/embedding/`ToUnicode`, Text Properties panel | Gauntlet S1 | **Substantially done** |
-| **M6** | AP generators, foreign annotations, comments, add text/image/shape/link, header/footer/watermark, flatten | Gauntlet S3–S5 | **Substantially done** (core engine & CLI landed; UI panel wiring next) |
-| **M7** | Fill, calculation/format/validate, Prepare Form, FDF/XFDF | Gauntlet S6 | Planned |
-| **M8** | Organizer, import/merge/split, retargeting | Gauntlet S7 | Planned |
-| **M9** | Redaction, sanitize, encryption write, signatures | Gauntlet S8–S9 | Planned |
+| **M6** | AP generators, foreign annotations, comments, add text/image/shape/link, header/footer/watermark, flatten | Gauntlet S3–S5 | **Substantially done** |
+| **M7** | Fill, calculation/format/validate, Prepare Form, FDF/XFDF | Gauntlet S6 | **Substantially done** (`mangle-edit::forms` landed) |
+| **M8** | Organizer, import/merge/split, retargeting | Gauntlet S7 | **Substantially done** (`mangle-edit::organize` landed) |
+| **M9** | Redaction, sanitize, encryption write, signatures | Gauntlet S8–S9 | **Next up** |
 | **M10** | Export/optimize, performance, fuzzer, crash safety | Gates 2 and 7 | Planned |
 | **M11** | UI states, full icon set, dark theme, HiDPI, responsive | Gate 8 ≥ 90 | Planned |
 | **M12** | Gauntlet dry-run, fixes, formal run, evidence pack, independent verification | All | Planned |

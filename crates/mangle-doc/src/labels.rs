@@ -60,15 +60,17 @@ pub struct PageLabel {
 }
 
 impl PageLabel {
-    /// Read `/PageLabels` from the catalogue.
+    /// Read `/PageLabels` from the catalogue (either a `/Nums` number tree or a direct array).
     #[must_use]
     pub fn build(resolver: &dyn Resolver, catalog: &Dict) -> Self {
-        let ranges = catalog
+        let resolved = catalog
             .get("PageLabels")
-            .and_then(|o| crate::follow(resolver, o.clone()))
-            .and_then(|o| o.as_array().map(<[Object]>::to_vec))
-            .map(|arr| arr.iter().filter_map(read_range).collect())
-            .unwrap_or_default();
+            .and_then(|o| crate::follow(resolver, o.clone()));
+        let ranges = match resolved {
+            Some(Object::Array(arr)) => arr.iter().filter_map(read_range).collect(),
+            Some(Object::Dict(tree)) => read_nums_tree(resolver, &tree),
+            _ => Vec::new(),
+        };
         Self { ranges }
     }
 
@@ -121,6 +123,56 @@ impl PageLabel {
     pub fn label_text(&self, index: usize) -> String {
         crate::outlines::decode_pdf_text(&self.label(index))
     }
+}
+
+fn read_nums_tree(resolver: &dyn Resolver, tree: &Dict) -> Vec<LabelRange> {
+    let Some(nums) = tree
+        .get("Nums")
+        .and_then(|o| crate::follow(resolver, o.clone()))
+        .and_then(|o| o.as_array().map(<[Object]>::to_vec))
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for pair in nums.chunks_exact(2) {
+        let (Some(idx_obj), Some(val_obj)) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        let Some(start) = idx_obj.as_i64().and_then(|n| usize::try_from(n).ok()) else {
+            continue;
+        };
+        let Some(resolved) = crate::follow(resolver, val_obj.clone()) else {
+            continue;
+        };
+        let Some(d) = resolved.as_dict() else {
+            continue;
+        };
+        let prefix = d
+            .get("P")
+            .and_then(Object::as_bytes)
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
+        let non_string_prefix =
+            d.get("P").is_some() && d.get("P").and_then(Object::as_bytes).is_none();
+        let style = match d.get("S").and_then(Object::as_name) {
+            Some(name) => Style::from_name(name),
+            None if non_string_prefix => Style::PrefixOnly,
+            None => Style::Decimal,
+        };
+        let first = d
+            .get("St")
+            .and_then(Object::as_i64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(1)
+            .max(1);
+        out.push(LabelRange {
+            start,
+            style,
+            prefix,
+            first,
+        });
+    }
+    out
 }
 
 fn read_range(obj: &Object) -> Option<LabelRange> {

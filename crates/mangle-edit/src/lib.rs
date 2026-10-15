@@ -22,7 +22,9 @@ pub mod arrange;
 pub mod edits;
 pub mod embed;
 pub mod flatten;
+pub mod forms;
 pub mod history;
+pub mod organize;
 pub mod page_objects;
 pub mod session;
 pub mod surgery;
@@ -42,7 +44,19 @@ pub use embed::{EMBEDDED_OBJECTS, EmbedError, EmbeddedFont, embed_truetype};
 pub use flatten::{
     FlattenError, FlattenFilter, FlattenOptions, FlattenReport, flatten_page, has_digital_signature,
 };
+pub use forms::{
+    AfCalcOp, AfNumberFormat, AfRangeValidate, FF_COMB, FF_COMBO, FF_EDIT, FF_MULTI_SELECT,
+    FF_MULTILINE, FF_NO_TOGGLE_TO_OFF, FF_PASSWORD, FF_PUSHBUTTON, FF_RADIO, FF_RADIOS_IN_UNISON,
+    FF_READ_ONLY, FF_REQUIRED, FormError, NewFieldKind, NewFieldSpec, XfaStatus, clear_form,
+    create_field, detect_xfa, export_form_xfdf, field_values, fill_field, import_form_xfdf,
+    parse_af_calculate, parse_af_number_format, parse_af_range, reset_form, strip_xfa,
+};
 pub use history::{Edit, History, HistoryError, Snapshot};
+pub use organize::{
+    LabelStyle, PageLabelRange, crop_page, delete_pages, extract_pages, insert_blank_page,
+    insert_pages_from_doc, merge_documents, reorder_page, replace_page, rotate_page,
+    set_page_labels, split_every_n,
+};
 pub use page_objects::{
     Kind, LineBreak, PageModel, PageObject, Provenance, Summary, content, page_text, provenance_of,
     summarise,
