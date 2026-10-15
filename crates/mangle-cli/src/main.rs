@@ -73,6 +73,9 @@ manglepdf-cli <command> <file.pdf> [options]
                             --crop x0,y0,x1,y1      keep that part of an image, in page space
                             --retype TEXT          replace the run's string, in its own font
                             --replace TEXT         replace bitmap text with live text
+                            --flatten              flatten all annotations on the page
+                            --flatten-markup       flatten markup annotations (keep links/forms)
+                            --flatten-forms        flatten form widgets only
                             --forward|--backward   arrange it past the object it overlaps
                             --to-front|--to-back   arrange it to the ends of the page
                             -o FILE                where to write (default beside the input)
@@ -177,6 +180,35 @@ fn edit(args: &[String]) -> Result<(), String> {
             "{} object(s) on page {}",
             model.objects().len(),
             index + 1
+        );
+        return Ok(());
+    }
+
+    if flag(args, "--flatten") || flag(args, "--flatten-markup") || flag(args, "--flatten-forms") {
+        let filter = if flag(args, "--flatten-markup") {
+            mangle_edit::FlattenFilter::MarkupOnly
+        } else if flag(args, "--flatten-forms") {
+            mangle_edit::FlattenFilter::FormsOnly
+        } else {
+            mangle_edit::FlattenFilter::All
+        };
+        let options = mangle_edit::FlattenOptions {
+            filter,
+            allow_signed: flag(args, "--allow-signed"),
+            ..mangle_edit::FlattenOptions::default()
+        };
+        let report =
+            mangle_edit::flatten_page(&doc, page, &options).map_err(|e| format!("{path}: {e}"))?;
+        let out_path = value(args, "-o").unwrap_or_else(|| format!("{path}.edited.pdf"));
+        let target = Path::new(&out_path);
+        let temp = target.with_extension("pdf.part");
+        std::fs::write(&temp, &report.save.bytes)
+            .map_err(|e| format!("{}: {e}", temp.display()))?;
+        std::fs::rename(&temp, target).map_err(|e| format!("{}: {e}", target.display()))?;
+        let _ = writeln!(
+            out,
+            "flattened {} annotation(s), skipped {} hidden, kept {}, wrote {out_path}",
+            report.flattened, report.skipped_hidden, report.kept
         );
         return Ok(());
     }

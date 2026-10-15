@@ -17,21 +17,31 @@
 )]
 #![warn(missing_debug_implementations)]
 
+pub mod annotations;
 pub mod arrange;
 pub mod edits;
 pub mod embed;
+pub mod flatten;
 pub mod history;
 pub mod page_objects;
 pub mod session;
 pub mod surgery;
 pub mod writeback;
 
+pub use annotations::{
+    ANNOT_FLAG_PRINT, AddedAnnotation, AnnotationBody, AnnotationSpec, LineEnding, LinkAction,
+    MarkupKind, add_annotation, add_header_footer, add_watermark, arrange_annotation,
+    delete_annotation, export_xfdf, import_xfdf, normalize_quad,
+};
 pub use arrange::{Arrange, ArrangeError, ArrangeRefusal, apply_arrange, arrange_patches, extent};
 pub use edits::{
     Change, ChangeError, Channel, Fonts, Refusal, TextProperty, apply_change, apply_change_with,
     line_spacing, map_point, patches_for, patches_for_with, text_value, verify, verify_with,
 };
 pub use embed::{EMBEDDED_OBJECTS, EmbedError, EmbeddedFont, embed_truetype};
+pub use flatten::{
+    FlattenError, FlattenFilter, FlattenOptions, FlattenReport, flatten_page, has_digital_signature,
+};
 pub use history::{Edit, History, HistoryError, Snapshot};
 pub use page_objects::{
     Kind, LineBreak, PageModel, PageObject, Provenance, Summary, content, page_text, provenance_of,

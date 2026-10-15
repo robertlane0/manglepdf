@@ -36,10 +36,10 @@ The spine is where the architecture is decided, so it is built first and deeply.
 | **M0** | Workspace, lints, `xtask policy`, docs, fixturegen skeleton, themed empty window at 1536×1024, icon pipeline + gallery + lint | Gate 0 | **Done** |
 | **M1** | Lexer/parser, xref + repair, object streams, decryption, page tree, full + incremental writer, round-trip tests, Inspector object tree | M1 exit: F01–F11 | **Mostly done** (Inspector UI pending) |
 | **M2** | Interpreter, paths/clips/text, tiles, viewer shell with thumbnails/zoom/nav | M2 exit: F31 p1 composition | **Mostly done** |
-| **M3** | All fonts + CMaps, colour spaces, patterns, shadings, transparency, CCITT/JBIG2/JPX, OCGs | Gate 3 render fidelity | **Substantially done** |
+| **M3** | All fonts + CMaps, colour spaces, patterns, shadings, transparency, CCITT/JBIG2/JPX, OCGs | Gate 3 render fidelity | **Substantially done** (Type 3, all 16 blend modes, and `ToUnicode` landed) |
 | **M4** | Page objects + provenance, select/move/scale/delete/recolour/Arrange, undo/redo, first save→reopen-elsewhere loop | U1/U2/U3 | **Done** |
-| **M5** | Text model, editing, reflow, font resolution/embedding/`ToUnicode`, Text Properties panel | Gauntlet S1 | **In progress** |
-| **M6** | AP generators, foreign annotations, comments, add text/image/shape/link, header/footer/watermark, flatten | Gauntlet S3–S5 | **Next up** |
+| **M5** | Text model, editing, reflow, font resolution/embedding/`ToUnicode`, Text Properties panel | Gauntlet S1 | **Substantially done** |
+| **M6** | AP generators, foreign annotations, comments, add text/image/shape/link, header/footer/watermark, flatten | Gauntlet S3–S5 | **Substantially done** (core engine & CLI landed; UI panel wiring next) |
 | **M7** | Fill, calculation/format/validate, Prepare Form, FDF/XFDF | Gauntlet S6 | Planned |
 | **M8** | Organizer, import/merge/split, retargeting | Gauntlet S7 | Planned |
 | **M9** | Redaction, sanitize, encryption write, signatures | Gauntlet S8–S9 | Planned |
@@ -54,15 +54,16 @@ The spine is where the architecture is decided, so it is built first and deeply.
   - In-house zlib/deflate/inflate, LZW, RunLength, ASCII85/Hex, PNG/TIFF predictors, and CCITT G3-1D/2D & G4 (verified byte-for-byte against `libtiff`).
   - Lossless full writer and incremental revision writer (`save_page`, `save_decoded`), plus page tree, outlines, destinations, page labels, OCGs, attachments, and metadata.
 - **Fonts & Text (`mangle-font`, `mangle-text`):**
-  - Embedded TrueType (`glyf` + composite glyphs), CFF Type 2 charstrings (local/global subrs, bias, `FDArray`/`FDSelect`, all 3 charset formats + Standard Strings), Type 1 (`eexec` + charstring decryption, `hsbw`, flex), and 12 bundled OFL Liberation faces for unembedded Standard-14 and metric-compatible alias (`Arial`, `TimesNewRoman`, `CourierNew`) substitution.
-  - Standard/WinAnsi/MacRoman/PDFDoc encodings, `/Differences`, 912-entry AGL, composite `/Type0` two-byte CIDs, `/W`/`/DW`, and `/CIDToGIDMap`.
+  - Embedded TrueType (`glyf` + composite glyphs), CFF Type 2 charstrings (local/global subrs, bias, `FDArray`/`FDSelect`, all 3 charset formats + Standard Strings), Type 1 (`eexec` + charstring decryption, `hsbw`, flex), Type 3 `/CharProcs` content-stream execution (`MAX_TYPE3_DEPTH = 8`), and 12 bundled OFL Liberation faces for unembedded Standard-14 and metric-compatible alias (`Arial`, `TimesNewRoman`, `CourierNew`) substitution.
+  - Standard/WinAnsi/MacRoman/PDFDoc encodings, `/Differences`, 912-entry AGL, `/ToUnicode` CMap parsing (`beginbfchar` and `beginbfrange` contiguous + array targets), composite `/Type0` two-byte CIDs, `/W`/`/DW`, and `/CIDToGIDMap`.
   - TrueType subsetter (`subset_truetype`) and 5-object `/Type0` CID font embedding (`embed_truetype`) with `/ToUnicode` CMaps.
-  - Geometric text extraction and case-insensitive search (`mangle-text`) with byte offsets and UI search bar integration.
+  - Geometric text extraction (both simple and `/Type0` composite fonts via `/ToUnicode`) and case-insensitive search (`mangle-text`) with byte offsets and UI search bar integration.
 - **Content, Rendering & Surgical Editing (`mangle-content`, `mangle-render`, `mangle-edit`, `mangle-ui`):**
   - Tokeniser and interpreter with byte-span provenance, Form XObject recursion (`MAX_FORM_DEPTH = 12`), and all 4 PDF function types.
-  - Analytic scanline rasterizer, per-pixel region clips (`W`/`W*`), Device/Cal/ICCBased/Indexed/Separation/DeviceN/Pattern colour spaces, axial/radial shadings, tiled patterns (`PaintType` 1 & 2), images with `/Decode`/`/ImageMask`/`/SMask` and pre-allocation bounds checks ([D18](docs/known-diffs.md#d18--an-smask-was-never-checked-against-the-image-it-masks-and-a-hostile-one-cost-a-gigabyte)), and annotation `/AP /N` rendering.
+  - Analytic scanline rasterizer, per-pixel region clips (`W`/`W*`), all 16 PDF blend modes (12 separable + 4 non-separable `Hue`/`Saturation`/`Color`/`Luminosity`), Device/Cal/ICCBased/Indexed/Separation/DeviceN/Pattern colour spaces, axial/radial shadings, tiled patterns (`PaintType` 1 & 2), images with `/Decode`/`/ImageMask`/`/SMask` and pre-allocation bounds checks ([D18](docs/known-diffs.md#d18--an-smask-was-never-checked-against-the-image-it-masks-and-a-hostile-one-cost-a-gigabyte)), and annotation `/AP /N` rendering.
   - `PageModel` grouping, byte-range `surgery` with `q`/`Q` balance checks, surgical `edits` (move, scale, rotate, delete, recolour, crop, text state `Tf`/`Tc`/`Tw`/`Tz`/`TL`/`Ts`/`Tr`), `arrange` z-order movement with state re-materialisation, bounded `Arc`-snapshot `History`, and `Editor` session.
-  - Text retyping across rungs 1–3 (`Change::Retype` in own font, `Change::RetypeFace` in same-family document font, `Change::RetypeIn` with embedded TrueType subset and status-bar notice) plus `replace_with_live_text` for Type 3 bitmap fonts.
+  - Text retyping across rungs 1–3 (`Change::Retype` in own simple or `/Type0` font via `/ToUnicode`, `Change::RetypeFace` in same-family document font, own-`/FontFile2` subset re-embedding with no notice, and `Change::RetypeIn` with bundled TrueType subset and status-bar notice) plus `replace_with_live_text` for Type 3 bitmap fonts.
+  - Annotations, `/AP /N` appearance generation (`Highlight` with `/BM /Multiply`, `Underline`, `StrikeOut`, `Squiggly`, `StickyNote` + `Popup` + `/IRT` replies, Unicode `FreeText`, `Line`/`Square`/`Circle`/`Polygon`/`PolyLine`/`Ink`/`Stamp`/`Caret`/`Link`/`Redact`), XFDF export/import, `/Artifact` headers/footers/watermarks, and pixel-equivalent idempotent `flatten_page` (`All`, `MarkupOnly`, `FormsOnly`, by index, `Hidden`/`NoView` skipping, and signed-document confirmation).
 
 ## Active & upcoming work queue
 
