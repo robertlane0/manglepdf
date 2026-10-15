@@ -73,8 +73,6 @@ The spine is where the architecture is decided, so it is built first and deeply.
    - Shared Form XObject copy-on-write ("edit this page only" vs "edit everywhere", S1.15) — engine landed (`inspect_shared_form`, `edit_shared_form`); UI prompt wiring remains.
    - Custom `--font-dirs` fallback discovery for missing fonts (S1.3) and font/colour pickers in the Text Properties panel.
 2. **Close open M2/M3 rendering items:**
-   - Preserve open vs closed subpath state through `transform_path` and `Device::stroke_outline` so open polylines of ≥3 points do not close as rings ([D14](docs/known-diffs.md)).
-   - Execute Type 3 glyph procedures (`/CharProcs`, `/FontMatrix`, `/Resources`) with recursion depth bound (`MAX_TYPE3_DEPTH`) in `mangle-render`.
    - Transparency groups, blend modes, and OCG visibility toggling in the renderer (`S0.3`).
    - Sidebar thumbnail navigation and Bookmarks/Layers panels in `mangle-ui` (`S0.1`–`S0.3`).
 3. **M6 — Annotations, Add Content & Flatten (`mangle-edit`):**

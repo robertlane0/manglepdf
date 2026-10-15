@@ -1694,7 +1694,9 @@ with the fix.
 ## D14 — an open path of three or more points is stroked as a closed ring
 
 **Severity: high, and much wider than D13 — every stroked polyline that is not a single straight
-segment, which is most of them. Open, found while fixing D13, and recorded rather than closed.**
+segment, which is most of them. Closed: the subpath now carries its `closepath` flag from
+`transform_path` through `Device::stroke_outline` to `stroke_outline`, so open paths are
+capped and rings are ringed.**
 
 `Device::stroke_outline` normalises a subpath before walking its dashes:
 
@@ -1767,6 +1769,15 @@ point *open* paths out of its list, and says so: comparing two renderings of a r
 two rings, which says nothing about the outline. The joins and caps of such a path are pinned
 geometrically instead, by the two tests above it, because a sample read off a ring's corner is
 measuring this defect and not D13.
+
+### Closed
+
+The representation change described above landed: `transform_path` records `closepath` as a
+flag on each `Subpath` (a path that merely returns to its start stays open), and
+`Device::stroke_outline` threads that flag to `stroke_outline`, which strokes open paths as
+one capped outline and closed ones as outer/inner rings. Evidence:
+`a_closepath_is_carried_through_to_the_polygon` and
+`an_open_subpath_is_one_outline_and_a_ring_is_two` in `crates/mangle-render/src/lib.rs`.
 
 ---
 
