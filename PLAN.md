@@ -70,7 +70,7 @@ The spine is where the architecture is decided, so it is built first and deeply.
 1. **Finish M5 UI remains (engine done):**
    - Paragraph/block width reflow and alignment (`Left`, `Center`, `Right`, `Justify` via `Tw` / line positioning) when inserted or deleted text changes line length (S1.9) — engine landed in `mangle-edit::reflow`.
    - Paragraph deletion cleanup ensuring `BT`/`ET` and `q`/`Q` remain balanced without shifting unrelated blocks (S1.10).
-   - Shared Form XObject copy-on-write (S1.15): engine landed (`inspect_shared_form`, `edit_shared_form`); edits and arranges inside unopened forms are refused by name (`InsideForm`) instead of patching page bytes at form offsets, and line grouping keeps form identity; UI prompt wiring remains.
+   - Shared Form XObject copy-on-write (S1.15): engine landed (`inspect_shared_form`, `edit_shared_form`); edits and arranges inside unopened forms are refused by name (`InsideForm`) instead of patching page bytes at form offsets, and line grouping keeps form identity; paragraph reflow is a first-class `Change::Reflow` with independent verify; UI prompt wiring and alignment control remain.
    - Custom `--font-dirs` fallback discovery for missing fonts (S1.3): flag parsing, the fallback resolver, render threading, session threading, AP embedding threading, UI plumbing, and panel family/style/colour display landed; hex-field recolour (`PanelRow::Hex` → `EditRequest::Recolour` → `Change::Recolour` in the object's own space) landed; alignment control in the Text Properties panel remains.
 2. **Close open M2/M3 rendering items:**
    - Transparency groups, blend modes, and OCG visibility toggling in the renderer (`S0.3`).

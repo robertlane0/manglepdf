@@ -133,6 +133,22 @@ pub enum Change {
     /// edit local — the surrounding text state is what the file had it as, restored by the
     /// `Q`.
     Text(TextProperty),
+    /// Relay out the object's text inside its own width, with an alignment.
+    ///
+    /// GOAL.md §4.4's alignment control and S1.9's reflow: the text is what the block
+    /// should say (usually its own content, re-wrapped), laid out in the block's
+    /// original width with `Left`, `Center`, `Right`, or justified last-line-left
+    /// alignment. Like [`Change::Retype`], every character must already have a code in
+    /// the run's own WinAnsi font — anything else is a [`Refusal::GlyphNotEncodable`]
+    /// naming the character, never mojibake.
+    Reflow {
+        /// What the block should say.
+        text: String,
+        /// The width table the layout measures with (a standard family name).
+        base_font: String,
+        /// How lines sit in the block's width.
+        alignment: crate::reflow::TextAlignment,
+    },
     /// Replace the run's shown string with `text`, encoded in the run's own font.
     ///
     /// The one edit that rewrites the object's own bytes rather than wrapping them: there
@@ -709,6 +725,24 @@ pub fn patches_for_with(
             Ok(wrap_each(stream, object, "", &body))
         }
         Change::Retype { text } => retype_patches(stream, object, text, fonts),
+        Change::Reflow {
+            text,
+            base_font,
+            alignment,
+        } => {
+            // The encoding check names the character; the patcher only reports shapes.
+            for word in text.split_whitespace() {
+                if let Err(ch) = crate::reflow::encode_winansi_line(word) {
+                    return Err(Refusal::GlyphNotEncodable {
+                        ch,
+                        font: base_font.clone(),
+                    });
+                }
+            }
+            let (patches, _) = crate::reflow::reflow_patches(object, text, base_font, *alignment)
+                .map_err(|_| Refusal::NoSpans)?;
+            Ok(patches)
+        }
         Change::RetypeIn { text, font, cids } => {
             retype_in_patches(stream, object, text, font, cids)
         }
@@ -1996,6 +2030,14 @@ pub fn verify_with(
     if let Change::RetypeFace { text, font } = change {
         return verify_retype_face(before, after, object, text, font, fonts);
     }
+    if let Change::Reflow {
+        text,
+        base_font,
+        alignment,
+    } = change
+    {
+        return verify_reflow(before, after, object, text, base_font, *alignment);
+    }
 
     let expected = match change {
         Change::Delete => old.objects().len().saturating_sub(1),
@@ -2016,6 +2058,9 @@ pub fn verify_with(
         Change::Text(_) => Ok(()),
         // Dispatched above: checked by its bytes rather than by the geometry.
         Change::Retype { .. } | Change::RetypeIn { .. } | Change::RetypeFace { .. } => Ok(()),
+        // Dispatched above: a reflow legitimately re-breaks lines, so the object
+        // count is not what is checked.
+        Change::Reflow { .. } => Ok(()),
         // A crop changes where the image **is not**: it still sits exactly where it was, because
         // a clip cuts what is drawn rather than moving it. So the ordinary checks apply.
         Change::Crop { .. } => Ok(()),
@@ -2308,11 +2353,27 @@ fn check_retype_bytes(
     // rather than positional, because the replacement may be longer or shorter and every
     // span after it shifts — and a multiset rather than a set, because a page may show
     // the same string twice and only one of the two was retyped.
-    let mut before_all: Vec<Vec<u8>> = before.records.iter().filter_map(raw).collect();
-    let mut after_all: Vec<Vec<u8>> = after.records.iter().filter_map(raw).collect();
+    let before_all: Vec<Vec<u8>> = before.records.iter().filter_map(raw).collect();
+    let after_all: Vec<Vec<u8>> = after.records.iter().filter_map(raw).collect();
+    check_byte_multisets(before_all, after_all, &old_raws, pieces, "retyped")
+}
+
+/// Every old string gone exactly once, every new piece present exactly once, and
+/// everything else byte-identical — without pinning the record count.
+///
+/// A reflow legitimately re-breaks lines, so one `Tj` becomes several and the count
+/// moves; what must hold is that the bytes are the laid-out ones and nothing else
+/// changed, which is the same multiset question the retype check asks.
+fn check_byte_multisets(
+    mut before_all: Vec<Vec<u8>>,
+    mut after_all: Vec<Vec<u8>>,
+    old_raws: &[Vec<u8>],
+    pieces: &[Vec<u8>],
+    changed: &str,
+) -> Result<(), String> {
     before_all.sort();
     after_all.sort();
-    for was in &old_raws {
+    for was in old_raws {
         let Some(at) = before_all
             .iter()
             .position(|b| b.as_slice() == was.as_slice())
@@ -2331,9 +2392,66 @@ fn check_retype_bytes(
         after_all.remove(at);
     }
     if before_all != after_all {
-        return Err("a run besides the retyped one changed".to_string());
+        return Err(format!("a run besides the {changed} one changed"));
     }
     Ok(())
+}
+
+/// Did a reflow write exactly the laid-out lines, and nothing else?
+///
+/// The expected lines are recomputed from the target's own measurements through
+/// the same layout the patcher ran — not remembered from the edit — and checked
+/// with the shared byte tail: every old string gone once, every new line present
+/// once, everything else identical.
+fn verify_reflow(
+    before: &PageContent,
+    after: &PageContent,
+    object: usize,
+    text: &str,
+    base_font: &str,
+    alignment: crate::reflow::TextAlignment,
+) -> Result<(), String> {
+    use crate::page_objects::PageModel;
+
+    let old = PageModel::build(&before.records);
+    let Some(target) = old.objects().get(object) else {
+        return Err(format!(
+            "object {object} is not one of the page's {} objects",
+            old.objects().len()
+        ));
+    };
+    let Some(inputs) = crate::reflow::reflow_inputs(target) else {
+        return Err("the reflowed object has no records to measure".to_string());
+    };
+    let layout = crate::reflow::layout_paragraph(
+        text,
+        base_font,
+        inputs.size,
+        inputs.leading,
+        inputs.char_spacing,
+        inputs.horizontal_scale,
+        inputs.x0,
+        inputs.top_y,
+        inputs.width,
+        inputs.max_height,
+        alignment,
+    );
+    let mut pieces = Vec::with_capacity(layout.lines.len());
+    for line in &layout.lines {
+        pieces.push(
+            crate::reflow::encode_winansi_line(&line.text).map_err(|ch| {
+                format!("character {ch:?} is not in WinAnsi and needs a subset embedding instead")
+            })?,
+        );
+    }
+    let raw = |r: &mangle_content::interp::Record| match &r.mark {
+        Mark::Glyphs { text, .. } => Some(text.clone()),
+        _ => None,
+    };
+    let old_raws: Vec<Vec<u8>> = target.records.iter().filter_map(raw).collect();
+    let before_all: Vec<Vec<u8>> = before.records.iter().filter_map(raw).collect();
+    let after_all: Vec<Vec<u8>> = after.records.iter().filter_map(raw).collect();
+    check_byte_multisets(before_all, after_all, &old_raws, &pieces, "reflowed")
 }
 
 /// The operand a text property is written with, for a label and for the check above.
@@ -3952,6 +4070,48 @@ mod tests {
         assert!(
             matches!(err, crate::ArrangeRefusal::InsideForm { ref form } if form == "Fm0"),
             "{err}"
+        );
+    }
+
+    /// A reflow change rewraps inside the block's own width, leaves the neighbour
+    /// alone, and verifies — while text outside WinAnsi is refused naming the gap.
+    #[test]
+    fn a_reflow_change_rewraps_inside_the_block_and_verifies() {
+        let stream = b"BT /F1 10 Tf 1 0 0 1 40 700 Tm (First column text here) Tj ET \
+                       BT /F1 10 Tf 1 0 0 1 300 650 Tm (Second column stays identical) Tj ET";
+        let resources = winansi_resources("F1");
+        let before = mangle_content::interp::run_with(&ContentStream::parse(stream), &resources);
+        let model = PageModel::build(&before.records);
+        assert_eq!(model.objects().len(), 2);
+        let change = Change::Reflow {
+            text: "Updated first column with several words that wrap cleanly inside the column"
+                .to_string(),
+            base_font: "Helvetica".to_string(),
+            alignment: crate::reflow::TextAlignment::Justify,
+        };
+        let patches =
+            patches_for_with(stream, &model.objects()[0], &change, None).expect("reflows");
+        let applied = crate::surgery::apply(stream, &patches).expect("applies");
+        let after =
+            mangle_content::interp::run_with(&ContentStream::parse(&applied.bytes), &resources);
+        verify(&before, &after, 0, &change).expect("verifies");
+        let after_str = String::from_utf8_lossy(&applied.bytes);
+        assert!(
+            after_str
+                .contains("BT /F1 10 Tf 1 0 0 1 300 650 Tm (Second column stays identical) Tj ET"),
+            "second column bytes are untouched: {after_str}"
+        );
+
+        let bad = Change::Reflow {
+            text: "Hello \u{65e5}\u{672c}\u{8a9e}".to_string(),
+            base_font: "Helvetica".to_string(),
+            alignment: crate::reflow::TextAlignment::Left,
+        };
+        let err =
+            patches_for_with(stream, &model.objects()[0], &bad, None).expect_err("CJK is refused");
+        assert!(
+            matches!(err, Refusal::GlyphNotEncodable { .. }),
+            "the refusal names the encoding gap: {err}"
         );
     }
 }

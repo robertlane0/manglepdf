@@ -196,6 +196,61 @@ pub fn layout_paragraph(
     }
 }
 
+/// The measurements a reflow lays out from: the font resource and size, the leading
+/// and spacings, and the block's left edge, top baseline, width, and height.
+///
+/// Factored out of [`reflow_patches`] so the verifier recomputes the same layout
+/// from the same numbers rather than trusting remembered ones.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReflowInputs {
+    /// The font resource, as the stream named it.
+    pub font: String,
+    /// The type size in points.
+    pub size: f64,
+    /// The leading (`TL`, or 1.2× size).
+    pub leading: f64,
+    /// Character spacing (`Tc`).
+    pub char_spacing: f64,
+    /// Horizontal scale (`Tz`, percent).
+    pub horizontal_scale: f64,
+    /// The block's left edge in page space.
+    pub x0: f64,
+    /// The first baseline in page space.
+    pub top_y: f64,
+    /// The block's width in points.
+    pub width: f64,
+    /// The block's height in points, for the overflow flag.
+    pub max_height: f64,
+}
+
+/// Read the measurements [`reflow_patches`] lays out from.
+///
+/// `None` when the object has no records, which is also what refuses the edit.
+#[must_use]
+pub(crate) fn reflow_inputs(object: &PageObject) -> Option<ReflowInputs> {
+    let first_rec = object.records.first()?;
+    let size = first_rec.text.size.max(1.0);
+    Some(ReflowInputs {
+        font: first_rec
+            .text
+            .font
+            .clone()
+            .unwrap_or_else(|| "F1".to_string()),
+        size,
+        leading: if first_rec.text.leading > 0.0 {
+            first_rec.text.leading
+        } else {
+            size * 1.2
+        },
+        char_spacing: first_rec.text.char_spacing,
+        horizontal_scale: first_rec.text.horizontal_scale,
+        x0: object.bounds.x0,
+        top_y: (object.bounds.y1 - size * 0.75).max(object.bounds.y0),
+        width: (object.bounds.x1 - object.bounds.x0).max(size * 4.0),
+        max_height: (object.bounds.y1 - object.bounds.y0).max(size),
+    })
+}
+
 /// Build surgical byte-range patches that replace `object` with `text` reflowed inside
 /// `object`'s original width and aligned according to `alignment` (`S1.9`).
 ///
@@ -208,50 +263,45 @@ pub fn reflow_patches(
     base_font: &str,
     alignment: TextAlignment,
 ) -> Result<(Vec<Patch>, ReflowLayout), String> {
-    let Some(first_rec) = object.records.first() else {
-        return Err("object has no records to reflow".to_string());
-    };
     let Some(first_span) = object.spans.first() else {
         return Err("object has no spans to reflow".to_string());
     };
-    let font_res = first_rec
-        .text
-        .font
-        .clone()
-        .unwrap_or_else(|| "F1".to_string());
-    let font_size = first_rec.text.size.max(1.0);
-    let leading = if first_rec.text.leading > 0.0 {
-        first_rec.text.leading
-    } else {
-        font_size * 1.2
+    let Some(inputs) = reflow_inputs(object) else {
+        return Err("object has no records to reflow".to_string());
     };
-    let tc = first_rec.text.char_spacing;
-    let tz = first_rec.text.horizontal_scale;
-    let x0 = object.bounds.x0;
-    let top_y = (object.bounds.y1 - font_size * 0.75).max(object.bounds.y0);
-    let width = (object.bounds.x1 - object.bounds.x0).max(font_size * 4.0);
-    let max_height = (object.bounds.y1 - object.bounds.y0).max(font_size);
 
     let layout = layout_paragraph(
-        text, base_font, font_size, leading, tc, tz, x0, top_y, width, max_height, alignment,
+        text,
+        base_font,
+        inputs.size,
+        inputs.leading,
+        inputs.char_spacing,
+        inputs.horizontal_scale,
+        inputs.x0,
+        inputs.top_y,
+        inputs.width,
+        inputs.max_height,
+        alignment,
     );
 
-    let mut ops = format!("q /{font_res} {} Tf ", fmt_num(font_size));
-    if tc.abs() > 1e-6 {
-        let _ = write!(ops, "{} Tc ", fmt_num(tc));
+    let mut ops = format!("q /{} {} Tf ", inputs.font, fmt_num(inputs.size));
+    if inputs.char_spacing.abs() > 1e-6 {
+        let _ = write!(ops, "{} Tc ", fmt_num(inputs.char_spacing));
     }
-    if (tz - 100.0).abs() > 1e-6 {
-        let _ = write!(ops, "{} Tz ", fmt_num(tz));
+    if (inputs.horizontal_scale - 100.0).abs() > 1e-6 {
+        let _ = write!(ops, "{} Tz ", fmt_num(inputs.horizontal_scale));
     }
     for line in &layout.lines {
-        let encoded = encode_winansi_line(&line.text)?;
+        let encoded = encode_winansi_line(&line.text).map_err(|ch| {
+            format!("character {ch:?} is not in WinAnsi and needs a subset embedding instead")
+        })?;
         let mut lit = Vec::new();
         mangle_syntax::writer::write_literal_string(&mut lit, &encoded);
         let lit_str = String::from_utf8_lossy(&lit);
         let _ = write!(
             ops,
             "1 0 0 1 {} {} Tm {} Tw {lit_str} Tj ",
-            fmt_num(x0 + line.x_offset),
+            fmt_num(inputs.x0 + line.x_offset),
             fmt_num(line.y),
             fmt_num(line.word_spacing),
         );
@@ -505,26 +555,21 @@ fn fmt_num(v: f64) -> String {
 /// Reflow writes into the run's own simple font, so the bytes must be codes in that
 /// font's encoding. This helper assumes the common WinAnsi base and refuses glyphs
 /// outside it rather than emitting UTF-8 bytes that would render as mojibake. Unicode
-/// reflow needs a subset embedding via the rung-3 retype path instead.
-fn encode_winansi_line(line: &str) -> Result<Vec<u8>, String> {
+/// reflow needs a subset embedding via the rung-3 retype path instead. The refusal
+/// names the character so a caller can name it back rather than rewording it.
+pub(crate) fn encode_winansi_line(line: &str) -> Result<Vec<u8>, char> {
     let encoding = FontEncoding::new(FontBase::WinAnsi);
     let mut out = Vec::with_capacity(line.len());
     for ch in line.chars() {
         let code_point = u32::from(ch);
-        let name = mangle_font::agl_name(code_point).ok_or_else(|| {
-            format!("character {ch:?} has no glyph name and needs a subset embedding instead")
-        })?;
+        let name = mangle_font::agl_name(code_point).ok_or(ch)?;
         let code = if code_point <= 255 && encoding.glyph_for(code_point) == Some(name) {
             code_point
         } else {
-            encoding.code_for(name).ok_or_else(|| {
-                format!("character {ch:?} is not in WinAnsi and needs a subset embedding instead")
-            })?
+            encoding.code_for(name).ok_or(ch)?
         };
         if code > 255 {
-            return Err(format!(
-                "character {ch:?} is not in WinAnsi and needs a subset embedding instead"
-            ));
+            return Err(ch);
         }
         out.push(code as u8);
     }

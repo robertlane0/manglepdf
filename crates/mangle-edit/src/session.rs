@@ -1018,6 +1018,7 @@ fn change_label(change: &Change) -> String {
             format!("set the {} to {}", property.name(), value)
         }
         Change::Retype { text } => format!("retype as {text:?}"),
+        Change::Reflow { alignment, .. } => format!("reflow paragraph ({alignment:?})"),
         Change::RetypeIn { text, font, .. } => format!("retype as {text:?} in {font}"),
         Change::RetypeFace { text, font } => format!("retype as {text:?} in {font}"),
     }
