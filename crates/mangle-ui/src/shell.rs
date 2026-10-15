@@ -193,6 +193,11 @@ pub struct App {
     selected: Option<usize>,
     /// Where a drag started on the page, and what the object under it was.
     drag: Option<Drag>,
+    /// Where a press started, for thumbnail clicks: a release on the same
+    /// thumbnail navigates, anywhere else is not a navigation.
+    thumb_press: Option<egui::Pos2>,
+    /// The thumbnail rects drawn this frame, in page order, for hit-testing.
+    thumbs: Vec<egui::Rect>,
     /// What the search field holds, and where the page's text matched it.
     search: Search,
     /// What the content field holds while a run's text is being retyped.
@@ -323,6 +328,8 @@ impl std::fmt::Debug for App {
             .field("objects", &self.objects.len())
             .field("selected", &self.selected)
             .field("drag", &self.drag)
+            .field("thumb_press", &self.thumb_press)
+            .field("thumbs", &self.thumbs.len())
             .field("search", &self.search)
             .field("retype", &self.retype)
             .field("hex", &self.hex)
@@ -391,6 +398,8 @@ impl App {
             objects: Vec::new(),
             selected: None,
             drag: None,
+            thumb_press: None,
+            thumbs: Vec::new(),
             search: Search::default(),
             retype: Retype::default(),
             hex: Retype::default(),
@@ -717,6 +726,26 @@ impl App {
 
         let pressed = ui.ctx().input(|i| i.pointer.any_pressed());
         let released = ui.ctx().input(|i| i.pointer.any_released());
+        // A press and release on one thumbnail navigates there. Before the canvas
+        // logic so a sidebar click never reaches it — and skipped while a canvas
+        // drag is active, so dragging an object onto the sidebar still moves it
+        // rather than navigating away mid-gesture.
+        if pressed {
+            self.thumb_press = Some(hover);
+        }
+        if released && self.drag.is_none() {
+            if let Some(start) = self.thumb_press.take() {
+                if let (Some(a), Some(b)) = (
+                    thumbnail_hit(&self.thumbs, start),
+                    thumbnail_hit(&self.thumbs, hover),
+                ) {
+                    if a == b {
+                        self.goto_page(a);
+                        return;
+                    }
+                }
+            }
+        }
         // The decision is pure and tested below; only the acting on it is here.
         match pointer_outcome(
             &self.objects,
@@ -1820,6 +1849,7 @@ impl App {
         let thumb_w = width - s.item_gap * 3.0;
         let thumb_h = thumb_w * 792.0 / 612.0;
         let mut y = rect.top() + s.item_gap;
+        self.thumbs.clear();
         for i in 0..self.state.page_count {
             if y + thumb_h > rect.bottom() {
                 break;
@@ -1828,6 +1858,7 @@ impl App {
                 egui::pos2(rect.left() + s.item_gap, y),
                 egui::vec2(thumb_w, thumb_h),
             );
+            self.thumbs.push(r);
             let current = i == self.state.page_index;
             hoverable(ui, p, r, t);
             p.rect_filled(r, 2.0, if current { t.page_selected } else { t.page });
@@ -2143,6 +2174,15 @@ pub enum Pointer {
     },
 }
 
+/// Which thumbnail the pointer is over, if any.
+///
+/// The rects are the ones `thumbnails` drew this frame — stored rather than
+/// recomputed, so a click can never disagree with the drawing about where a
+/// thumbnail is. Gaps between thumbs hit nothing.
+fn thumbnail_hit(rects: &[egui::Rect], point: egui::Pos2) -> Option<usize> {
+    rects.iter().position(|r| r.contains(point))
+}
+
 /// Decide what a pointer event means.
 ///
 /// `hover` is where the pointer is, `pressed` and `released` are this frame's buttons, and `drag`
@@ -2208,6 +2248,32 @@ mod tests {
     use super::*;
     use mangle_content::Matrix;
     use mangle_edit::Summary;
+
+    /// Two drawn thumbnail rects, for hit-testing clicks against the drawing.
+    fn strip() -> Vec<egui::Rect> {
+        vec![
+            egui::Rect::from_min_size(egui::pos2(10.0, 60.0), egui::vec2(100.0, 129.0)),
+            egui::Rect::from_min_size(egui::pos2(10.0, 193.0), egui::vec2(100.0, 129.0)),
+        ]
+    }
+
+    #[test]
+    fn a_press_hits_the_thumbnail_drawn_there() {
+        let rects = strip();
+        assert_eq!(thumbnail_hit(&rects, egui::pos2(50.0, 100.0)), Some(0));
+        assert_eq!(thumbnail_hit(&rects, egui::pos2(50.0, 250.0)), Some(1));
+    }
+
+    #[test]
+    fn gaps_and_outside_hit_nothing() {
+        let rects = strip();
+        // Between the two thumbs.
+        assert_eq!(thumbnail_hit(&rects, egui::pos2(50.0, 191.0)), None);
+        // Left of the strip and past its end.
+        assert_eq!(thumbnail_hit(&rects, egui::pos2(5.0, 100.0)), None);
+        assert_eq!(thumbnail_hit(&rects, egui::pos2(50.0, 400.0)), None);
+        assert!(thumbnail_hit(&[], egui::pos2(50.0, 100.0)).is_none());
+    }
 
     /// A letter page drawn at one pixel per point, so a window point is a page point.
     fn placement() -> crate::canvas::PagePlacement {

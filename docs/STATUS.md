@@ -73,7 +73,7 @@ the full two-hour Tier-B corpus run).
 
 1. **M5 UI remains (engine done)** — Form-edit undo integration (form edits save outside session history).
 2. **Stroke `closepath` state (`D14`, closed) and Type 3 glyph execution (landed)** — Open polylines keep their caps and rings keep their inner boundary (`a_closepath_is_carried_through_to_the_polygon`, `an_open_subpath_is_one_outline_and_a_ring_is_two`); Type 3 `/CharProcs` execute under `MAX_TYPE3_DEPTH = 8`.
-3. **Viewer sidebar & panels (M1/M2/M3)** — Clickable thumbnail navigation, Bookmarks/Outlines
+3. **Viewer sidebar & panels (M1/M2/M3)** — Thumbnail click navigation landed, Bookmarks/Outlines
    tree navigation, OCG Layers toggle panel, Attachments/Signatures panels, and Developer
    Inspector in `mangle-ui`.
 4. **M6 Annotations, Add Content & Flatten** — Annotation creation/editing, `/AP /N` generators
