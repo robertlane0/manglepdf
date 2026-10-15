@@ -10,6 +10,13 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = mangle_ui::options_from(&args);
 
+    // The JSON-RPC line protocol is still open (GOAL.md §9): say so on stderr
+    // rather than opening a window the flag did not ask for.
+    if options.automation_stdio {
+        eprintln!("--automation-stdio is not implemented yet");
+        std::process::exit(2);
+    }
+
     // The reference window is 1536x1024 logical.
     let (mut w, mut h) = (1536.0_f32, 1024.0_f32);
     if let Some(size) = options.window_size {

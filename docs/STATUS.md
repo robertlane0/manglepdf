@@ -87,4 +87,4 @@ the full two-hour Tier-B corpus run).
    (R2–R6), and PKCS#7/CMS digital signatures.
 8. **M10–M12 Export, Optimize, Fixtures & Gauntlet** — Raster/text/image export, PDF creation
    from images, Optimize/compress, remaining Tier-A fixtures (incl. F31 `TravelGuide.pdf`),
-   `--automation-stdio`, and the `cargo xtask gauntlet` runner.
+   `--automation-stdio` (parsed; the line protocol is still open), and the `cargo xtask gauntlet` runner.

@@ -88,4 +88,4 @@ The spine is where the architecture is decided, so it is built first and deeply.
 6. **M9 — Protect:**
    - Redaction mark & irreversible apply (glyph removal, image painting, metadata/layer scrub, full rewrite, leak scan), Sanitize command + report, encryption writing (RC4/AES-128/AES-256 R6), and PKCS#7/CMS SHA-256 RSA/ECDSA signing & verification.
 7. **M10–M12 — Export, Optimize, Complete Fixtures, UI Polish & Gauntlet:**
-   - Page raster export (PNG/JPEG at DPI), image extraction, PDF creation from images, Optimize/GC/compress, remaining Tier-A fixtures (incl. F31 `TravelGuide.pdf`), `--automation-stdio`, and full `cargo xtask gauntlet` execution.
+   - Page raster export (PNG/JPEG at DPI), image extraction, PDF creation from images, Optimize/GC/compress, remaining Tier-A fixtures (incl. F31 `TravelGuide.pdf`), `--automation-stdio` (flag parsed with an honest unimplemented exit; the JSON-RPC line protocol is still open), and full `cargo xtask gauntlet` execution.

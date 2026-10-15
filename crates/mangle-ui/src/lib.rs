@@ -34,7 +34,7 @@ pub use worker::{Job, JobResult, Supervisor};
 /// Parse the command line the way the acceptance harness expects.
 ///
 /// The flags are the ones GOAL.md §8.6 names: window size, scale, theme,
-/// preference reset, open, and font directories.
+/// preference reset, open, automation lines, and font directories.
 #[must_use]
 pub fn options_from(args: &[String]) -> Options {
     let mut o = Options::default();
@@ -74,6 +74,7 @@ pub fn options_from(args: &[String]) -> Options {
                     o.font_dirs = Some(parse_font_dirs(value));
                 }
             }
+            Some("--automation-stdio") => o.automation_stdio = true,
             _ => {}
         }
         i += 1;
@@ -121,6 +122,9 @@ pub struct Options {
     /// no system directories (bundled faces only). This is what makes S1.3's
     /// "font unavailable" case reproducible.
     pub font_dirs: Option<Vec<std::path::PathBuf>>,
+    /// Speak JSON-RPC automation lines on stdio (GOAL.md §9) instead of opening a
+    /// window. Parsed here; the line protocol itself is still open.
+    pub automation_stdio: bool,
 }
 
 /// Split a `--font-dirs PATH[,PATH]` value. An empty value means no directories.
@@ -209,6 +213,12 @@ mod tests {
         assert_eq!(o.font_dirs, Some(Vec::new()));
         let o = options_from(&args(&[]));
         assert_eq!(o.font_dirs, None);
+    }
+
+    #[test]
+    fn automation_stdio_is_a_switch_not_a_window() {
+        assert!(!options_from(&args(&[])).automation_stdio);
+        assert!(options_from(&args(&["--automation-stdio"])).automation_stdio);
     }
 
     #[test]
