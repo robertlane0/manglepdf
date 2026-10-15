@@ -52,7 +52,7 @@ manglepdf-cli <command> <file.pdf> [options]
   info      [-json]        what the file is: version, pages, encryption, repair
   pages                  one line per page: index, size, rotation
   check                  validate structure; exit 0 clean, 1 repaired, 2 unusable
-  render   -o FILE       rasterize a page (not implemented yet)
+  render   -o FILE       rasterize a page to PNG or JPEG (by extension)
   extract  [-page N]     the text of a page
   save     [-o FILE] [--incremental] [--full] [--reset-prefs]
   edit     [options]     select and change a page object; save the result
