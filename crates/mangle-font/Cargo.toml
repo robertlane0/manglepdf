@@ -19,5 +19,8 @@ unicode-bidi.workspace = true
 unicode-normalization.workspace = true
 unicode-segmentation.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
