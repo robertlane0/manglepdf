@@ -33,8 +33,8 @@ pub use worker::{Job, JobResult, Supervisor};
 
 /// Parse the command line the way the acceptance harness expects.
 ///
-/// The flags are the ones `FINISH.md` names: a window size, a scale factor, a theme and
-/// a preference reset.
+/// The flags are the ones GOAL.md §8.6 names: window size, scale, theme,
+/// preference reset, open, and font directories.
 #[must_use]
 pub fn options_from(args: &[String]) -> Options {
     let mut o = Options::default();
@@ -66,6 +66,12 @@ pub fn options_from(args: &[String]) -> Options {
                 i += 1;
                 if let Some(path) = args.get(i) {
                     o.open = Some(path.clone());
+                }
+            }
+            Some("--font-dirs") => {
+                i += 1;
+                if let Some(value) = args.get(i) {
+                    o.font_dirs = Some(parse_font_dirs(value));
                 }
             }
             _ => {}
@@ -109,6 +115,25 @@ pub struct Options {
     pub theme: ThemeChoice,
     pub reset_prefs: bool,
     pub open: Option<String>,
+    /// Replacement system font directories (`--font-dirs PATH[,PATH]`).
+    ///
+    /// `None` is the default discovery; `Some` replaces it, and an empty list means
+    /// no system directories (bundled faces only). This is what makes S1.3's
+    /// "font unavailable" case reproducible.
+    pub font_dirs: Option<Vec<std::path::PathBuf>>,
+}
+
+/// Split a `--font-dirs PATH[,PATH]` value. An empty value means no directories.
+fn parse_font_dirs(value: &str) -> Vec<std::path::PathBuf> {
+    if value.trim().is_empty() {
+        return Vec::new();
+    }
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect()
 }
 
 #[cfg(test)]
@@ -168,6 +193,22 @@ mod tests {
         let o = options_from(&args(&["--nonsense", "--theme", "light", "--reset-prefs"]));
         assert!(o.reset_prefs);
         assert_eq!(o.theme, ThemeChoice::Light);
+    }
+
+    #[test]
+    fn font_dirs_replace_system_discovery() {
+        let o = options_from(&args(&["--font-dirs", "/a,/b"]));
+        assert_eq!(
+            o.font_dirs,
+            Some(vec![
+                std::path::PathBuf::from("/a"),
+                std::path::PathBuf::from("/b")
+            ])
+        );
+        let o = options_from(&args(&["--font-dirs", ""]));
+        assert_eq!(o.font_dirs, Some(Vec::new()));
+        let o = options_from(&args(&[]));
+        assert_eq!(o.font_dirs, None);
     }
 
     #[test]
