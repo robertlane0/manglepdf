@@ -295,6 +295,16 @@ pub struct Summary {
     /// selectors. This is the same read-out the joiner produces, so the panel's content field and
     /// a search over the page agree by construction.
     pub content: Option<String>,
+    /// The `/BaseFont` family the run's font resource resolves to (e.g. `Helvetica`).
+    ///
+    /// Read from the document's font dictionary, not the stream: a `Tj` names `/F1` and the
+    /// dictionary says what `/F1` is. `None` when the resource does not resolve or names no
+    /// `BaseFont`, which is when the panel shows the resource name instead.
+    pub font_family: Option<String>,
+    /// The weight the `/BaseFont` suffix declares (`Regular`, `Bold`, `Italic`, `BoldItalic`).
+    ///
+    /// `None` for an unrecognised suffix — the panel shows a blank rather than a guess.
+    pub font_style: Option<String>,
 }
 
 impl Summary {
@@ -317,15 +327,62 @@ pub fn summarise(
     resources: &mangle_content::Resources,
     object: &PageObject,
 ) -> Summary {
+    let text = object.records.first().map(|r| r.text.clone());
+    let (font_family, font_style) = text
+        .as_ref()
+        .map(|t| font_names(doc, resources, t))
+        .unwrap_or((None, None));
     Summary {
         kind: object.kind,
         bounds: object.bounds,
         spans: object.spans.clone(),
         form: object.form.clone(),
         line_break: object.line_break,
-        text: object.records.first().map(|r| r.text.clone()),
+        text,
         content: content(resources, doc, object),
+        font_family,
+        font_style,
     }
+}
+
+/// The `/BaseFont` family and weight a run's font resource resolves to.
+///
+/// The resource name (`/F1`) is looked up in the page's font table and followed
+/// through the document, then split with the shared name parser. Anything
+/// unresolvable or unrecognised is `None` rather than a guess.
+fn font_names(
+    doc: &Document,
+    resources: &mangle_content::Resources,
+    text: &mangle_content::state::TextState,
+) -> (Option<String>, Option<String>) {
+    let Some(resource) = text.font.as_deref() else {
+        return (None, None);
+    };
+    let base = resources
+        .fonts
+        .get(resource)
+        .and_then(|found| doc.resolve_object(found).or_else(|| Some(found.clone())))
+        .and_then(|o| o.as_dict().cloned())
+        .and_then(|d| {
+            d.get("BaseFont")
+                .and_then(mangle_syntax::object::Object::as_name)
+                .map(|n| n.to_vec())
+        })
+        .and_then(|n| String::from_utf8(n).ok());
+    let Some(base) = base else {
+        return (None, None);
+    };
+    let Some((family, style)) = mangle_font::split_name(&base) else {
+        return (None, None);
+    };
+    let style = match mangle_font::style_words(&style) {
+        Some((false, false)) => Some("Regular".to_string()),
+        Some((true, false)) => Some("Bold".to_string()),
+        Some((false, true)) => Some("Italic".to_string()),
+        Some((true, true)) => Some("BoldItalic".to_string()),
+        None => None,
+    };
+    (Some(family.to_string()), style)
 }
 
 /// The page's whole text, in the order the file drew it.
@@ -891,5 +948,103 @@ mod tests {
         ];
         let m = PageModel::build(&records);
         assert_eq!(m.objects().len(), 2, "two baselines, two lines");
+    }
+
+    /// A summary names the `/BaseFont` family and weight its font resource resolves to.
+    ///
+    /// Three runs in three fonts: a known weight, an unrecognised suffix (family but
+    /// no weight), and a dictionary with no `/BaseFont` at all (neither). Anything
+    /// unresolvable is `None` rather than a guess, which is what the panel shows a
+    /// blank for.
+    #[test]
+    fn a_summary_names_the_resolved_family_and_weight() {
+        use std::fmt::Write as _;
+        let content = "BT /F1 12 Tf 1 0 0 1 20 700 Tm (Aa) Tj ET \
+                       BT /F2 12 Tf 1 0 0 1 20 650 Tm (Bb) Tj ET \
+                       BT /F3 12 Tf 1 0 0 1 20 600 Tm (Cc) Tj ET";
+        let mut pdf = String::from("%PDF-1.7\n");
+        let mut offsets = vec![0usize];
+        offsets.push(pdf.len());
+        pdf.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        offsets.push(pdf.len());
+        pdf.push_str("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        offsets.push(pdf.len());
+        pdf.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 800] \
+             /Resources << /Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        offsets.push(pdf.len());
+        let _ = write!(
+            pdf,
+            "4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+            content.len()
+        );
+        offsets.push(pdf.len());
+        pdf.push_str(
+            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>\nendobj\n",
+        );
+        offsets.push(pdf.len());
+        pdf.push_str(
+            "6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Extrabold /Encoding /WinAnsiEncoding >>\nendobj\n",
+        );
+        offsets.push(pdf.len());
+        pdf.push_str(
+            "7 0 obj\n<< /Type /Font /Subtype /Type1 /Encoding /WinAnsiEncoding >>\nendobj\n",
+        );
+        let startxref = pdf.len();
+        pdf.push_str("xref\n0 8\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            let _ = writeln!(pdf, "{offset:010} 00000 n ");
+        }
+        let _ = write!(
+            pdf,
+            "trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n"
+        );
+        let doc =
+            mangle_syntax::Document::open(pdf.into_bytes(), mangle_syntax::OpenOptions::default())
+                .expect("opens");
+        let cat = doc.catalog().expect("a catalogue");
+        let root = cat
+            .get("Pages")
+            .and_then(mangle_syntax::object::Object::as_ref_id)
+            .expect("a tree");
+        let tree = mangle_doc::PageTree::build(&doc, root).expect("the walk");
+        let page = tree.pages().first().expect("a page").clone();
+        let resources = page
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| mangle_content::Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .expect("resources");
+        let stream = page.decoded_contents(&doc);
+        let run = mangle_content::interp::run_with(
+            &mangle_content::ContentStream::parse(&stream),
+            &resources,
+        );
+        let model = PageModel::build(&run.records);
+        assert_eq!(model.objects().len(), 3, "three baselines, three objects");
+        let mut names: Vec<(Option<String>, Option<String>, Option<String>)> = model
+            .objects()
+            .iter()
+            .map(|o| {
+                let summary = super::summarise(&doc, &resources, o);
+                (summary.content, summary.font_family, summary.font_style)
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                (
+                    Some("Aa".to_string()),
+                    Some("Helvetica".to_string()),
+                    Some("Bold".to_string())
+                ),
+                (Some("Bb".to_string()), Some("Helvetica".to_string()), None),
+                (Some("Cc".to_string()), None, None),
+            ]
+        );
     }
 }

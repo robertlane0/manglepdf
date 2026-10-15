@@ -33,7 +33,7 @@ pub use encoding::{
 };
 pub use metrics::{
     ASCII_START, CidToGid, CidWidths, Declared, DeclaredWidths, STANDARD_14, Widths, ascii_glyphs,
-    by_name, canonical_family, split_name, standard_glyph, standard_run, widths,
+    by_name, canonical_family, split_name, standard_glyph, standard_run, style_words, widths,
 };
 pub use outline::{Outline, Program, Segment, em_scale, from_cff, from_true_type, from_type1};
 pub use subset::{glyph_for_unicode, subset_truetype};

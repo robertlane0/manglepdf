@@ -132,6 +132,10 @@ const BASELINE_STEP: f64 = 1.0;
 
 /// What row `row` of a panel is, for an object drawn in `text`.
 ///
+/// `family` and `style` are the `/BaseFont` names the worker resolved for the
+/// run's font resource — `None` when the resource did not resolve, which is
+/// when the rows show the resource name and a blank.
+///
 /// Only the Text Properties panel reads anything out yet, because only its four numbers are on
 /// the records the interpreter already carries. Every row of every other panel is
 /// [`PanelRow::Empty`] — a field with nothing in it — which is why the matching is on the panel
@@ -143,6 +147,8 @@ pub fn panel_row(
     row: usize,
     text: Option<&TextState>,
     content: Option<&str>,
+    family: Option<&str>,
+    style: Option<&str>,
 ) -> PanelRow {
     let Some(state) = text else {
         return PanelRow::Empty;
@@ -152,8 +158,6 @@ pub fn panel_row(
     }
     let step = TEXT_STEPS.iter().find(|(r, _)| *r == row).map(|(_, s)| *s);
     let Some(step) = step else {
-        // The font's resource name is the one thing a panel can show without the font layer,
-        // and it is the name as the stream wrote it — `/F3`, not a family.
         return match row {
             // What the object says, in a field the user can retype: the shell draws the
             // selection's full text there, and committing it asks the worker for a retype.
@@ -161,12 +165,20 @@ pub fn panel_row(
                 Some(_) => PanelRow::Retype,
                 None => PanelRow::Value("No text".to_string()),
             },
+            // The resolved family, falling back to the resource name the stream wrote
+            // (`/F3`) when the font did not resolve — and "not named" rather than an
+            // invented family when the run names nothing at all.
             1 => PanelRow::Value(
-                state
-                    .font
-                    .clone()
+                family
+                    .map(str::to_string)
+                    .or_else(|| state.font.clone())
                     .unwrap_or_else(|| "Not named".to_string()),
             ),
+            // The resolved weight, blank when the suffix was unrecognised.
+            2 => match style {
+                Some(style) => PanelRow::Value(style.to_string()),
+                None => PanelRow::Empty,
+            },
             _ => PanelRow::Empty,
         };
     };
@@ -332,13 +344,15 @@ mod tests {
             line_break: None,
             text: None,
             content: None,
+            font_family: None,
+            font_style: None,
         }
     }
 
     /// A size is read out of the state the object was drawn with, in the file's own units.
     #[test]
     fn the_size_row_reads_the_size_the_file_drew() {
-        let row = panel_row(RightPanel::Text, 3, Some(&state()), None);
+        let row = panel_row(RightPanel::Text, 3, Some(&state()), None, None, None);
         match row {
             PanelRow::Stepper {
                 shown,
@@ -357,7 +371,7 @@ mod tests {
     /// edit it writes is a `TL` in points — and the conversion is done in one place.
     #[test]
     fn line_spacing_is_shown_as_a_multiple_and_written_as_points() {
-        match panel_row(RightPanel::Text, 6, Some(&state()), None) {
+        match panel_row(RightPanel::Text, 6, Some(&state()), None, None, None) {
             PanelRow::Stepper {
                 shown,
                 step,
@@ -382,21 +396,60 @@ mod tests {
     /// A row with no state to read is empty, rather than showing a number the file never had.
     #[test]
     fn an_object_that_is_not_text_has_nothing_to_show() {
-        assert_eq!(panel_row(RightPanel::Text, 3, None, None), PanelRow::Empty);
-        assert_eq!(panel_row(RightPanel::Text, 6, None, None), PanelRow::Empty);
+        assert_eq!(
+            panel_row(RightPanel::Text, 3, None, None, None, None),
+            PanelRow::Empty
+        );
+        assert_eq!(
+            panel_row(RightPanel::Text, 6, None, None, None, None),
+            PanelRow::Empty
+        );
     }
 
-    /// The font row shows the resource name, which is the only thing that can be shown without
-    /// the font layer — and says "not named" rather than inventing a family.
+    /// The font row shows the resolved family, falling back to the resource name the
+    /// stream wrote — and says "not named" rather than inventing a family.
     #[test]
-    fn the_font_row_shows_the_name_the_stream_wrote() {
+    fn the_font_row_shows_the_resolved_family_first() {
         assert_eq!(
-            panel_row(RightPanel::Text, 1, Some(&state()), None),
+            panel_row(
+                RightPanel::Text,
+                1,
+                Some(&state()),
+                None,
+                Some("Helvetica"),
+                Some("Bold")
+            ),
+            PanelRow::Value("Helvetica".to_string())
+        );
+        assert_eq!(
+            panel_row(RightPanel::Text, 1, Some(&state()), None, None, None),
             PanelRow::Value("/F3".to_string())
         );
         assert_eq!(
-            panel_row(RightPanel::Text, 1, Some(&TextState::default()), None),
+            panel_row(
+                RightPanel::Text,
+                1,
+                Some(&TextState::default()),
+                None,
+                None,
+                None
+            ),
             PanelRow::Value("Not named".to_string())
+        );
+        assert_eq!(
+            panel_row(
+                RightPanel::Text,
+                2,
+                Some(&state()),
+                None,
+                Some("Helvetica"),
+                Some("Bold")
+            ),
+            PanelRow::Value("Bold".to_string())
+        );
+        assert_eq!(
+            panel_row(RightPanel::Text, 2, Some(&state()), None, None, None),
+            PanelRow::Empty
         );
     }
 
@@ -410,7 +463,14 @@ mod tests {
     fn every_label_names_the_control_beside_it() {
         let state = state();
         for (row, label) in TEXT_ROWS.iter().enumerate() {
-            let control = panel_row(RightPanel::Text, row, Some(&state), Some("text"));
+            let control = panel_row(
+                RightPanel::Text,
+                row,
+                Some(&state),
+                Some("text"),
+                None,
+                None,
+            );
             let kind = match control {
                 PanelRow::Retype => "content",
                 PanelRow::Value(_) => "value",
@@ -440,7 +500,7 @@ mod tests {
     fn a_stepper_writes_the_value_it_read_plus_one_step() {
         let s = state();
         let PanelRow::Stepper { property, .. } =
-            panel_row(RightPanel::Text, 3, Some(&state()), None)
+            panel_row(RightPanel::Text, 3, Some(&state()), None, None, None)
         else {
             panic!("size should be a stepper");
         };
@@ -459,7 +519,7 @@ mod tests {
             ..TextState::default()
         };
         assert_eq!(
-            panel_row(RightPanel::Text, 6, Some(&s), None),
+            panel_row(RightPanel::Text, 6, Some(&s), None, None, None),
             PanelRow::Empty
         );
     }
@@ -474,7 +534,7 @@ mod tests {
         let s = state();
         // The size row, which shows 48 and moves by a whole point.
         let PanelRow::Stepper { property, .. } =
-            panel_row(RightPanel::Text, 3, Some(&state()), None)
+            panel_row(RightPanel::Text, 3, Some(&state()), None, None, None)
         else {
             panic!("size should be a stepper");
         };
@@ -490,7 +550,7 @@ mod tests {
     fn a_click_of_the_line_spacing_row_moves_a_multiple() {
         let s = state();
         let PanelRow::Stepper { property, .. } =
-            panel_row(RightPanel::Text, 6, Some(&state()), None)
+            panel_row(RightPanel::Text, 6, Some(&state()), None, None, None)
         else {
             panic!("line spacing should be a stepper");
         };
@@ -537,7 +597,10 @@ mod tests {
     /// not do is invent a value for an object whose state it does not have.
     #[test]
     fn a_picture_has_no_state_to_step_from() {
-        assert_eq!(panel_row(RightPanel::Text, 3, None, None), PanelRow::Empty);
+        assert_eq!(
+            panel_row(RightPanel::Text, 3, None, None, None, None),
+            PanelRow::Empty
+        );
         // The image kind never reaches `stepped`, because `panel_row` answered Empty first.
         assert_eq!(
             panel_for(Some(&Summary {
@@ -612,12 +675,19 @@ mod tests {
     #[test]
     fn the_content_row_shows_what_the_object_says() {
         assert_eq!(
-            panel_row(RightPanel::Text, 0, Some(&state()), Some("Explore")),
+            panel_row(
+                RightPanel::Text,
+                0,
+                Some(&state()),
+                Some("Explore"),
+                None,
+                None
+            ),
             PanelRow::Retype
         );
         // And a run with nothing to say says so rather than showing an empty field.
         assert_eq!(
-            panel_row(RightPanel::Text, 0, Some(&state()), None),
+            panel_row(RightPanel::Text, 0, Some(&state()), None, None, None),
             PanelRow::Value("No text".to_string())
         );
     }

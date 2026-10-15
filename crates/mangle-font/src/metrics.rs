@@ -228,7 +228,10 @@ pub fn canonical_family(family: &str) -> &str {
 }
 
 /// Read a style suffix as a pair of flags, or `None` when it is not one this file knows.
-pub(crate) fn style_words(style: &str) -> Option<(bool, bool)> {
+///
+/// Public for the same reason `split_name` is: one parser for font names, wherever the
+/// question is asked — including the panel that shows a run's weight.
+pub fn style_words(style: &str) -> Option<(bool, bool)> {
     let mut rest = style.to_ascii_lowercase();
     let mut bold = false;
     let mut italic = false;
