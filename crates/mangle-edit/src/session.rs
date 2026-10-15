@@ -324,6 +324,39 @@ impl Editor {
         self.system_dirs = dirs;
     }
 
+    /// Build the reflow change the alignment control asks for.
+    ///
+    /// The text is the object's own content and the measuring family its resolved
+    /// one (Helvetica for metrics the file does not name), so the worker hands over
+    /// a direction and the session supplies what it means. Empty text is refused:
+    /// reflowing nothing would blank the block while claiming to align it.
+    pub fn align_change(
+        &self,
+        index: usize,
+        alignment: crate::TextAlignment,
+    ) -> Result<Change, SessionError> {
+        let no_spans =
+            || SessionError::Change(crate::ChangeError::Refused(crate::Refusal::NoSpans));
+        let model = self.model();
+        let Some(object) = model.objects().get(index) else {
+            return Err(no_spans());
+        };
+        let Some(text) = crate::page_objects::content(&self.resources, &self.doc, object)
+            .filter(|t| !t.trim().is_empty())
+        else {
+            return Err(no_spans());
+        };
+        let summary = crate::summarise(&self.doc, &self.resources, object);
+        let base_font = summary
+            .font_family
+            .unwrap_or_else(|| "Helvetica".to_string());
+        Ok(Change::Reflow {
+            text,
+            base_font,
+            alignment,
+        })
+    }
+
     /// The page's content streams as they now stand, after every undo and redo.
     #[must_use]
     pub fn parts(&self) -> &[Vec<u8>] {
@@ -1557,6 +1590,59 @@ mod tests {
                 && outcome.label.contains("Liberation Sans")
                 && outcome.label.contains('α'),
             "the notice names the system file's own family: {}",
+            outcome.label
+        );
+        editor.save().expect("saves");
+    }
+
+    /// The alignment control builds its change off the session, not the request.
+    ///
+    /// The worker hands over only the direction; the text being aligned and the
+    /// family it is measured in come from the page itself, so the request cannot
+    /// disagree with the file about what is being aligned. Centering then saves,
+    /// and the reopened stream positions the line.
+    #[test]
+    fn an_alignment_builds_off_the_session_and_saves() {
+        let (doc, page) = doc_with_helvetica("BT /F1 12 Tf (Hi) Tj ET");
+        let resources = page
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .unwrap_or_default();
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &resources).expect("editable");
+        let at = editor
+            .model()
+            .objects()
+            .iter()
+            .position(|o| {
+                matches!(
+                    o.kind,
+                    crate::Kind::Line | crate::Kind::Block | crate::Kind::LooseRun
+                )
+            })
+            .expect("a text object");
+        let change = editor
+            .align_change(at, crate::TextAlignment::Center)
+            .expect("builds a reflow");
+        let Change::Reflow {
+            text,
+            base_font,
+            alignment,
+        } = &change
+        else {
+            panic!("an alignment builds a reflow, got {change:?}");
+        };
+        assert_eq!(text, "Hi");
+        assert_eq!(base_font, "Helvetica");
+        assert_eq!(*alignment, crate::TextAlignment::Center);
+        let outcome = editor.apply(at, &change).expect("aligns");
+        assert!(
+            outcome.label.contains("reflow"),
+            "the label says what happened: {}",
             outcome.label
         );
         editor.save().expect("saves");

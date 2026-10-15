@@ -119,6 +119,15 @@ pub enum EditRequest {
         /// What the colour field held when it was committed.
         hex: String,
     },
+    /// Relay out the object's text with this alignment, inside its own width.
+    ///
+    /// Only the direction travels: the worker reads the text and the measuring
+    /// family off the session, so the request cannot disagree with the page about
+    /// what is being aligned.
+    Align {
+        /// How lines sit in the block's width.
+        alignment: mangle_edit::TextAlignment,
+    },
 }
 
 /// What came back.
@@ -324,6 +333,15 @@ impl Worker {
             }
             EditRequest::Text(property) => mangle_edit::Change::Text(*property),
             EditRequest::Retype { text } => mangle_edit::Change::Retype { text: text.clone() },
+            EditRequest::Align { alignment } => match editor.align_change(object, *alignment) {
+                Ok(change) => change,
+                Err(e) => {
+                    let _ = outbox.send(JobResult::Failed {
+                        reason: e.to_string(),
+                    });
+                    return;
+                }
+            },
             EditRequest::Recolour { hex } => match parse_hex_colour(hex) {
                 Some(colour) => mangle_edit::Change::recolour(colour),
                 None => {
