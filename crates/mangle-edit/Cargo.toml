@@ -9,8 +9,6 @@ authors.workspace = true
 description = "PDF editing: commands and undo, surgical write-back, annotations and appearances, forms, redaction, flatten, page ops, optimize"
 
 [dependencies]
-thiserror.workspace = true
-log.workspace = true
 mangle-syntax.workspace = true
 mangle-filters.workspace = true
 mangle-crypto.workspace = true

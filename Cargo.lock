@@ -1979,7 +1979,6 @@ name = "mangle-edit"
 version = "0.1.0"
 dependencies = [
  "jpeg-encoder",
- "log",
  "mangle-content",
  "mangle-crypto",
  "mangle-doc",
@@ -1988,7 +1987,6 @@ dependencies = [
  "mangle-render",
  "mangle-syntax",
  "mangle-text",
- "thiserror 2.0.21",
 ]
 
 [[package]]
