@@ -365,6 +365,23 @@ pub(crate) fn split_like(
     Ok(out)
 }
 
+/// The file's bytes with `update` appended as one more revision.
+///
+/// Every byte already in the file is kept as it was. The new trailer points back at the old
+/// cross-reference section and carries the document's `/Root`, `/Info` and `/ID`. Every
+/// revision this crate appends ends here.
+pub(crate) fn append_revision(doc: &Document, mut update: IncrementalUpdate) -> Vec<u8> {
+    if let Some(info) = doc.info_ref() {
+        update.info = Some(info);
+    }
+    update.append_with_id(
+        doc.bytes(),
+        doc.xref().start_xref().unwrap_or(0),
+        doc.catalog_ref(),
+        &doc.file_id(),
+    )
+}
+
 /// Append a revision holding exactly these replacement streams, and nothing else.
 ///
 /// Both saves end here, so there is one place where the file's existing bytes are kept verbatim
@@ -383,15 +400,7 @@ fn finish(
     for (num, obj) in extra {
         update.set(*num, obj.clone());
     }
-    if let Some(info) = doc.info_ref() {
-        update.info = Some(info);
-    }
-    let bytes = update.append_with_id(
-        doc.bytes(),
-        doc.xref().start_xref().unwrap_or(0),
-        doc.catalog_ref(),
-        &doc.file_id(),
-    );
+    let bytes = append_revision(doc, update);
     let numbers: Vec<u32> = rewritten.iter().map(|(r, _)| r.num).collect();
     Ok(Save {
         bytes,
@@ -408,15 +417,7 @@ pub(crate) fn save_extra(doc: &Document, extra: &[(u32, Object)]) -> Save {
     for (num, obj) in extra {
         update.set(*num, obj.clone());
     }
-    if let Some(info) = doc.info_ref() {
-        update.info = Some(info);
-    }
-    let bytes = update.append_with_id(
-        doc.bytes(),
-        doc.xref().start_xref().unwrap_or(0),
-        doc.catalog_ref(),
-        &doc.file_id(),
-    );
+    let bytes = append_revision(doc, update);
     Save {
         bytes,
         rewritten: Vec::new(),

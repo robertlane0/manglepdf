@@ -12,7 +12,7 @@ use mangle_syntax::stream::decode_stream;
 use mangle_syntax::writer::IncrementalUpdate;
 
 use crate::annotations::{AnnotationBody, AnnotationSpec, add_annotation};
-use crate::writeback::SaveError;
+use crate::writeback::{SaveError, append_revision};
 
 /// Options for applying redactions across a document (`S8.2`).
 #[derive(Debug, Clone, PartialEq)]
@@ -449,15 +449,7 @@ pub fn sign_document(doc: &Document, spec: &SignatureSpec) -> Result<Vec<u8>, Sa
     update.set(sig_num, Object::Dict(sig_dict));
     update.set(field_num, Object::Dict(field_dict));
     update.set(cat_ref.num, Object::Dict(cat_dict));
-    if let Some(info) = doc.info_ref() {
-        update.info = Some(info);
-    }
-    let mut out = update.append_with_id(
-        doc.bytes(),
-        doc.xref().start_xref().unwrap_or(0),
-        doc.catalog_ref(),
-        &doc.file_id(),
-    );
+    let mut out = append_revision(doc, update);
 
     // Patch the exact `/ByteRange` and SHA-256 CMS digest into the last revision.
     let needle_br = b"/ByteRange [0 999999999 999999999 999999999]";

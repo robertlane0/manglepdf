@@ -12,7 +12,7 @@ use mangle_syntax::writer::IncrementalUpdate;
 
 use crate::page_objects::PageObject;
 use crate::surgery::{Patch, apply};
-use crate::writeback::{Save, SaveError};
+use crate::writeback::{Save, SaveError, append_revision};
 
 /// Horizontal alignment of a text block (`GOAL.md` §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -502,15 +502,7 @@ pub fn edit_shared_form(
     for (num, obj) in &extra {
         update.set(*num, obj.clone());
     }
-    if let Some(info) = doc.info_ref() {
-        update.info = Some(info);
-    }
-    let bytes = update.append_with_id(
-        doc.bytes(),
-        doc.xref().start_xref().unwrap_or(0),
-        doc.catalog_ref(),
-        &doc.file_id(),
-    );
+    let bytes = append_revision(doc, update);
     Ok(Save {
         bytes,
         rewritten: match scope {
