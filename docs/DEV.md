@@ -2,13 +2,23 @@
 
 ## Prerequisites
 
-A pinned Rust toolchain (`rust-toolchain.toml` picks it up automatically) and nothing
-else. The build is offline after the first dependency fetch:
+A pinned Rust toolchain (`rust-toolchain.toml` picks it up automatically). The build is
+offline after the first dependency fetch. The Tier A fixtures are generated rather than
+checked in, so a fresh clone needs two commands before `cargo test` passes:
 
 ```sh
 cargo fetch                 # once
+cargo xtask fixtures        # once: writes the Tier A PDFs, which are git-ignored
 cargo vendor                # optional: to vendor for an air-gapped machine
 ```
+
+The fixtures are deterministic and `fixtures/MANIFEST.toml` pins their hashes, so
+regenerating them reproduces the same bytes. Without them the tests that read them fail with
+a file-not-found.
+
+The oracle tests also call `qpdf`, `mutool`, `pdftotext`, `pdfinfo` and `python3`. When
+`mutool` is missing they skip, except `text_space_diff`, which fails because a comparison that
+compared nothing proves nothing. See `docs/TESTING.md`.
 
 `cargo xtask` is an alias for the `xtask` binary, defined in `.cargo/config.toml` at the
 repository root, so `cargo xtask policy` works from a clean checkout. G0.9 checks that the alias
@@ -30,8 +40,9 @@ release build, so it is the command that matters at the end of a change. Use
 `--only` while working so the loop stays fast.
 
 **G0.9 also resolves the documentation's own links.** Beyond confirming the required files
-exist, it checks every `[text](path#heading)` in `PLAN.md`, `README.md` and everything under
-`docs/`, and fails on one whose heading no longer exists. That check is there because a link to a
+exist, it checks every `[text](path#heading)` in every Markdown file at the repository root (except
+any that `.gitignore` names, such as `AGENTS.md`) and everything under `docs/`, and fails on one
+whose heading no longer exists. That check is there because a link to a
 heading that has been renamed sends a reader somewhere that does not say what they were told it
 says — the same failure as a comment claiming a feature is unimplemented one screen above the code
 that implements it. Both have been found here, which is why it is a gate rather than something to
@@ -55,8 +66,8 @@ hundred megabytes while it is open, so close it once you have the screenshot.
 crates/          the product, in dependency order
 tools/fixturegen deterministic fixtures; no mangle-* dependency
 xtask/           gate checks, fixtures, icons, the gauntlet
-corpus/          real-world PDFs; git-ignored except SOURCES.md
-fixtures/        generated Tier A; checked in
+corpus/          Tier B real-world PDFs; corpus/wild is a git submodule, its own repository
+fixtures/        Tier A: MANIFEST.toml is checked in, the PDFs are generated and git-ignored
 scripts/         dev scripts that use external tools as oracles
 docs/            this documentation and the decision records
 ```
@@ -85,4 +96,4 @@ testing that the specification's happy path does not cover.
 ## Decision records
 
 Anything with a lasting cost goes in `docs/decisions/NNNN-short-name.md`: the bet, why,
-what it rules out. `PLAN.md` links to them.
+what it rules out. `PLAN.md` carries a one-line summary of each bet.
