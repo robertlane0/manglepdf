@@ -1975,7 +1975,6 @@ dependencies = [
  "mangle-filters",
  "mangle-font",
  "mangle-syntax",
- "thiserror 2.0.21",
 ]
 
 [[package]]
