@@ -1991,7 +1991,6 @@ dependencies = [
 name = "mangle-crypto"
 version = "0.1.0"
 dependencies = [
- "log",
  "sha2",
  "thiserror 2.0.21",
  "unicode-normalization",
