@@ -7,9 +7,8 @@ use mangle_content::matrix::Matrix;
 use mangle_doc::Page;
 use mangle_syntax::document::Document;
 use mangle_syntax::object::{Dict, Name, Object, Rect as PageRect, Ref, Stream};
-use mangle_syntax::writer::IncrementalUpdate;
 
-use crate::writeback::{Save, SaveError, save_decoded_with};
+use crate::writeback::{Save, SaveError, save_decoded_with, save_extra};
 
 /// `/F` bit 2: Hidden.
 const ANNOT_HIDDEN: i64 = 1 << 1;
@@ -441,26 +440,8 @@ pub fn flatten_page(
             page_dict.set("Contents", Object::Ref(Ref::new(stream_num, 0)));
         }
         extra.push((page_num, Object::Dict(page_dict)));
-        let mut update = IncrementalUpdate::new(doc.xref().size());
-        for (num, obj) in &extra {
-            update.set(*num, obj.clone());
-        }
-        if let Some(info) = doc.info_ref() {
-            update.info = Some(info);
-        }
-        let bytes = update.append_with_id(
-            doc.bytes(),
-            doc.xref().start_xref().unwrap_or(0),
-            doc.catalog_ref(),
-            &doc.file_id(),
-        );
         return Ok(FlattenReport {
-            save: Save {
-                bytes,
-                rewritten: Vec::new(),
-                installed: extra.iter().map(|(n, _)| *n).collect(),
-                re_encoded: false,
-            },
+            save: save_extra(doc, &extra),
             flattened,
             skipped_hidden,
             kept,

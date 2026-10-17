@@ -6,10 +6,9 @@ use std::fmt::Write as _;
 use mangle_doc::Page;
 use mangle_syntax::document::Document;
 use mangle_syntax::object::{Dict, Name, Object, Rect as PageRect, Ref, Stream};
-use mangle_syntax::writer::IncrementalUpdate;
 
 use crate::embed::{EMBEDDED_OBJECTS, embed_truetype};
-use crate::writeback::{Save, SaveError, save_decoded_with};
+use crate::writeback::{Save, SaveError, save_decoded_with, save_extra};
 
 /// Default `/F` flag: Print (bit 3 = 4).
 pub const ANNOT_FLAG_PRINT: i64 = 4;
@@ -286,7 +285,7 @@ pub fn add_annotation(
     page_dict.set("Annots", Object::Array(annots));
     extra.push((page_ref.num, Object::Dict(page_dict)));
 
-    let save = write_extra_only(doc, &extra);
+    let save = save_extra(doc, &extra);
     Ok(AddedAnnotation {
         save,
         annot_ref,
@@ -348,10 +347,7 @@ pub fn delete_annotation(doc: &Document, page: &Page, index: usize) -> Result<Sa
     } else {
         page_dict.set("Annots", Object::Array(kept));
     }
-    Ok(write_extra_only(
-        doc,
-        &[(page_ref.num, Object::Dict(page_dict))],
-    ))
+    Ok(save_extra(doc, &[(page_ref.num, Object::Dict(page_dict))]))
 }
 
 /// Move the annotation at `from` to `to` within the page's `/Annots` array.
@@ -385,10 +381,7 @@ pub fn arrange_annotation(
     annots.insert(to, item);
     let mut page_dict = page.dict.clone();
     page_dict.set("Annots", Object::Array(annots));
-    Ok(write_extra_only(
-        doc,
-        &[(page_ref.num, Object::Dict(page_dict))],
-    ))
+    Ok(save_extra(doc, &[(page_ref.num, Object::Dict(page_dict))]))
 }
 
 /// Add a `/Artifact` Header or Footer text line to `page` at `(x, y)` in `size` pt.
@@ -1317,28 +1310,6 @@ fn append_page_artifact(
         }
     }
     save_decoded_with(doc, page, &wanted, &extra)
-}
-
-fn write_extra_only(doc: &Document, extra: &[(u32, Object)]) -> Save {
-    let mut update = IncrementalUpdate::new(doc.xref().size());
-    for (num, obj) in extra {
-        update.set(*num, obj.clone());
-    }
-    if let Some(info) = doc.info_ref() {
-        update.info = Some(info);
-    }
-    let bytes = update.append_with_id(
-        doc.bytes(),
-        doc.xref().start_xref().unwrap_or(0),
-        doc.catalog_ref(),
-        &doc.file_id(),
-    );
-    Save {
-        bytes,
-        rewritten: Vec::new(),
-        installed: extra.iter().map(|(n, _)| *n).collect(),
-        re_encoded: false,
-    }
 }
 
 fn rect_array(r: PageRect) -> Object {

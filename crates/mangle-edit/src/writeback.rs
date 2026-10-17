@@ -401,6 +401,30 @@ fn finish(
     })
 }
 
+/// A revision holding exactly these objects: no content stream is rewritten, so nothing is
+/// re-encoded. For an edit that changes dictionaries rather than streams.
+pub(crate) fn save_extra(doc: &Document, extra: &[(u32, Object)]) -> Save {
+    let mut update = IncrementalUpdate::new(doc.xref().size());
+    for (num, obj) in extra {
+        update.set(*num, obj.clone());
+    }
+    if let Some(info) = doc.info_ref() {
+        update.info = Some(info);
+    }
+    let bytes = update.append_with_id(
+        doc.bytes(),
+        doc.xref().start_xref().unwrap_or(0),
+        doc.catalog_ref(),
+        &doc.file_id(),
+    );
+    Save {
+        bytes,
+        rewritten: Vec::new(),
+        installed: extra.iter().map(|(n, _)| *n).collect(),
+        re_encoded: false,
+    }
+}
+
 /// The page's content streams as indirect objects.
 pub(crate) fn parts_of(doc: &Document, page: &Page) -> Result<Vec<Part>, SaveError> {
     let Some(contents) = page.dict.get("Contents") else {

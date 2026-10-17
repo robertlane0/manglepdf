@@ -8,9 +8,8 @@ use mangle_doc::PageTree;
 use mangle_syntax::document::Document;
 use mangle_syntax::object::{Dict, Object, Rect as PageRect, Ref, Stream};
 use mangle_syntax::save::{SaveMode, SaveOptions};
-use mangle_syntax::writer::IncrementalUpdate;
 
-use crate::writeback::{Save, SaveError};
+use crate::writeback::{Save, SaveError, save_extra};
 
 /// Page-label numbering style (`ISO 32000-1` Table 159).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +86,7 @@ pub fn rotate_page(
     let mut page_dict = page.dict.clone();
     page_dict.set("Rotate", Object::Int(next));
     page_dict.remove("Thumb");
-    Ok(write_extra(doc, &[(page_ref.num, Object::Dict(page_dict))]))
+    Ok(save_extra(doc, &[(page_ref.num, Object::Dict(page_dict))]))
 }
 
 /// Set `/CropBox` on `page_index` non-destructively and remove any stale `/Thumb` (`S7.5`, `S7.9`).
@@ -113,7 +112,7 @@ pub fn crop_page(doc: &Document, page_index: usize, crop: PageRect) -> Result<Sa
         ]),
     );
     page_dict.remove("Thumb");
-    Ok(write_extra(doc, &[(page_ref.num, Object::Dict(page_dict))]))
+    Ok(save_extra(doc, &[(page_ref.num, Object::Dict(page_dict))]))
 }
 
 /// Insert a blank page of `(width, height)` points after `after_index` (`None` inserts at index 0) (`S7.3`).
@@ -406,7 +405,7 @@ pub fn set_page_labels(doc: &Document, ranges: &[PageLabelRange]) -> Result<Save
     let mut page_labels = Dict::new();
     page_labels.set("Nums", Object::Array(nums));
     cat_dict.set("PageLabels", Object::Dict(page_labels));
-    Ok(write_extra(doc, &[(cat_ref.num, Object::Dict(cat_dict))]))
+    Ok(save_extra(doc, &[(cat_ref.num, Object::Dict(cat_dict))]))
 }
 
 #[allow(clippy::only_used_in_recursion)]
@@ -545,29 +544,7 @@ fn write_page_tree_kids(
 
     let mut all_extra = extra.to_vec();
     all_extra.push((pages_ref.num, Object::Dict(pages_dict)));
-    Ok(write_extra(doc, &all_extra))
-}
-
-fn write_extra(doc: &Document, extra: &[(u32, Object)]) -> Save {
-    let mut update = IncrementalUpdate::new(doc.xref().size());
-    for (num, obj) in extra {
-        update.set(*num, obj.clone());
-    }
-    if let Some(info) = doc.info_ref() {
-        update.info = Some(info);
-    }
-    let bytes = update.append_with_id(
-        doc.bytes(),
-        doc.xref().start_xref().unwrap_or(0),
-        doc.catalog_ref(),
-        &doc.file_id(),
-    );
-    Save {
-        bytes,
-        rewritten: Vec::new(),
-        installed: extra.iter().map(|(n, _)| *n).collect(),
-        re_encoded: false,
-    }
+    Ok(save_extra(doc, &all_extra))
 }
 
 fn unchanged_save(doc: &Document) -> Save {

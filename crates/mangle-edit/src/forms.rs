@@ -7,10 +7,9 @@ use std::fmt::{self, Write as _};
 use mangle_doc::Page;
 use mangle_syntax::document::Document;
 use mangle_syntax::object::{Dict, Object, Rect as PageRect, Ref, Stream};
-use mangle_syntax::writer::IncrementalUpdate;
 
 use crate::embed::{EMBEDDED_OBJECTS, embed_truetype};
-use crate::writeback::{Save, SaveError};
+use crate::writeback::{Save, SaveError, save_extra};
 
 // ---- Field flags (ISO 32000-1 Tables 221, 226, 228, 230) ----
 
@@ -318,7 +317,7 @@ pub fn strip_xfa(doc: &Document) -> Result<Save, FormError> {
             }
         }
     }
-    Ok(write_incremental(doc, &extra))
+    Ok(save_extra(doc, &extra))
 }
 
 /// Read all current field values (`full_name -> string_value`) from `doc`.
@@ -403,7 +402,7 @@ pub fn fill_field(
     }
 
     clear_need_appearances(doc, &mut extra);
-    Ok(write_incremental(doc, &extra))
+    Ok(save_extra(doc, &extra))
 }
 
 /// Reset all form fields to their `/DV` default value (or empty if no `/DV` is present).
@@ -419,7 +418,7 @@ pub fn reset_form(doc: &Document, system_dirs: &[std::path::PathBuf]) -> Result<
         extra.push((f.obj_ref.num, Object::Dict(updated)));
     }
     clear_need_appearances(doc, &mut extra);
-    Ok(write_incremental(doc, &extra))
+    Ok(save_extra(doc, &extra))
 }
 
 /// Clear all form fields to empty / `/Off`.
@@ -435,7 +434,7 @@ pub fn clear_form(doc: &Document, system_dirs: &[std::path::PathBuf]) -> Result<
         extra.push((f.obj_ref.num, Object::Dict(updated)));
     }
     clear_need_appearances(doc, &mut extra);
-    Ok(write_incremental(doc, &extra))
+    Ok(save_extra(doc, &extra))
 }
 
 /// Export all form field values to XFDF XML (`S6.4`).
@@ -753,7 +752,7 @@ pub fn create_field(
         extra.push((cat_ref.num, Object::Dict(cat_dict)));
     }
 
-    Ok(write_incremental(doc, &extra))
+    Ok(save_extra(doc, &extra))
 }
 
 fn js_action(js: &str) -> Object {
@@ -1112,28 +1111,6 @@ fn clear_need_appearances(doc: &Document, extra: &mut Vec<(u32, Object)>) {
     } else {
         cat_dict.set("AcroForm", Object::Dict(acro_dict));
         extra.push((cat_ref.num, Object::Dict(cat_dict)));
-    }
-}
-
-fn write_incremental(doc: &Document, extra: &[(u32, Object)]) -> Save {
-    let mut update = IncrementalUpdate::new(doc.xref().size());
-    for (num, obj) in extra {
-        update.set(*num, obj.clone());
-    }
-    if let Some(info) = doc.info_ref() {
-        update.info = Some(info);
-    }
-    let bytes = update.append_with_id(
-        doc.bytes(),
-        doc.xref().start_xref().unwrap_or(0),
-        doc.catalog_ref(),
-        &doc.file_id(),
-    );
-    Save {
-        bytes,
-        rewritten: Vec::new(),
-        installed: extra.iter().map(|(n, _)| *n).collect(),
-        re_encoded: false,
     }
 }
 
