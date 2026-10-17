@@ -7,7 +7,6 @@
 #![allow(clippy::indexing_slicing)]
 
 use crate::Partial;
-use crate::error::FilterError;
 
 const fn hexval(b: u8) -> Option<u8> {
     match b {
@@ -155,19 +154,6 @@ pub fn ascii85_decode(input: &[u8]) -> Partial {
         data: out,
         complete,
         note,
-    }
-}
-
-/// `ASCII85Decode` strict wrapper for tests and round trips.
-#[allow(dead_code)]
-pub(crate) fn ascii85_decode_strict(input: &[u8]) -> Result<Vec<u8>, FilterError> {
-    let p = ascii85_decode(input);
-    match p.note {
-        Some(_) => Err(FilterError::Damaged {
-            filter: "ASCII85Decode",
-            reason: p.note.unwrap_or_default(),
-        }),
-        None => Ok(p.data),
     }
 }
 
