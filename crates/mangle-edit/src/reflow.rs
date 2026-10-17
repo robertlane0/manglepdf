@@ -10,6 +10,7 @@ use mangle_syntax::object::{Name, Object, Ref, Stream};
 use mangle_syntax::stream::{decode_stream, encode_stream};
 use mangle_syntax::writer::IncrementalUpdate;
 
+use crate::numfmt::fmt_num;
 use crate::page_objects::PageObject;
 use crate::surgery::{Patch, apply};
 use crate::writeback::{Save, SaveError, append_revision};
@@ -526,20 +527,6 @@ fn resolve_form_ref(doc: &Document, page: &Page, form_name: &str) -> Option<Ref>
         .and_then(|o| doc.resolve_object(o).or_else(|| Some(o.clone())))
         .and_then(|o| o.as_dict().cloned())?;
     xobjs.get(form_name)?.as_ref_id()
-}
-
-fn fmt_num(v: f64) -> String {
-    if !v.is_finite() || v.abs() < 1e-9 {
-        return "0".to_string();
-    }
-    let rounded = (v * 1_000_000.0).round() / 1_000_000.0;
-    let s = format!("{rounded:.6}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() || s == "-0" {
-        "0".to_string()
-    } else {
-        s.to_string()
-    }
 }
 
 /// Encode one reflowed line in WinAnsi, refusing honestly when it cannot be done.

@@ -25,6 +25,7 @@ pub mod export;
 pub mod flatten;
 pub mod forms;
 pub mod history;
+mod numfmt;
 pub mod organize;
 pub mod page_objects;
 pub mod protect;

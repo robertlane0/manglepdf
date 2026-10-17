@@ -8,6 +8,7 @@ use mangle_doc::Page;
 use mangle_syntax::document::Document;
 use mangle_syntax::object::{Dict, Name, Object, Rect as PageRect, Ref, Stream};
 
+use crate::numfmt::fmt_num;
 use crate::writeback::{Save, SaveError, save_decoded_with, save_extra};
 
 /// `/F` bit 2: Hidden.
@@ -568,20 +569,6 @@ fn next_xobject_name(table: &Dict) -> String {
             return name;
         }
         n += 1;
-    }
-}
-
-fn fmt_num(v: f64) -> String {
-    if !v.is_finite() || v.abs() < 1e-9 {
-        return "0".to_string();
-    }
-    let rounded = (v * 1_000_000.0).round() / 1_000_000.0;
-    let s = format!("{rounded:.6}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() || s == "-0" {
-        "0".to_string()
-    } else {
-        s.to_string()
     }
 }
 

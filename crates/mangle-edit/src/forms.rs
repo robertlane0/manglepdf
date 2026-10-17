@@ -9,6 +9,7 @@ use mangle_syntax::document::Document;
 use mangle_syntax::object::{Dict, Object, Rect as PageRect, Ref, Stream};
 
 use crate::embed::{EMBEDDED_OBJECTS, embed_truetype};
+use crate::numfmt::fmt_num;
 use crate::writeback::{Save, SaveError, save_extra};
 
 // ---- Field flags (ISO 32000-1 Tables 221, 226, 228, 230) ----
@@ -1111,20 +1112,6 @@ fn clear_need_appearances(doc: &Document, extra: &mut Vec<(u32, Object)>) {
     } else {
         cat_dict.set("AcroForm", Object::Dict(acro_dict));
         extra.push((cat_ref.num, Object::Dict(cat_dict)));
-    }
-}
-
-fn fmt_num(v: f64) -> String {
-    if !v.is_finite() || v.abs() < 1e-9 {
-        return "0".to_string();
-    }
-    let rounded = (v * 1_000_000.0).round() / 1_000_000.0;
-    let s = format!("{rounded:.6}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() || s == "-0" {
-        "0".to_string()
-    } else {
-        s.to_string()
     }
 }
 
