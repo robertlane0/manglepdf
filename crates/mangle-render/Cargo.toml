@@ -9,16 +9,15 @@ authors.workspace = true
 description = "PDF rasterizer: colour, paths, images, shadings, patterns, transparency, glyph cache, tiles, display lists"
 
 [dependencies]
-thiserror.workspace = true
 log.workspace = true
-rayon.workspace = true
-crossbeam-channel.workspace = true
 zune-jpeg.workspace = true
 mangle-syntax.workspace = true
-mangle-filters.workspace = true
 mangle-doc.workspace = true
 mangle-font.workspace = true
 mangle-content.workspace = true
+
+[dev-dependencies]
+mangle-filters.workspace = true
 
 [lints]
 workspace = true
