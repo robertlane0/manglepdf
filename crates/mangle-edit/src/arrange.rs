@@ -44,7 +44,7 @@ use mangle_content::matrix::Matrix;
 use mangle_content::state::{ColourSpace, Rgba};
 use mangle_content::{Mark, Record, tokens::ContentStream};
 
-use crate::edits::{Channel, write_in};
+use crate::edits::{Channel, padded, write_in};
 use crate::page_objects::{PageModel, PageObject};
 use crate::surgery::{Applied, EditError, Patch};
 
@@ -336,7 +336,7 @@ pub fn arrange_patches(
         Patch::delete(from.clone(), "the object leaves its old place"),
         Patch::insert(
             at,
-            pad_for_insertion(
+            padded(
                 stream,
                 at,
                 &format!("q {body}\n{}{tail}", String::from_utf8_lossy(&moved)),
@@ -589,24 +589,6 @@ fn colour_operators(space: &ColourSpace, components: Vec<f64>) -> Option<String>
     let rgb = to_rgb(space, &components)?;
     let written = write_in(space, rgb, Channel::Fill).ok()?;
     Some(format!("{written}\n"))
-}
-
-/// The bytes to insert at `at`, padded so the stream still tokenises as it did.
-fn pad_for_insertion(stream: &[u8], at: usize, text: &str) -> String {
-    let before = at.checked_sub(1).and_then(|i| stream.get(i)).copied();
-    let after = stream.get(at).copied();
-    let regular = |b: Option<u8>| b.is_some_and(mangle_syntax::lexer::Token::is_regular);
-    let first = text.as_bytes().first().copied();
-    let last = text.as_bytes().last().copied();
-    let mut out = String::with_capacity(text.len() + 2);
-    if regular(before) && regular(first) {
-        out.push(' ');
-    }
-    out.push_str(text);
-    if regular(last) && regular(after) {
-        out.push(' ');
-    }
-    out
 }
 
 /// The `cm` for the state an object was drawn under.

@@ -1588,14 +1588,14 @@ fn wrap_each(stream: &[u8], object: &PageObject, matrix: &str, state: &str) -> V
 /// corpus page in this repository does exactly that.
 ///
 /// Inserting bytes at such a point without carrying whitespace glues them onto the token that
-/// ends there. `q` after a `Tc` becomes the single keyword `Tcq`: the wrapper this module just
+/// ends there. `q` after a `Tc` becomes the single keyword `Tcq`: the wrapper just
 /// opened is not an operator any more, so the `Q` that was supposed to close it closes nothing
 /// and the stream is unbalanced. Nothing downstream reports it — the page simply renders with a
 /// wrong graphics state, which is the failure GOAL.md §4.1's validity law exists to prevent.
 ///
 /// The same applies on the other side: a `Q` inserted before a `/F5` is fine, because `/` is a
 /// delimiter, but a `Q` before a `Tf` would be `QTf`.
-fn padded(stream: &[u8], at: usize, text: &str) -> String {
+pub(crate) fn padded(stream: &[u8], at: usize, text: &str) -> String {
     let before = at.checked_sub(1).and_then(|i| stream.get(i)).copied();
     let after = stream.get(at).copied();
     let regular = |b: Option<u8>| b.is_some_and(mangle_syntax::lexer::Token::is_regular);
