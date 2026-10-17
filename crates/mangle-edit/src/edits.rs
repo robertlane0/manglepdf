@@ -60,6 +60,7 @@ use mangle_content::matrix::Matrix;
 use mangle_content::state::{ClipBounds, Colour, ColourSpace, Rgba, TextState};
 use mangle_content::tokens::{ContentStream, Operation};
 
+use crate::numfmt::num;
 use crate::page_objects::{Kind, PageObject};
 use crate::surgery::{Applied, EditError, Patch, apply};
 
@@ -1633,18 +1634,6 @@ fn cm_of(m: Matrix) -> String {
 /// Six numbers, in PDF's order, each as short as a round trip allows.
 fn six(v: &[f64; 6]) -> String {
     v.iter().map(|n| num(*n)).collect::<Vec<_>>().join(" ")
-}
-
-/// One number as a stream would write it.
-///
-/// Rust's shortest round-trip form is what a producer's own numbers look like: `0.1` stays
-/// `0.1`, and a whole number has no `.0` on it. Negative zero is normalised, because no
-/// producer writes `-0` and a diff reads it as a change from `0`.
-fn num(v: f64) -> String {
-    if v == 0.0 {
-        return "0".to_string();
-    }
-    format!("{v}")
 }
 
 /// A colour written into a space: the operator that sets it, and what it sets.

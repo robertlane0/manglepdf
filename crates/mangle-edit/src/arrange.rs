@@ -45,6 +45,7 @@ use mangle_content::state::{ColourSpace, Rgba};
 use mangle_content::{Mark, Record, tokens::ContentStream};
 
 use crate::edits::{Channel, padded, write_in};
+use crate::numfmt::num;
 use crate::page_objects::{PageModel, PageObject};
 use crate::surgery::{Applied, EditError, Patch};
 
@@ -508,14 +509,6 @@ fn text_state_of(record: &Record) -> String {
     // `ET` is emitted by the caller, after the moved bytes: the string has to be shown inside the
     // text object it belongs to.
     out
-}
-
-/// One number as a stream would write it.
-fn num(v: f64) -> String {
-    if v == 0.0 {
-        return "0".to_string();
-    }
-    format!("{v}")
 }
 
 /// The state operators for one record, in the order a content stream would carry them.
