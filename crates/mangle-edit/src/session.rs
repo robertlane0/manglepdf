@@ -1187,10 +1187,9 @@ mod tests {
     fn doc_with(parts: &[&str]) -> (Document, Page) {
         let mut out = String::from("%PDF-1.7\n");
         // One entry per object plus the free head: object n lives at offsets[n].
-        // Written correctly — unlike an earlier version that relied on the reader's
-        // repair — because revision chains resolve through these tables, and a test
-        // that reopens a saved file through a broken first table resolves stale
-        // objects.
+        // The offsets have to be exact rather than left to the reader's repair: revision
+        // chains resolve through these tables, and a test that reopens a saved file through a
+        // broken first table resolves stale objects.
         let mut offsets = vec![0usize];
         // The catalogue, the page tree and the page, then one object per content stream.
         let first_stream = 4;

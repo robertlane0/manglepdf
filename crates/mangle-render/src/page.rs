@@ -1019,13 +1019,9 @@ fn unconvertible_space(shading: &Object, doc: &Document) -> Option<String> {
 /// A `/PatternType 1` pattern is a content stream tiled across the fill, which needs a loop
 /// over cells in the pattern's own space.
 ///
-/// **The loop is implemented** — the cell is rendered once and reused across the fill, and both
-/// `/PaintType`s are honoured ([D25](docs/known-diffs.md)). This comment previously said the
-/// opposite, and said it *in the paragraph immediately above the call that does the work*, which
-/// is the worst place for a false claim to sit: a reader would either believe tiling is missing or
-/// "fix" working code to match. The remaining gap is a pattern type this does not paint, and that
-/// one is refused by name — one cell of a tiling is a texture that looks plausible and is wrong
-/// everywhere.
+/// The cell is rendered once and reused across the fill, and both `/PaintType`s are honoured
+/// ([D25](docs/known-diffs.md)). A pattern type this does not paint is refused by name: one
+/// cell of a tiling is a texture that looks plausible and is wrong everywhere.
 fn pattern_fill(
     paint: Paint,
     name: &str,
