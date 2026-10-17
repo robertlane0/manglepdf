@@ -37,6 +37,18 @@ says — the same failure as a comment claiming a feature is unimplemented one s
 that implements it. Both have been found here, which is why it is a gate rather than something to
 remember to run.
 
+## Resource limits
+
+`cargo xtask policy` builds the whole workspace in release and has exhausted memory on a
+15 GB machine. Bound it, and run it detached so a hang does not take the session with it:
+
+```sh
+setsid nohup bash -c 'ulimit -v 10485760; CARGO_BUILD_JOBS=2 cargo xtask policy' > policy.log 2>&1 &
+```
+
+`CARGO_BUILD_JOBS=2` keeps ordinary builds inside memory too. The GUI binary holds a few
+hundred megabytes while it is open, so close it once you have the screenshot.
+
 ## Layout
 
 ```
@@ -56,7 +68,9 @@ docs/            this documentation and the decision records
 - Every first-party target starts with `#![forbid(unsafe_code)]` and inherits
   `[workspace.lints]`. `xtask policy` checks.
 - A **library** crate denies `unwrap`, `expect`, `panic`, `todo`, `unimplemented` and
-  `unreachable`. Binaries and tests may fail loudly. `xtask policy` checks.
+  `unreachable`. Binaries and tests may fail loudly: a test module says so in one comment, because
+  the panic-free rule is about what the product does with a file, not about how a test
+  reports a failure. `xtask policy` checks.
 - Every loop, recursion and allocation driven by file data is bounded. A bound is not
   optional, and it belongs next to the code it protects.
 - Prefer a partial result with a note over an error. Render what you can and mark what

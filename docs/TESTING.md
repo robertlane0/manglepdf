@@ -61,6 +61,14 @@ cargo xtask corpus check                      # verify what is on disk; needs no
 cargo xtask corpus list                       # one line per file
 ```
 
+Two habits keep a fixture honest:
+
+- **Make it asymmetric.** A symmetric page can score above 0.99 whether or not the arithmetic
+  is right, so the render fixtures in `crates/mangle-render/tests/pages.rs` are asymmetric on
+  purpose and say why in their comments.
+- **Compute a byte offset from the fixture** (`windows(n).position(…)`) rather than counting
+  it by hand. A hand-counted offset is wrong the moment the fixture's whitespace changes.
+
 ## The wild corpus harness
 
 `crates/mangle-render/tests/wild_corpus.rs` walks the manifest and, for every file, renders
