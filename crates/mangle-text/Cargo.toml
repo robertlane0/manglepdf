@@ -9,14 +9,7 @@ authors.workspace = true
 description = "PDF text: extraction, layout analysis, search, typesetting and reflow"
 
 [dependencies]
-thiserror.workspace = true
-log.workspace = true
-unicode-bidi.workspace = true
-unicode-linebreak.workspace = true
-unicode-segmentation.workspace = true
-unicode-normalization.workspace = true
 mangle-syntax.workspace = true
-mangle-doc.workspace = true
 mangle-font.workspace = true
 mangle-content.workspace = true
 
