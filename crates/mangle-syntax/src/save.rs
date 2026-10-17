@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use crate::document::Document;
 use crate::error::{Error, Result};
 use crate::object::{Dict, Object, Ref};
-use crate::writer::{IncrementalUpdate, WriteOptions, Writer};
+use crate::writer::{IncrementalUpdate, WriteOptions, Writer, collect_refs};
 use crate::xref::{XrefEntry, find_startxref};
 
 /// How a document should be written.
@@ -217,21 +217,5 @@ impl Document {
             }
         }
         missing.into_iter().collect()
-    }
-}
-
-fn collect_refs(obj: &Object, out: &mut Vec<Ref>, depth: usize) {
-    if depth > 64 {
-        return;
-    }
-    match obj {
-        Object::Ref(r) | Object::Missing(r) => out.push(*r),
-        Object::Array(a) => a.iter().for_each(|o| collect_refs(o, out, depth + 1)),
-        Object::Dict(d) => d.iter().for_each(|(_, v)| collect_refs(v, out, depth + 1)),
-        Object::Stream(s) => s
-            .dict
-            .iter()
-            .for_each(|(_, v)| collect_refs(v, out, depth + 1)),
-        _ => {}
     }
 }

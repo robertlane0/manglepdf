@@ -475,7 +475,10 @@ fn is_in_object_stream(_obj: &Object) -> bool {
     false
 }
 
-fn collect_refs(obj: &Object, out: &mut Vec<Ref>, depth: usize) {
+/// Every reference inside `obj`, resolved or not, through nested arrays, dictionaries and a
+/// stream's dictionary. Past 64 levels the walk stops, so a deeply nested object cannot recurse
+/// without bound.
+pub(crate) fn collect_refs(obj: &Object, out: &mut Vec<Ref>, depth: usize) {
     if depth > 64 {
         return;
     }
