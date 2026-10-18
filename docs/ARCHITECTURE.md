@@ -22,15 +22,15 @@ Dependencies flow one way only. A lower crate never names a higher one.
 | `mangle-syntax` | The object model, lexer, parser, cross-references, object streams, recovery, and the writer. Lossless by construction. |
 | `mangle-doc` | Catalog, page tree with inheritance, name trees, outlines, destinations, page labels, optional-content groups, attachments, XMP. |
 | `mangle-font` | Font programs, encodings, CMaps, glyph names, metrics, subsetting, substitution. |
-| `mangle-content` | Content streams: tokens with byte spans, the interpreter, the graphics state, the page-object model, and **PDF functions** — a function dictionary is an ordinary document object, and both a gradient and a separation's tint transform are one. |
+| `mangle-content` | Content streams: tokens with byte spans, the interpreter and the per-mark records it produces (each with its bounds and the bytes that drew it), the graphics state, and **PDF functions** — a function dictionary is an ordinary document object, and both a gradient and a separation's tint transform are one. |
 | `mangle-render` | Rasterization: colour, paths, images, shadings, patterns, transparency, tiles. Re-exports `mangle_content::function` as `shading::` because a gradient's function is how a gradient is defined. |
-| `mangle-text` | Text extraction, reading order, search. |
-| `mangle-edit` | Commands, undo, surgical write-back, annotations, forms, redaction, flatten, page operations, optimize. |
+| `mangle-text` | Text decoding and extraction, with runs joined by their geometry in the order they are given, and search. |
+| `mangle-edit` | Commands, undo, the page-object model, surgical write-back, annotations, forms, redaction, flatten, page operations, optimize. |
 | `mangle-ui` | The application. |
-| `mangle-cli` | The headless surface the tests and the acceptance harness drive. |
-| `mangle-testkit` | Shared fixtures, comparisons and tolerances for the layers above. |
+| `mangle-cli` | The headless command line. It exists for the tests and the acceptance harness to drive; nothing in the tree runs it yet. |
+| `mangle-testkit` | Meant to hold shared fixtures, comparisons and tolerances for the layers above. It is empty today, and test files carry their own copies of those helpers. |
 | `tools/fixturegen` | Deterministic fixture generation. **Depends on no `mangle-*` crate on purpose.** |
-| `xtask` | Gate checks, fixtures, icons, the gauntlet. |
+| `xtask` | Gate checks, fixtures, the corpus, icons and the dependency table. `gauntlet`, `fuzz` and `perf` are stubs. |
 
 ## The page placement
 

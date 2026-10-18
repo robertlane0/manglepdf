@@ -1,8 +1,9 @@
-//! Text extraction, reading order and search.
+//! Text decoding, extraction and search.
 //!
-//! The result is built from the page object model rather than from the raw content
-//! stream, so a selection across two columns comes out in the order a reader would say
-//! it is in, not in the order the operators happen to appear.
+//! This crate joins the runs it is given in the order it is given them, using their geometry to
+//! choose between a newline, a space and nothing. The page object model groups runs into lines
+//! and blocks and hands them over in the order the file drew them; nothing walks the structure
+//! tree, so a tagged file's own reading order is not used.
 
 #![forbid(unsafe_code)]
 #![deny(

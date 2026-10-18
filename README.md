@@ -24,11 +24,13 @@ One workspace; dependencies flow one way and a lower crate never names a higher 
 | `crates/mangle-font` | Font programs, encodings, CMaps, metrics, subsetting |
 | `crates/mangle-content` | Content streams with byte provenance, the interpreter |
 | `crates/mangle-render` | The rasterizer |
-| `crates/mangle-text` | Extraction, reading order, search |
+| `crates/mangle-text` | Text decoding, extraction and search |
 | `crates/mangle-edit` | Commands, undo, write-back, annotations, forms, redaction |
 | `crates/mangle-ui` | The application |
+| `crates/mangle-cli` | The headless command line |
+| `crates/mangle-testkit` | Shared test helpers; empty so far |
 | `tools/fixturegen` | Deterministic fixtures, with no dependency on the product |
-| `xtask` | `cargo xtask policy`, fixtures, icons, the acceptance run |
+| `xtask` | `cargo xtask policy`, fixtures, the corpus, icons; the acceptance run is not built yet |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how they fit together and
 [`docs/STATUS.md`](docs/STATUS.md) for what is actually built.
@@ -37,6 +39,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how they fit together and
 
 ```sh
 cargo build
+cargo xtask fixtures   # once: generate the Tier A test PDFs, which are not checked in
 cargo test --workspace
 cargo xtask policy
 ```
@@ -47,9 +50,13 @@ See [`docs/DEV.md`](docs/DEV.md).
 
 | | |
 |---|---|
+| [`GOAL.md`](GOAL.md) | The project charter: what is being built, and the rules |
+| [`FINISH.md`](FINISH.md) | The finish condition: the acceptance test |
 | [`PLAN.md`](PLAN.md) | What is being built now, and in what order |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crates, losslessness, bounded work |
 | [`docs/STATUS.md`](docs/STATUS.md) | Milestone state and the honest gap list |
+| [`docs/BUGS.md`](docs/BUGS.md) | The editing-path bugs found, each with the test that caught it |
+| [`docs/known-diffs.md`](docs/known-diffs.md) | Where rendering differs from the oracles, with root cause and evidence |
 | [`docs/DEV.md`](docs/DEV.md) | The development loop |
 | [`docs/TESTING.md`](docs/TESTING.md) | Test layers, oracles, tolerances |
 | [`docs/PDF-QUIRKS.md`](docs/PDF-QUIRKS.md) | Facts about the format that bite |
