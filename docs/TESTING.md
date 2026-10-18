@@ -6,21 +6,25 @@
 |---|---|---|
 | Unit | `#[cfg(test)]` in the crate that owns the code | One function, one behaviour, stated expectations |
 | Round trip | `crates/*/tests/` | Open a file, change it, write it, reopen it, compare |
-| Oracle | `crates/*/tests/oracle.rs` | Our answer matches an independent implementation's |
-| Fuzz | `crates/mangle-syntax/tests/fuzz.rs` | No panic, hang or runaway allocation on mutated input |
-| Acceptance | `cargo xtask gauntlet` | The end-to-end scenarios in `FINISH.md` |
+| Oracle | `crates/*/tests/`, e.g. `mangle-syntax/tests/oracle.rs` | Our answer matches an independent implementation's |
+| Fuzz | `cargo xtask fuzz`, not yet built (M10) | No panic, hang or runaway allocation on mutated input |
+| Acceptance | `cargo xtask gauntlet`, not yet built (M12) | The end-to-end scenarios in `FINISH.md` |
 
 ## Oracles
 
 Independent implementations may be used **as test oracles only** — never linked, never
 called from product code, and never required for `cargo test` to pass. When one is
-absent the test skips, records the skip, and the gauntlet report lists it.
+absent the test skips, and the gauntlet report (not yet built) is where the skips will be
+listed. One test is stricter: `crates/mangle-content/tests/text_space_diff.rs` fails when `mutool`
+is absent, because a comparison that compared nothing proves nothing.
 
-Currently used, each skipped when absent:
+Currently used, each skipped when absent apart from that one:
 
 - `qpdf` — cross-reference and encryption dictionaries, `--check` on generated output
 - `mutool` — page counts, glyph trace comparisons, and rendering
 - `pdftotext` / `pdfinfo` — text extraction and document metadata
+- `python3` — `zlib` as the Flate oracle in `mangle-filters`'s interop tests, and `fontTools` for
+  the font charset test
 
 `scripts/make-crypto-fixtures.sh` produces encryption dictionaries with `qpdf`; the
 values it prints are pasted into `mangle-crypto`'s tests as literals, so `cargo test`
@@ -44,7 +48,7 @@ Tier A comes from `tools/fixturegen`, which depends on **no** `mangle-*` crate. 
 independence is the point: a fixture built by the same misunderstanding as the parser
 proves nothing. `cargo xtask policy` fails the build if that ever changes.
 
-Tier B is real-world files in `corpus/wild/`. `corpus/wild/` holds `MANIFEST.toml` (every
+Tier B is real-world files in `corpus/wild/`, a git submodule. It holds `MANIFEST.toml` (every
 file's URL, licence, SHA-256 and expected structure) and `SOURCES.md`. `cargo xtask corpus fetch`
 downloads them and refuses any file whose SHA-256 does not match.
 
@@ -76,7 +80,7 @@ text with `pdftotext` at word level. It writes `corpus/wild/report/SUMMARY.md`, 
 report per file, and PNGs of the worst pages: ours, mutool's, and the heatmap between them.
 
 **It is `#[ignore]`d, and the other two tests in that file are not.** One full corpus run
-takes roughly two hours, so:
+takes hours, so:
 
 ```sh
 cargo test -p mangle-render --test wild_corpus                            # the two cheap harness tests
@@ -125,13 +129,15 @@ corpus.
 - **A golden blessed by the code under test is not evidence.** Goldens are reviewed with
   vision against an independent oracle first.
 - **Every historical crash gets a regression test** in `tests/regressions/`, and the
-  mutation fuzzer must not rediscover it.
+  mutation fuzzer must not rediscover it. Neither exists yet: `tests/regressions/` has not been
+  created and `cargo xtask fuzz` is not built.
 
 ## Running everything
 
 ```sh
+cargo xtask fixtures              # once after cloning: the Tier A PDFs are generated, not checked in
 cargo test --workspace            # unit and round trip
 cargo xtask policy                # Gate 0, including fmt, clippy and a release build
 cargo xtask fixtures --check      # the corpus is reproducible
-cargo xtask gauntlet --seed N     # the acceptance run; see FINISH.md
+cargo xtask gauntlet --seed N     # the acceptance run (not yet built, M12); see FINISH.md
 ```
