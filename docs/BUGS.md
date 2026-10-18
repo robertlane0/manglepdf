@@ -1,6 +1,7 @@
 # Bugs
 
-Every defect this project has found, in one log, with the severity scale FINISH.md gives it:
+The defects found while building the editing path, in one log, with the severity scale FINISH.md
+gives it. Differences from the rendering oracles are in [`known-diffs.md`](known-diffs.md).
 
 * **S1** — data loss, corrupted output, crash, UI hang > 5 s, silent content loss, redaction leak,
   or signature invalidation without warning.
@@ -120,16 +121,20 @@ checked.
 
 ## What the pattern is
 
-Seven of the eight are the same shape, and it is worth stating plainly rather than filing them
+Most of these share one shape, and it is worth stating plainly rather than filing them
 individually: **a byte-range edit that does not carry its own separators, or writes its operands
-after its operator, produces a stream that is a different stream.** Nothing downstream reports it.
-The renderer draws a plausible page, the file opens, the edit appears to have worked — and the change
-is simply not there.
+after its operator, produces a stream that is a different stream** (B1, B2, B5 and B8; B3 and B10
+reach the same failure through a wrong provenance span, and B9 is the refusal for a page where
+adjacency cannot be trusted). Nothing downstream reports it. The renderer draws a plausible page,
+the file opens, the edit appears to have worked — and the change is simply not there.
 
-The second thing they have in common is that **every one passed the unit tests that existed at the
-time** and was caught by a test that runs the interpreter over the result on a real corpus page. That
-is the argument STATUS.md's preamble makes, and these eight are the evidence for it: the fixture
-decides how much of a renderer's — or an editor's — arithmetic it actually exercises, and a fixture
-written to be simple is symmetric in exactly the way that hides this class of mistake.
+The second thing they have in common is how they were found. B1, B2 and B3 each passed the unit
+tests that existed. B1, B2, B3 and B5 were caught by corpus tests that run the interpreter over
+the result, or reopen the saved file, on a real page; B10 by a corpus test that checks every
+provenance span; B9 surfaced as a `debug_assert` panic on a corpus page. B4, B6 and B8 were caught by
+unit tests that read the bytes back and assert the effect, and B7 by a test written from the
+complaint. The fixture decides how much of a renderer's — or an editor's — arithmetic it actually
+exercises, and a fixture written to be simple is symmetric in exactly the way that hides this
+class of mistake.
 
 The rule that follows, and which the corpus tests now enforce: **assert the effect, not the string.**

@@ -28,12 +28,11 @@ never needs `qpdf`.
 
 ## What the corpus caught that the fixtures did not
 
-Every defect in `docs/BUGS.md` was found by a test that **runs the interpreter over the
-result** on a real Tier B page, and every one of them passed the unit tests that existed at
-the time. Seven of the eight are the same shape: a byte-range edit that does not carry its
-own separators, or that writes its operands after its operator, produces a stream that is a
-*different stream*. Nothing downstream reports it — the renderer draws a plausible page, the
-file opens, the edit appears to have worked, and the change is simply not there.
+`docs/BUGS.md` logs the defects. B1 to B3 each passed the unit tests that existed and were found
+only by running the interpreter, or reopening the saved file, on a real Tier B page. The common
+shape is a byte-range edit that produces a *different stream*: nothing downstream reports it, the
+renderer draws a plausible page, the file opens, the edit appears to have worked, and the change is
+simply not there.
 
 The rule the corpus tests enforce is one line: **assert the effect, not the string.** A unit
 test that asserts the bytes an edit *wrote* will pass on `Tc 2`; the test that asserts the
