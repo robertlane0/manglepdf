@@ -36,19 +36,6 @@ write-back bugs live in [`docs/BUGS.md`](BUGS.md).
 - **`mangle-edit`** — `PageModel` grouping, byte-range `surgery` with `q`/`Q` balance verification, `edits` (move, scale, rotate, delete, recolour, crop, text state properties, and rungs 1–3 of text retyping + Type 3 live-text replacement), `reflow` (paragraph layout with `Left`/`Center`/`Right`/`Justify` via `layout_paragraph` and `reflow_patches`, overflow flag, WinAnsi-honest encoding, and shared Form XObject copy-on-write via `inspect_shared_form` and `edit_shared_form`), `embed_truetype` (5-object CID font hierarchy with `/ToUnicode`), `arrange` z-order movement with state re-materialisation, bounded `Arc`-snapshot `History`, incremental `writeback` (`save_page`, `save_decoded`), and `Editor` session.
 - **`mangle-ui` & `mangle-cli`** — Token-themed window shell with background `Supervisor` worker, click-to-select and drag-to-move on canvas, contextual Text Properties and Colour panels with live steppers and text content editing, Arrange and Actions (Rotate ±90°, Delete) sections, title-bar search (`Ctrl+F`) with hit navigation and canvas highlights, bottom-bar zoom (`−`/`100%`/`+`, Fit, Fullscreen) and page navigation, and headless `mangle-cli` commands (`info`, `pages`, `check`, `render`, `extract`, `save`, `edit` with `--align`/`--reflow`/`--scope` for the reflow and shared-form engines).
 
-## A form XObject is a nested content stream, not an image with no samples
-
-`Do` dispatches on `/Subtype` in the XObject dictionary: `/Image` decodes samples, while
-`/Form` executes as a nested content stream via `run_with_state` (bounded by
-`MAX_FORM_DEPTH = 12`) with the form's `/Matrix` composed into the CTM, `/BBox` installed as a
-transformed clip, and `/Resources` resolved recursively (inheriting from the enclosing scope
-when omitted). Each emitted `Record` carries the form name so `mangle-render` and `mangle-edit`
-resolve font, image, and shading names against the form's own resource table. See
-[D17](known-diffs.md#d17--a-cid-was-looked-up-through-the-fonts-cmap-instead-of-its-cidtogidmap)
-and
-[D18](known-diffs.md#d18--an-smask-was-never-checked-against-the-image-it-masks-and-a-hostile-one-cost-a-gigabyte)
-for the companion CID and `/SMask` fixes uncovered on form-heavy corpus pages.
-
 ## Where the corpus stands now
 
 The Tier-B wild corpus (`corpus/wild/`) holds 77 real-world PDFs from pdf.js, PDFBox, NIST,

@@ -60,6 +60,19 @@ every fixture in the repository, so a missing or duplicated transform is invisib
 where a test is most likely to be written; a page under a scaled CTM is now a regression
 test of its own.
 
+## A form XObject is a nested content stream, not an image with no samples
+
+`Do` dispatches on `/Subtype` in the XObject dictionary: `/Image` decodes samples, while
+`/Form` executes as a nested content stream via `run_with_state` (bounded by
+`MAX_FORM_DEPTH = 12`) with the form's `/Matrix` composed into the CTM, `/BBox` installed as a
+transformed clip, and `/Resources` resolved recursively (inheriting from the enclosing scope
+when omitted). Each emitted `Record` carries the form name so `mangle-render` and `mangle-edit`
+resolve font, image, and shading names against the form's own resource table. See
+[D17](known-diffs.md#d17--a-cid-was-looked-up-through-the-fonts-cmap-instead-of-its-cidtogidmap)
+and
+[D18](known-diffs.md#d18--an-smask-was-never-checked-against-the-image-it-masks-and-a-hostile-one-cost-a-gigabyte)
+for the companion CID and `/SMask` fixes uncovered on form-heavy corpus pages.
+
 ## The text model
 
 Text is the one place where two different scales are legitimately in play at once, and
