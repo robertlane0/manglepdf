@@ -16,7 +16,7 @@ An icon is:
 - drawn on a consistent grid with a consistent stroke width and round caps and joins;
 - `fill="none"` with strokes where the shape allows, so it takes the theme's colour;
 - free of `<image>`, `<script`, `<foreignObject>` and embedded data URIs;
-- named for what it does, in kebab-case: `zoom-in.svg`, `add-sticky-note.svg`.
+- named for what it does, in kebab-case: `zoom-in.svg`, `add-text.svg`.
 
 `cargo xtask icons lint` enforces the mechanical parts: SVG only, a `viewBox`, no
 embedded raster or script, drawable content present, and no two files byte-identical
@@ -27,9 +27,7 @@ part no lint can do.
 ## The set
 
 129 icons, drawn to one grid and one stroke weight — including the seven tool-tab icons
-(`tab-view`, `tab-edit`, `tab-annotate`, `tab-page`, `tab-form`, `tab-protect`, `tab-more`). `cargo xtask icons gallery` writes a
-contact sheet to `target/xtask/icon-gallery.html`; reviewing them there, as a set, is
-the part no lint can do.
+(`tab-view`, `tab-edit`, `tab-annotate`, `tab-page`, `tab-form`, `tab-protect`, `tab-more`).
 
 They fall into these groups:
 
