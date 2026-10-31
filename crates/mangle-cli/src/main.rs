@@ -792,18 +792,41 @@ fn render(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The text of a page, in the order a reader would read it.
+/// The text of a page, in reading order (`/StructTreeRoot` `MCID`s when tagged, or
+/// geometric column/baseline order).
 fn extract(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or("extract needs a file")?;
     let doc = open(path)?;
     let page = value(args, "-page")
+        .or_else(|| value(args, "--page"))
         .and_then(|p| p.parse::<usize>().ok())
         .ok_or("extract needs -page N")?;
     let tree = page_tree(&doc)?;
     let Some(target) = tree.get(page) else {
         return Err(format!("the file has no page {page}"));
     };
-    print!("{}", text_of(&target.decoded_contents(&doc)));
+    let resources = page_resources(&doc, target);
+    let content = target.decoded_contents(&doc);
+    let stream = mangle_content::ContentStream::parse(&content);
+    let interpreted = mangle_content::interp::run_with(&stream, &resources);
+    let struct_mcids = doc
+        .catalog()
+        .ok()
+        .and_then(|o| o.as_dict().cloned())
+        .zip(target.reference)
+        .map(|(cat, page_ref)| mangle_doc::page_reading_mcids(&doc, &cat, page_ref))
+        .unwrap_or_default();
+    let extracted = mangle_text::extract_records_in_reading_order(
+        &interpreted.records,
+        &resources,
+        &|o| doc.resolve_object(o),
+        &struct_mcids,
+    );
+    if !extracted.is_empty() {
+        println!("{extracted}");
+    } else {
+        print!("{}", text_of(&content));
+    }
     Ok(())
 }
 

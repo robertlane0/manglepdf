@@ -1945,6 +1945,7 @@ dependencies = [
  "mangle-doc",
  "mangle-edit",
  "mangle-syntax",
+ "mangle-text",
 ]
 
 [[package]]

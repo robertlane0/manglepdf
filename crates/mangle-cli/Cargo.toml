@@ -16,6 +16,7 @@ path = "src/main.rs"
 mangle-syntax.workspace = true
 mangle-doc.workspace = true
 mangle-content.workspace = true
+mangle-text.workspace = true
 mangle-edit.workspace = true
 
 [lints]

@@ -28,6 +28,7 @@ pub mod metadata;
 pub mod names;
 pub mod outlines;
 pub mod pages;
+pub mod struct_tree;
 
 pub use attachments::{EmbeddedFiles, FileSpec};
 pub use catalog::Catalog;
@@ -38,6 +39,7 @@ pub use metadata::{DocumentMetadata, Info};
 pub use names::NameTree;
 pub use outlines::{Destination, Outline, OutlineItem, decode_pdf_text, resolve_destination};
 pub use pages::{Inheritable, Page, PageTree};
+pub use struct_tree::page_reading_mcids;
 
 use mangle_syntax::{Dict, Object, Ref, stream::Decoded};
 

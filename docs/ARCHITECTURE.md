@@ -20,11 +20,11 @@ Dependencies flow one way only. A lower crate never names a higher one.
 | `mangle-filters` | Stream filters: Flate, LZW, RunLength, ASCII85/Hex, predictors, CCITT. No PDF knowledge — no dictionaries, no objects. |
 | `mangle-crypto` | RC4, AES, MD5, SHA-1/2, the standard security handler, permission bits. |
 | `mangle-syntax` | The object model, lexer, parser, cross-references, object streams, recovery, and the writer. Lossless by construction. |
-| `mangle-doc` | Catalog, page tree with inheritance, name trees, outlines, destinations, page labels, optional-content groups, attachments, XMP. |
+| `mangle-doc` | Catalog, page tree with inheritance, structure-tree reading order (`/StructTreeRoot`), name trees, outlines, destinations, page labels, optional-content groups, attachments, XMP. |
 | `mangle-font` | Font programs, encodings, CMaps, glyph names, metrics, subsetting, substitution. |
-| `mangle-content` | Content streams: tokens with byte spans, the interpreter and the per-mark records it produces (each with its bounds and the bytes that drew it), the graphics state, and **PDF functions** — a function dictionary is an ordinary document object, and both a gradient and a separation's tint transform are one. |
+| `mangle-content` | Content streams: tokens with byte spans, the interpreter and the per-mark records it produces (each with its bounds, marked-content tag/`MCID`, and the bytes that drew it), the graphics state, and **PDF functions** — a function dictionary is an ordinary document object, and both a gradient and a separation's tint transform are one. |
 | `mangle-render` | Rasterization: colour, paths, images, shadings, patterns, transparency, tiles. Re-exports `mangle_content::function` as `shading::` because a gradient's function is how a gradient is defined. |
-| `mangle-text` | Text decoding and extraction, with runs joined by their geometry in the order they are given, and search. |
+| `mangle-text` | Text decoding, reading-order extraction (structure-tree `MCID` order when tagged, recursive XY-cut column/baseline order when untagged), and search. |
 | `mangle-edit` | Commands, undo, the page-object model, surgical write-back, annotations, forms, redaction, flatten, page operations, optimize. |
 | `mangle-ui` | The application. |
 | `mangle-cli` | The headless command line. It exists for the tests and the acceptance harness to drive; nothing in the tree runs it yet. |

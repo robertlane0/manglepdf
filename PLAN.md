@@ -55,8 +55,8 @@ Where each milestone stands: [`docs/STATUS.md`](docs/STATUS.md#milestones).
 The gap list in [`docs/STATUS.md`](docs/STATUS.md#open-gaps-in-priority-order) is the queue. This is
 why it is in that order:
 
-1. **The spine's loose ends first**: the M5 UI, reading order, and the viewer and renderer pieces
-   of M1–M3. A gap in the spine costs more later than a gap in breadth.
+1. **The spine's loose ends first**: the M5 UI and the viewer and renderer pieces of M1–M3. A gap
+   in the spine costs more later than a gap in breadth.
 2. **Then breadth, in the order of the gauntlet scenarios it unlocks**: a surface for annotations
    and flatten (S3–S5), forms (S6), the organizer (S7), protect (S8–S9) and export (S10). The
    engines exist; nothing in the UI or CLI reaches them.

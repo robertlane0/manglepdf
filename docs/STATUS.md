@@ -28,11 +28,11 @@ write-back bugs live in [`docs/BUGS.md`](BUGS.md).
 - **`mangle-filters`** — In-house zlib/deflate/inflate, LZW (`EarlyChange` 0/1), RunLength, ASCII85, ASCIIHex, PNG (10–15) and TIFF (2) predictors, and CCITT G3-1D/2D & G4 (verified byte-for-byte against `libtiff`). Returns partial output with diagnostic notes on truncated/corrupt input.
 - **`mangle-crypto`** — RC4, AES-CBC, MD5, SHA-1/2, SASLprep, and Standard Security Handler R2–R6 decryption and permission bit parsing.
 - **`mangle-syntax`** — Lossless COS object graph, lexer, parser, classic xref tables, xref streams (`/Index`, `/W`, `/Prev`, hybrid `/XRefStm`), object streams (`/Extends`), fallback scanner recovery, copy-on-write document overlay, full writer, and incremental revision writer.
-- **`mangle-doc`** — Catalog, page tree with cycle detection and attribute inheritance, name/number trees, outlines/bookmarks, destinations, page labels, optional-content groups, attachments, and metadata/XMP.
-- **`mangle-font` & `assets/fonts/`** — Verified Standard-14 width tables and metric-compatible aliases (`Arial`, `TimesNewRoman`, `CourierNew`), `/Widths`/`/MissingWidth`, CID `/W`/`/DW` and `/CIDToGIDMap`, Standard/WinAnsi/MacRoman/PDFDoc encodings + `/Differences` + 912-entry AGL, TrueType/CFF/Type 1 outline extraction, 12 bundled OFL Liberation substitute faces, TrueType font subsetting (`subset_truetype`), and the `--font-dirs` fallback resolver (`discover_font_files`, `inspect_font_file`, `find_system_font`, `resolve_fallback` with system-first order), which `mangle-render`, `mangle-edit` and `mangle-ui` thread through.
-- **`mangle-content`** — Provenance-preserving tokeniser and operator table, graphics and text state, content stream interpreter, Form XObject execution (`MAX_FORM_DEPTH = 12`), and all 4 PDF function types.
+- **`mangle-doc`** — Catalog, page tree with cycle detection and attribute inheritance, `/StructTreeRoot` structure-tree `MCID` traversal (`page_reading_mcids`), name/number trees, outlines/bookmarks, destinations, page labels, optional-content groups, attachments, and metadata/XMP.
+- **`mangle-font` & `assets/fonts/`** — Verified Standard-14 width tables and metric-compatible aliases (`Arial`, `TimesNewRoman`, `CourierNew`), `/Widths`/`/MissingWidth`, CID `/W`/`/DW` and `/CIDToGIDMap`, Standard/WinAnsi/MacRoman/PDFDoc encodings + `/Differences` + 912-entry AGL, TrueType/CFF/Type 1 outline extraction (sharing `outline::Pen`), 12 bundled OFL Liberation substitute faces, TrueType font subsetting (`subset_truetype`), and the `--font-dirs` fallback resolver (`discover_font_files`, `inspect_font_file`, `find_system_font`, `resolve_fallback` with system-first order), which `mangle-render`, `mangle-edit` and `mangle-ui` thread through.
+- **`mangle-content`** — Provenance-preserving tokeniser and operator table, graphics and text state, content stream interpreter with `BMC`/`BDC`/`EMC` tag and `/MCID` tracking, Form XObject execution (`MAX_FORM_DEPTH = 12`), and all 4 PDF function types.
 - **`mangle-render`** — Analytic scanline coverage rasterizer, per-pixel region clipping masks, Device/Cal/ICCBased/Indexed/Separation/DeviceN/Pattern colour spaces, axial/radial shadings, tiled patterns (`PaintType` 1 & 2), images (`/Decode`, `/ImageMask`, `/SMask` with pre-allocation memory bounds), annotation `/AP /N` rendering, in-house SVG icon renderer, and SSIM/RMS/heatmap image comparison.
-- **`mangle-text`** — Decodes glyph runs to Unicode strings via font encodings/AGL and `ToUnicode`, joins runs into lines and words using baseline and em-scaled gap thresholds, and provides case-insensitive search (`find`) with character offsets and object attribution.
+- **`mangle-text`** — Decodes glyph runs to Unicode strings via font encodings/AGL and `ToUnicode`, orders runs into reading order via `/StructTreeRoot` `MCID`s (`reading_order_runs`) or recursive XY-cut column/baseline ordering (`geometric_reading_order`), joins runs into lines and words, and provides case-insensitive search (`find`) with character offsets and object attribution.
 - **`mangle-edit`** — `PageModel` grouping, byte-range `surgery` with `q`/`Q` balance verification, `edits` (move, scale, rotate, delete, recolour, crop, text state properties, and rungs 1–3 of text retyping + Type 3 live-text replacement), `reflow` (paragraph layout with `Left`/`Center`/`Right`/`Justify` via `layout_paragraph` and `reflow_patches`, overflow flag, WinAnsi-honest encoding, and shared Form XObject copy-on-write via `inspect_shared_form` and `edit_shared_form`), `embed_truetype` (5-object CID font hierarchy with `/ToUnicode`), `arrange` z-order movement with state re-materialisation, bounded `Arc`-snapshot `History`, incremental `writeback` (`save_page`, `save_decoded`), and `Editor` session.
 - **`mangle-ui` & `mangle-cli`** — Token-themed window shell with background `Supervisor` worker, click-to-select and drag-to-move on canvas, contextual Text Properties and Colour panels with live steppers and text content editing, Arrange and Actions (Rotate ±90°, Delete) sections, title-bar search (`Ctrl+F`) with hit navigation and canvas highlights, bottom-bar zoom (`−`/`100%`/`+`, Fit, Fullscreen) and page navigation, and headless `mangle-cli` commands (`info`, `pages`, `check`, `render`, `extract`, `save`, `edit` with `--align`/`--reflow`/`--scope` for the reflow and shared-form engines).
 
@@ -60,21 +60,18 @@ the full Tier-B corpus run, which takes hours).
 ## Open gaps (in priority order)
 
 1. **M5 UI** — Form-edit undo integration: form edits save outside session history.
-2. **Reading order** — Text comes out in the order the file drew it. The structure tree is never
-   walked (`mangle-doc` only locates `/StructTreeRoot`), so a tagged file's own reading order is
-   not used; FINISH S0.6 and S10.2 ask for it.
-3. **Viewer sidebar and renderer (M1–M3)** — The OCG Layers panel can draw a checkbox row per
+2. **Viewer sidebar and renderer (M1–M3)** — The OCG Layers panel can draw a checkbox row per
    layer, but nothing fills its list from the document and a row has no click handler; the
    Attachments and Signatures panels say "Nothing here yet"; and there is no Developer Inspector.
    In the renderer, optional-content visibility is not applied (`/OC` is accepted and ignored)
    and transparency groups (a form's `/Group`) are not modelled; blend modes are.
-4. **A surface for M6–M10** — The engines in `mangle-edit` are implemented and tested, but
+3. **A surface for M6–M10** — The engines in `mangle-edit` are implemented and tested, but
    `mangle-ui` calls none of `annotations`, `forms`, `organize`, `protect`, `export` or `flatten`,
    and `mangle-cli` calls from them only `flatten_page`, `export_page_png` and `export_page_jpeg`.
    Annotations and flatten (Gauntlet S3–S5), forms (S6), the organizer (S7) and protect (S8–S9)
    each need panels and commands before a person can reach them.
-5. **M10 floors** — `cargo xtask perf` and `cargo xtask fuzz` are stubs; the fuzz layer that
+4. **M10 floors** — `cargo xtask perf` and `cargo xtask fuzz` are stubs; the fuzz layer that
    [`TESTING.md`](TESTING.md) describes does not exist yet.
-6. **M11–M12** — UI polish; the remaining Tier-A fixtures (F31 `TravelGuide.pdf` is not among the 12
+5. **M11–M12** — UI polish; the remaining Tier-A fixtures (F31 `TravelGuide.pdf` is not among the 12
    generated); `--automation-stdio` (parsed; the process exits with "not implemented yet"); and the
    `cargo xtask gauntlet` runner, which is a stub.

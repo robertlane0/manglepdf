@@ -2518,6 +2518,7 @@ mod tests {
             line_join: LineJoin::Miter,
             dash: Dash::default(),
             tag: None,
+            mcid: None,
             form: None,
             text: mangle_content::state::TextState::default(),
             text_matrix: Matrix::IDENTITY,

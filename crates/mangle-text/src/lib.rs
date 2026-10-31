@@ -1,9 +1,9 @@
-//! Text decoding, extraction and search.
+//! Text decoding, reading-order extraction and search.
 //!
-//! This crate joins the runs it is given in the order it is given them, using their geometry to
-//! choose between a newline, a space and nothing. The page object model groups runs into lines
-//! and blocks and hands them over in the order the file drew them; nothing walks the structure
-//! tree, so a tagged file's own reading order is not used.
+//! Decodes glyph runs to Unicode strings via font `/Encoding` tables, the Adobe Glyph List,
+//! and `/ToUnicode` CMaps; orders runs into reading order using either the tagged structure
+//! tree (`/StructTreeRoot` `MCID`s) when present or recursive XY-cut column/baseline
+//! geometry; joins runs into lines and words; and searches the extracted text.
 
 #![forbid(unsafe_code)]
 #![deny(
@@ -203,7 +203,7 @@ pub fn text_of(runs: &[Decoded]) -> String {
             // how far apart two baselines have to be to count as different: a superscript sits
             // further from its line than its own size is tall.
             let tall = before.size.max(run.size);
-            if (here.sy - before.ey).abs() > tall * 0.3 {
+            if (here.sy - before.ey).abs() > tall * 0.3 || here.sx < before.sx - tall * 0.5 {
                 out.push('\n');
             } else if here.sx - before.ex > tall * 0.25 {
                 out.push(' ');
@@ -213,6 +213,194 @@ pub fn text_of(runs: &[Decoded]) -> String {
         previous = Some(here);
     }
     out
+}
+
+/// Order decoded runs into reading order, using `/StructTreeRoot` `MCID`s when available
+/// and falling back to recursive XY-cut column/baseline ordering for untagged runs.
+#[must_use]
+pub fn reading_order_runs(runs: &[(Option<i64>, Decoded)], struct_mcids: &[i64]) -> Vec<Decoded> {
+    let valid: Vec<(usize, Option<i64>, &Decoded)> = runs
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, d))| d.extent.is_some() && !d.text.is_empty())
+        .map(|(i, (m, d))| (i, *m, d))
+        .collect();
+    if valid.is_empty() {
+        return Vec::new();
+    }
+
+    let has_tagged = !struct_mcids.is_empty()
+        && valid
+            .iter()
+            .any(|(_, m, _)| m.is_some_and(|id| struct_mcids.contains(&id)));
+
+    if has_tagged {
+        let mut used = vec![false; valid.len()];
+        let mut ordered = Vec::with_capacity(valid.len());
+        for &target in struct_mcids {
+            for (slot, (_, mcid, decoded)) in valid.iter().enumerate() {
+                if *mcid == Some(target)
+                    && let Some(flag) = used.get_mut(slot)
+                    && !*flag
+                {
+                    *flag = true;
+                    ordered.push((*decoded).clone());
+                }
+            }
+        }
+        let untagged: Vec<Decoded> = valid
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| !used.get(*slot).copied().unwrap_or(false))
+            .map(|(_, (_, _, d))| (*d).clone())
+            .collect();
+        ordered.extend(geometric_reading_order(&untagged));
+        return ordered;
+    }
+
+    let plain: Vec<Decoded> = valid.into_iter().map(|(_, _, d)| d.clone()).collect();
+    geometric_reading_order(&plain)
+}
+
+/// Order runs by recursive XY-cut (vertical column gutters and horizontal bands), then
+/// top-to-bottom (`sy` descending) and left-to-right (`sx` ascending) within each block.
+#[must_use]
+pub fn geometric_reading_order(runs: &[Decoded]) -> Vec<Decoded> {
+    let items: Vec<(usize, Placed)> = runs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| Some((i, Placed::new(r.extent?, r.size.max(1.0)))))
+        .collect();
+    let mut order = Vec::with_capacity(items.len());
+    xy_cut(&items, 0, &mut order);
+    order
+        .into_iter()
+        .filter_map(|i| runs.get(i).cloned())
+        .collect()
+}
+
+fn xy_cut(items: &[(usize, Placed)], depth: usize, out: &mut Vec<usize>) {
+    if items.is_empty() {
+        return;
+    }
+    if items.len() == 1 || depth >= 16 {
+        for (idx, _) in items {
+            out.push(*idx);
+        }
+        return;
+    }
+
+    let max_size = items.iter().map(|(_, p)| p.size).fold(1.0_f64, f64::max);
+
+    // 1. Check for a vertical column gutter that cleanly separates left and right groups.
+    let mut by_x = items.to_vec();
+    by_x.sort_by(|(_, a), (_, b)| a.sx.min(a.ex).total_cmp(&b.sx.min(b.ex)));
+    let mut running_max_x = f64::NEG_INFINITY;
+    let mut best_x_split: Option<(usize, f64)> = None;
+    for k in 1..by_x.len() {
+        if let Some((_, prev)) = by_x.get(k - 1) {
+            running_max_x = running_max_x.max(prev.sx.max(prev.ex));
+        }
+        if let Some((_, curr)) = by_x.get(k) {
+            let gap = curr.sx.min(curr.ex) - running_max_x;
+            if gap > max_size * 1.5 && best_x_split.is_none_or(|(_, best)| gap > best) {
+                best_x_split = Some((k, gap));
+            }
+        }
+    }
+    if let Some((split_idx, _)) = best_x_split
+        && let (Some(left), Some(right)) = (by_x.get(..split_idx), by_x.get(split_idx..))
+    {
+        xy_cut(left, depth + 1, out);
+        xy_cut(right, depth + 1, out);
+        return;
+    }
+
+    // 2. Check for a horizontal band gap (top-to-bottom in PDF space: y descending).
+    let mut by_y = items.to_vec();
+    by_y.sort_by(|(_, a), (_, b)| b.sy.max(b.ey).total_cmp(&a.sy.max(a.ey)));
+    let mut running_min_y = f64::INFINITY;
+    let mut best_y_split: Option<(usize, f64)> = None;
+    for k in 1..by_y.len() {
+        if let Some((_, prev)) = by_y.get(k - 1) {
+            running_min_y = running_min_y.min(prev.sy.min(prev.ey));
+        }
+        if let Some((_, curr)) = by_y.get(k) {
+            let gap = running_min_y - curr.sy.max(curr.ey);
+            if gap > max_size * 0.6 && best_y_split.is_none_or(|(_, best)| gap > best) {
+                best_y_split = Some((k, gap));
+            }
+        }
+    }
+    if let Some((split_idx, _)) = best_y_split
+        && let (Some(top), Some(bottom)) = (by_y.get(..split_idx), by_y.get(split_idx..))
+    {
+        xy_cut(top, depth + 1, out);
+        xy_cut(bottom, depth + 1, out);
+        return;
+    }
+
+    // 3. Base case: sort top-to-bottom by baseline (within 0.3 * size), then left-to-right.
+    let mut sorted = items.to_vec();
+    sorted.sort_by(|(_, a), (_, b)| {
+        let tall = a.size.max(b.size);
+        if (a.sy - b.sy).abs() <= tall * 0.3 {
+            a.sx.total_cmp(&b.sx)
+        } else {
+            b.sy.total_cmp(&a.sy)
+        }
+    });
+    for (idx, _) in sorted {
+        out.push(idx);
+    }
+}
+
+/// Decode and join a page's `Record`s in reading order (`struct_mcids` when tagged,
+/// otherwise geometric XY-cut column/baseline order), skipping `/Artifact` marks when
+/// non-artifact body text is present.
+#[must_use]
+pub fn extract_records_in_reading_order(
+    records: &[mangle_content::Record],
+    resources: &mangle_content::Resources,
+    resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+    struct_mcids: &[i64],
+) -> String {
+    let has_non_artifact = records.iter().any(|r| {
+        matches!(r.mark, mangle_content::Mark::Glyphs { .. })
+            && r.tag.as_deref() != Some("Artifact")
+    });
+    let mut decoded = Vec::new();
+    for record in records {
+        if has_non_artifact && record.tag.as_deref() == Some("Artifact") {
+            continue;
+        }
+        let mangle_content::Mark::Glyphs {
+            text,
+            placements,
+            size,
+            ..
+        } = &record.mark
+        else {
+            continue;
+        };
+        let scale = (record.text_matrix.a * record.text_matrix.d
+            - record.text_matrix.b * record.text_matrix.c)
+            .abs()
+            .sqrt()
+            .max(1.0);
+        let run = Run {
+            form: record.form.as_deref(),
+            font: record.text.font.as_deref(),
+            text,
+            origins: placements.iter().map(|m| (m.e, m.f)).collect(),
+            size: (*size * scale).max(1.0),
+        };
+        if let Some(d) = decode(resources, resolve, &run) {
+            decoded.push((record.mcid, d));
+        }
+    }
+    let ordered = reading_order_runs(&decoded, struct_mcids);
+    text_of(&ordered)
 }
 
 /// Where one run's text sits, flattened out of [`Decoded::extent`].
@@ -335,4 +523,51 @@ pub fn locate(texts: &[String], hits: &[Hit]) -> Vec<(usize, Hit)> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    fn run_at(text: &str, x0: f64, x1: f64, y: f64) -> Decoded {
+        Decoded {
+            text: text.to_string(),
+            unmapped: 0,
+            extent: Some(((x0, y), (x1, y))),
+            size: 10.0,
+        }
+    }
+
+    #[test]
+    fn tagged_runs_follow_struct_tree_mcid_order() {
+        let runs = vec![
+            (Some(1), run_at("second", 72.0, 120.0, 680.0)),
+            (Some(0), run_at("first", 72.0, 110.0, 700.0)),
+            (Some(2), run_at("third", 320.0, 360.0, 700.0)),
+        ];
+        let ordered = reading_order_runs(&runs, &[0, 1, 2]);
+        assert_eq!(text_of(&ordered), "first\nsecond\nthird");
+    }
+
+    #[test]
+    fn untagged_two_column_runs_with_spanning_header_read_column_by_column() {
+        // Drawn in row-interleaved order below a full-width header:
+        // Header (x=72..500, y=750)
+        // Col1 Row1 (x=72..200, y=700), Col2 Row1 (x=320..450, y=700)
+        // Col1 Row2 (x=72..200, y=680), Col2 Row2 (x=320..450, y=680)
+        let runs = vec![
+            (None, run_at("Col1-Row1", 72.0, 200.0, 700.0)),
+            (None, run_at("Col2-Row1", 320.0, 450.0, 700.0)),
+            (None, run_at("Header", 72.0, 500.0, 750.0)),
+            (None, run_at("Col1-Row2", 72.0, 200.0, 680.0)),
+            (None, run_at("Col2-Row2", 320.0, 450.0, 680.0)),
+        ];
+        let ordered = reading_order_runs(&runs, &[]);
+        assert_eq!(
+            text_of(&ordered),
+            "Header\nCol1-Row1\nCol1-Row2\nCol2-Row1\nCol2-Row2"
+        );
+    }
 }

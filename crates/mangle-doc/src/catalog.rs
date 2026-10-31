@@ -95,6 +95,12 @@ impl Catalog {
     pub fn struct_tree(&self, resolver: &dyn Resolver) -> Option<Ref> {
         follow_from(resolver, &self.dict, "StructTreeRoot").and_then(|o| o.as_ref_id())
     }
+
+    /// The reading-order `MCID`s for `page_id` from `/StructTreeRoot`, when tagged.
+    #[must_use]
+    pub fn page_reading_mcids(&self, resolver: &dyn Resolver, page_id: Ref) -> Vec<i64> {
+        crate::struct_tree::page_reading_mcids(resolver, &self.dict, page_id)
+    }
 }
 
 /// `/OpenAction` may be a destination or an action; a GoTo action names the page in

@@ -162,6 +162,9 @@ pub struct Record {
     pub dash: Dash,
     /// The marked-content tag, if the mark was inside a `/BMC` or `/BDC` group.
     pub tag: Option<String>,
+    /// The marked-content identifier (`/MCID`), if the mark was inside a `/BDC` group
+    /// carrying one.
+    pub mcid: Option<i64>,
     /// The form XObject this mark was drawn inside, if any.
     ///
     /// A form carries its own `/Resources`, and every name in it — `/F1`, `/Im0`, `/Sh0` —
@@ -416,6 +419,7 @@ pub fn run_with_state(
         depth: 0,
         form: None,
         prior: 0,
+        marked: Vec::new(),
     };
     ctx.execute(stream);
     ctx.out.state = ctx.state;
@@ -453,6 +457,8 @@ struct Context<'a> {
     /// How many records the enclosing runs had already produced, so that the mark limit is
     /// the page's rather than each run's own.
     prior: usize,
+    /// Open `BMC`/`BDC` marked-content groups: `(tag, mcid)`.
+    marked: Vec<(Option<String>, Option<i64>)>,
 }
 
 impl Context<'_> {
@@ -502,6 +508,31 @@ impl Context<'_> {
         }
 
         let all: Vec<&Object> = op.operands.iter().map(|t| &t.value).collect();
+        match name.as_slice() {
+            b"BMC" | b"BDC" => {
+                let tag = all
+                    .iter()
+                    .find_map(|o| o.as_name())
+                    .map(|n| String::from_utf8_lossy(n).into_owned());
+                let mcid = all
+                    .iter()
+                    .find_map(|o| o.as_dict())
+                    .and_then(|d| d.get("MCID"))
+                    .and_then(Object::as_i64);
+                if let Some(t) = &tag {
+                    self.out.tags.push(t.clone());
+                }
+                if self.marked.len() < 64 {
+                    self.marked.push((tag, mcid));
+                }
+                return;
+            }
+            b"EMC" => {
+                self.marked.pop();
+                return;
+            }
+            _ => {}
+        }
         let operands = ops::take_last(info, &all);
         // A form is a nested content stream, not something to paint: executing it is what
         // this operator means, and the marks it draws are the page's marks. Every other
@@ -1024,6 +1055,7 @@ impl Context<'_> {
             depth,
             form: Some(name.to_string()),
             prior,
+            marked: self.marked.clone(),
         };
         // The form's execution is a `q`, so its `q`s start one level further in.
         inner.state.depth = outer.depth + 1;
@@ -1142,7 +1174,8 @@ impl Context<'_> {
             line_cap: self.state.stroke.cap,
             line_join: self.state.stroke.join,
             dash: self.state.stroke.dash.clone(),
-            tag: self.out.tags.last().cloned(),
+            tag: self.marked.iter().rev().find_map(|(t, _)| t.clone()),
+            mcid: self.marked.iter().rev().find_map(|(_, m)| *m),
             form: self.form.clone(),
             text: self.state.text.clone(),
             text_matrix: self.state.text_matrix,
