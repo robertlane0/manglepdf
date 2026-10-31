@@ -14,18 +14,17 @@ deeply. Annotations, forms, pages, protect and export hang off it and follow.
 
 ## Key architectural bets
 
-One row per bet. ADR-0004 and ADR-0005 have records in [`docs/decisions/`](docs/decisions/); the
-others are recorded here only.
+One row per bet. Full records live in [`docs/decisions/`](docs/decisions/).
 
 | # | Bet | Why |
 |---|---|---|
-| ADR-0001 | Lossless COS layer: every object kept verbatim (raw stream bytes, original `/Filter` chain), lazily resolved from file bytes via xref; edits live in an object-level copy-on-write overlay | Enables byte-for-byte preservation of everything we do not touch (Charter §4.1 law 1) and incremental saves (FINISH S1.17) |
-| ADR-0002 | Content streams are parsed into a token/operator stream that **retains byte spans**; the page-object model maps every object back to its provenance ranges | Makes surgical write-back, the Inspector, and "what changed" diffing possible |
-| ADR-0003 | In-house Flate **inflate** (must return partial output for truncated streams) and in-house deflate/zlib | Standard crates abort on corruption; a truncated stream must return partial data with a diagnostic note |
-| ADR-0004 | egui + eframe (winit) for the GUI, everything custom-painted from design tokens | Pure Rust, no toolkit look to fight, custom canvas, HiDPI, IME, and accessibility |
-| ADR-0005 | Text retyping walks the font resolution ladder as surgical changes: the run's own font, then a same-family font already in the document, then a bundled TrueType face, subsetted and embedded | Charter §4.4 asks for a retyped headline in a file every other viewer opens perfectly; the earlier the rung, the less of the file changes |
-| ADR-0006 | Permitted codecs only for JPEG (DCT) decode/encode; PNG is in-house on top of our own Flate | PNG needs exact control of predictors/bit depths; JPEG is general-purpose |
-| ADR-0007 | Own analytic-coverage scanline rasterizer shared by PDF rendering *and* SVG icon rendering | One rasterizer to get right; dogfoods the renderer (Charter §8.7) |
+| [ADR-0001](docs/decisions/0001-lossless-cos-layer.md) | Lossless COS layer: every object kept verbatim (raw stream bytes, original `/Filter` chain), lazily resolved from file bytes via xref; edits live in an object-level copy-on-write overlay | Enables byte-for-byte preservation of everything we do not touch (Charter §4.1 law 1) and incremental saves (FINISH S1.17) |
+| [ADR-0002](docs/decisions/0002-provenance-content-streams.md) | Content streams are parsed into a token/operator stream that **retains byte spans**; the page-object model maps every object back to its provenance ranges | Makes surgical write-back, the Inspector, and "what changed" diffing possible |
+| [ADR-0003](docs/decisions/0003-in-house-flate.md) | In-house Flate **inflate** (must return partial output for truncated streams) and in-house deflate/zlib | Standard crates abort on corruption; a truncated stream must return partial data with a diagnostic note |
+| [ADR-0004](docs/decisions/0004-gui-toolkit.md) | egui + eframe (winit) for the GUI, everything custom-painted from design tokens | Pure Rust, no toolkit look to fight, custom canvas, HiDPI, IME, and accessibility |
+| [ADR-0005](docs/decisions/0005-retype-own-font.md) | Text retyping walks the font resolution ladder as surgical changes: the run's own font, then a same-family font already in the document, then a bundled TrueType face, subsetted and embedded | Charter §4.4 asks for a retyped headline in a file every other viewer opens perfectly; the earlier the rung, the less of the file changes |
+| [ADR-0006](docs/decisions/0006-image-codecs.md) | Permitted codecs only for JPEG (DCT) decode/encode; PNG is in-house on top of our own Flate | PNG needs exact control of predictors/bit depths; JPEG is general-purpose |
+| [ADR-0007](docs/decisions/0007-shared-rasterizer.md) | Own analytic-coverage scanline rasterizer shared by PDF rendering *and* SVG icon rendering | One rasterizer to get right; dogfoods the renderer (Charter §8.7) |
 
 `ttf-parser` reads TrueType and OpenType tables (see [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md)).
 The shaper the original plan paired it with, `rustybuzz`, was never called and is no longer a
