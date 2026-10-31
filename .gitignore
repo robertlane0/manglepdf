@@ -29,10 +29,10 @@ Thumbs.db
 *.jks
 
 # --- PDFs: ignored by default so stray outputs and downloads can't be committed ---
-# Tracked PDFs live only in fixtures/small/ and under tests/ (regression repros, goldens).
+# Tracked PDFs live in fixtures/ (small Tier-A fixtures) and under tests/ (regression repros, goldens).
 # For anything else use `git add -f` deliberately, with a licence entry in a SOURCES.md.
 *.pdf
-!**/fixtures/small/**/*.pdf
+!/fixtures/*.pdf
 !**/tests/**/*.pdf
 
 # --- Corpora and generated fixtures ---

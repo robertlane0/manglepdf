@@ -3,18 +3,17 @@
 ## Prerequisites
 
 A pinned Rust toolchain (`rust-toolchain.toml` picks it up automatically). The build is
-offline after the first dependency fetch. The Tier A fixtures are generated rather than
-checked in, so a fresh clone needs two commands before `cargo test` passes:
+offline after the first dependency fetch, and the small Tier A fixtures are checked in under
+`fixtures/` (and reproducible via `cargo xtask fixtures`):
 
 ```sh
 cargo fetch                 # once
-cargo xtask fixtures        # once: writes the Tier A PDFs, which are git-ignored
+cargo xtask fixtures        # optional: regenerate the Tier A PDFs from tools/fixturegen
 cargo vendor                # optional: to vendor for an air-gapped machine
 ```
 
 The fixtures are deterministic and `fixtures/MANIFEST.toml` pins their hashes, so
-regenerating them reproduces the same bytes. Without them the tests that read them fail with
-a file-not-found.
+`cargo xtask fixtures --check` verifies that `tools/fixturegen` reproduces the checked-in bytes.
 
 The oracle tests also call `qpdf`, `mutool`, `pdftotext`, `pdfinfo` and `python3`. When
 `mutool` is missing they skip, except `text_space_diff`, which fails because a comparison that
@@ -67,7 +66,7 @@ crates/          the product, in dependency order
 tools/fixturegen deterministic fixtures; no mangle-* dependency
 xtask/           gate checks, fixtures, icons, the gauntlet
 corpus/          Tier B real-world PDFs; corpus/wild is a git submodule, its own repository
-fixtures/        Tier A: MANIFEST.toml is checked in, the PDFs are generated and git-ignored
+fixtures/        Tier A: MANIFEST.toml and the small generated PDFs are checked in
 scripts/         dev scripts that use external tools as oracles
 docs/            this documentation, decision records, and docs/design/reference-mockup.html (UI reference)
 ```

@@ -1,0 +1,45 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> >>
+endobj
+3 0 obj
+<< /Type /Pages /Kids [5 0 R] /Count 1 >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 3 0 R /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 755 >>
+stream
+0.2 0.4 0.9 rg
+100 700 m 200 750 l 300 700 l 250 600 l 150 600 l h f
+0.9 0.3 0.2 rg
+100 500 m 200 550 l 300 500 l 250 400 l 150 400 l h f*
+q 80 300 400 150 re W n 120 320 340 110 re W n 0 0 0 RG 2 w [6 3] 0 d 0 0 m 520 320 l S Q
+q 0.1 0.1 0.1 RG 0.25 w 0 J 0 j 100 250 m 200 200 l 300 250 l 400 180 l S Q
+q 0 0 0 RG 1 w 500 200 m 500 200 l S Q
+q 0.9 0.9 0.2 rg 0.5 gs 40 60 100 60 re f 52 64 100 60 re f 64 68 100 60 re f 76 72 100 60 re f 88 76 100 60 re f 100 80 100 60 re f 112 84 100 60 re f 124 88 100 60 re f 136 92 100 60 re f 148 96 100 60 re f 160 100 100 60 re f 172 104 100 60 re f 184 108 100 60 re f 196 112 100 60 re f 208 116 100 60 re f 220 120 100 60 re f 232 124 100 60 re f 244 128 100 60 re f 256 132 100 60 re f 268 136 100 60 re f Q
+
+endstream
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 1
+0000000000 65535 f 
+1 6
+0000000009 00000 n 
+0000000058 00000 n 
+0000000178 00000 n 
+0000001104 00000 n 
+0000000235 00000 n 
+0000000298 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R /ID [<00112233445566778899AABBCCDDEEFF> <FFEEDDCCBBAA99887766554433221100>] >>
+startxref
+1174
+%%EOF

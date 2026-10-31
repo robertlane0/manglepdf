@@ -1,0 +1,74 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> >>
+endobj
+3 0 obj
+<< /Type /Pages /Kids [5 0 R] /Count 1 >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 3 0 R /Contents 6 0 R /Rotate 90 /Annots [50 0 R 51 0 R 52 0 R 53 0 R 54 0 R 55 0 R 56 0 R 58 0 R] >>
+endobj
+6 0 obj
+<< /Length 58 >>
+stream
+BT /F1 14 Tf 100 400 Td (Text under the annotations) Tj ET
+endstream
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+50 0 obj
+<< /Type /Annot /Subtype /Highlight /Rect [100 700 300 720] /QuadPoints [100 720 300 720 300 700 100 700] /C [1 1 0] /CA 0.4 /F 4 /T (Reviewer) /M (D:20260101120000Z) >>
+endobj
+51 0 obj
+<< /Type /Annot /Subtype /Underline /Rect [100 660 300 680] /QuadPoints [100 660 300 660 300 680 100 680] /C [0 0 1] /F 4 >>
+endobj
+52 0 obj
+<< /Type /Annot /Subtype /Text /Rect [320 690 344 714] /Name /Comment /Open true /F 4 /T (Reviewer) /Subj (Note) /Contents (Check this) >>
+endobj
+53 0 obj
+<< /Type /Annot /Subtype /Square /Rect [100 560 300 620] /RD [10 10 10 10] /BS << /W 2 >> /C [0 .5 0] /F 4 >>
+endobj
+54 0 obj
+<< /Type /Annot /Subtype /Cloud /Rect [340 560 480 620] /C [0 0 1] /BS << /W 1 /D [3 2] >> /BE << /S /C /I [2 2 2] /D [2 2] >> /RD [12 12 12 12] /F 4 >>
+endobj
+55 0 obj
+<< /Type /Annot /Subtype /Line /Rect [120 480 400 500] /L [120 480 400 500] /LE << /S /O /L 12 >> /IC << /S /P >> /C [1 0 0] /T (Reviewer) /Contents (A line) >>
+endobj
+56 0 obj
+<< /Type /Annot /Subtype /FileAttachment /Rect [420 470 444 494] /FS 57 0 R /Name /PushPin /F 4 >>
+endobj
+58 0 obj
+<< /Type /Annot /Subtype /Link /Rect [100 430 300 450] /A << /S /URI /URI (https://example.invalid/) >> /Border [0 0 0] >>
+endobj
+57 0 obj
+<< /Type /Filespec /F (note.txt) /UF (note.txt) >>
+endobj
+xref
+0 1
+0000000000 65535 f 
+1 6
+0000000009 00000 n 
+0000000058 00000 n 
+0000000178 00000 n 
+0000000483 00000 n 
+0000000235 00000 n 
+0000000375 00000 n 
+50 9
+0000000553 00000 n 
+0000000739 00000 n 
+0000000880 00000 n 
+0000001035 00000 n 
+0000001161 00000 n 
+0000001330 00000 n 
+0000001507 00000 n 
+0000001761 00000 n 
+0000001622 00000 n 
+trailer
+<< /Size 59 /Root 1 0 R /ID [<00112233445566778899AABBCCDDEEFF> <FFEEDDCCBBAA99887766554433221100>] >>
+startxref
+1828
+%%EOF

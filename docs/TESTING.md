@@ -135,8 +135,7 @@ corpus.
 ## Running everything
 
 ```sh
-cargo xtask fixtures              # once after cloning: the Tier A PDFs are generated, not checked in
-cargo test --workspace            # unit and round trip
+cargo test --workspace            # unit and round trip (small Tier A PDFs in fixtures/ are checked in)
 cargo xtask policy                # Gate 0, including fmt, clippy and a release build
 cargo xtask fixtures --check      # the corpus is reproducible
 cargo xtask gauntlet --seed N     # the acceptance run (not yet built, M12); see FINISH.md

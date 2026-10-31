@@ -339,6 +339,7 @@ impl Builder {
             offsets.push((obj.num(), out.len()));
             out.extend_from_slice(&obj.body);
         }
+        offsets.sort_by_key(|(n, _)| *n);
         offsets
     }
 }

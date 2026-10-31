@@ -39,7 +39,6 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how they fit together and
 
 ```sh
 cargo build
-cargo xtask fixtures   # once: generate the Tier A test PDFs, which are not checked in
 cargo test --workspace
 cargo xtask policy
 ```
