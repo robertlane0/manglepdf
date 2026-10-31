@@ -4,10 +4,9 @@
 //! rather than a colour value, so there is nothing for a colour-space converter to convert:
 //! the pattern decides what is painted, and it decides it per pixel. A `/PatternType 2`
 //! pattern names a shading, whose colour changes with position across the shape being
-//! filled; a `/PatternType 1` pattern tiles a content stream, which needs a loop over cells
-//! in the pattern's own space. Only the first is here, and the second is refused by name
-//! rather than approximated by one cell — a page with a visible hole in it is a bug report,
-//! and a page with a wrong texture is a wrong answer.
+//! filled; a `/PatternType 1` pattern tiles a rendered cell in the pattern's own space.
+//! Both are handled here, and unsupported pattern kinds are refused by name rather than
+//! approximated.
 //!
 //! # A stroke is a fill too
 //!
@@ -477,4 +476,55 @@ pub fn stroke(
         drawn |= polygon(device, outline, FillRule::NonZero, colour, alpha, blend);
     }
     drawn
+}
+
+#[cfg(test)]
+mod tests {
+    // Tests state their expectations with `expect`; the panic-free rule is about what the
+    // product does with a file, not about tests.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::Subpath;
+
+    /// A patterned stroke and a one-colour stroke share `Device::stroke_outline`, so they
+    /// cover the exact same pixels.
+    #[test]
+    fn a_pattern_stroke_covers_exactly_where_a_one_colour_stroke_does() {
+        let shape = Polygon {
+            subpaths: vec![Subpath {
+                points: vec![(8.0, 8.0), (40.0, 20.0), (24.0, 40.0)],
+                closed: false,
+            }],
+        };
+        let style = StrokeStyle {
+            width: 3.0,
+            dash: mangle_content::Dash {
+                array: vec![5.0, 3.0],
+                phase: 0.0,
+            },
+            ..StrokeStyle::default()
+        };
+        let ink = Rgba {
+            r: 0.2,
+            g: 0.4,
+            b: 0.8,
+            a: 1.0,
+        };
+
+        let mut flat = Device::new(Image::filled(48, 48, [255, 255, 255, 255]));
+        flat.stroke_polygon(&shape, &style, ink.to_rgba8(1.0), BlendMode::Normal);
+
+        let mut patterned = Device::new(Image::filled(48, 48, [255, 255, 255, 255]));
+        assert!(stroke(
+            &mut patterned,
+            &shape,
+            &style,
+            &FillColour::flat(ink),
+            1.0,
+            BlendMode::Normal,
+        ));
+
+        assert_eq!(flat.into_image().pixels, patterned.into_image().pixels);
+    }
 }
