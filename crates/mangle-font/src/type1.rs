@@ -991,14 +991,8 @@ struct Flex {
 /// Executes one Type 1 charstring.
 struct Walker<'a> {
     font: &'a Type1,
-    segments: Vec<Segment>,
+    pen: crate::outline::Pen,
     stack: Vec<f32>,
-    /// The pen, in glyph units rather than ems. The drawing operators are relative, and the
-    /// matrix belongs where an absolute point becomes a segment.
-    x: f32,
-    y: f32,
-    /// Where the contour being drawn began, and whether one is open.
-    start: Option<(f32, f32)>,
     /// How many values a subroutine's results are still being read back.
     ///
     /// A `pop` after a `callothersubr` is not a pop: it is how the charstring says how many
@@ -1025,11 +1019,8 @@ impl<'a> Walker<'a> {
     fn new(font: &'a Type1) -> Self {
         Self {
             font,
-            segments: Vec::new(),
+            pen: crate::outline::Pen::new(font.font_matrix),
             stack: Vec::new(),
-            x: 0.0,
-            y: 0.0,
-            start: None,
             results: 0,
             width: None,
             sidebearing: 0.0,
@@ -1076,11 +1067,12 @@ impl<'a> Walker<'a> {
                 frame.at = next;
             }
         }
-        self.close();
+        self.pen.close();
         // The sidebearing moves the whole glyph, so it is applied once at the end rather than
         // to every point as it is produced.
         let (dx, dy) = self.sidebearing_offset();
         let segments = self
+            .pen
             .segments
             .into_iter()
             .map(|s| shift(s, dx, dy))
@@ -1120,13 +1112,6 @@ impl<'a> Walker<'a> {
 
     // ── geometry ─────────────────────────────────────────────────────────────────
 
-    /// A point in glyph units as a point in ems.
-    #[allow(clippy::many_single_char_names)]
-    fn ems(&self, x: f32, y: f32) -> (f64, f64) {
-        let [a, b, c, d, e, f] = self.font.font_matrix;
-        (f64::from(a * x + c * y + e), f64::from(b * x + d * y + f))
-    }
-
     /// Where the sidebearing puts the glyph, in ems.
     #[allow(clippy::many_single_char_names)]
     fn sidebearing_offset(&self) -> (f64, f64) {
@@ -1143,65 +1128,27 @@ impl<'a> Walker<'a> {
         // othersubr number that claims it. Emitting a `Move` for those would cut the contour
         // into seven pieces and draw seven single-point contours instead of one curve.
         if self.flex.is_some() {
-            self.x = x;
-            self.y = y;
+            self.pen.x = x;
+            self.pen.y = y;
             return;
         }
-        self.close();
-        self.x = x;
-        self.y = y;
-        self.start = Some((x, y));
-        let (ex, ey) = self.ems(x, y);
-        self.segments.push(Segment::Move(ex, ey));
+        self.pen.move_to(x, y);
     }
 
     fn move_rel(&mut self, dx: f32, dy: f32) {
-        self.move_to(self.x + dx, self.y + dy);
+        self.move_to(self.pen.x + dx, self.pen.y + dy);
     }
 
     fn line_rel(&mut self, dx: f32, dy: f32) {
-        self.begin_if_needed();
-        self.x += dx;
-        self.y += dy;
-        let (ex, ey) = self.ems(self.x, self.y);
-        self.segments.push(Segment::Line(ex, ey));
+        self.pen.line_rel(dx, dy);
     }
 
-    /// One curve, from three offsets, each from the point before it.
-    #[allow(clippy::too_many_arguments)]
     fn curve_rel(&mut self, dx1: f32, dy1: f32, dx2: f32, dy2: f32, dx3: f32, dy3: f32) {
-        self.begin_if_needed();
-        let x1 = self.x + dx1;
-        let y1 = self.y + dy1;
-        let x2 = x1 + dx2;
-        let y2 = y1 + dy2;
-        self.x = x2 + dx3;
-        self.y = y2 + dy3;
-        let (ax, ay) = self.ems(x1, y1);
-        let (bx, by) = self.ems(x2, y2);
-        let (cx, cy) = self.ems(self.x, self.y);
-        self.segments.push(Segment::Curve(ax, ay, bx, by, cx, cy));
+        self.pen.curve_rel(dx1, dy1, dx2, dy2, dx3, dy3);
     }
 
-    /// A `lineto` or a curve before any `moveto` starts a contour where the pen is.
-    fn begin_if_needed(&mut self) {
-        if self.start.is_none() {
-            self.start = Some((self.x, self.y));
-            let (ex, ey) = self.ems(self.x, self.y);
-            self.segments.push(Segment::Move(ex, ey));
-        }
-    }
-
-    /// Close the contour being drawn, if one is open.
     fn close(&mut self) {
-        let Some((sx, sy)) = self.start.take() else {
-            return;
-        };
-        let (sx, sy) = self.ems(sx, sy);
-        let (ex, ey) = self.ems(self.x, self.y);
-        if (ex - sx).abs() > 1e-9 || (ey - sy).abs() > 1e-9 {
-            self.segments.push(Segment::Line(sx, sy));
-        }
+        self.pen.close();
     }
 
     // ── one token ────────────────────────────────────────────────────────────────
@@ -1288,9 +1235,7 @@ impl<'a> Walker<'a> {
                 };
                 self.width = Some(*width);
                 self.sidebearing = *sidebearing;
-                self.x = 0.0;
-                self.y = 0.0;
-                self.start = None;
+                self.pen.reset_origin();
                 Ok(())
             }
             14 => {
@@ -1479,9 +1424,7 @@ impl<'a> Walker<'a> {
                 };
                 self.width = Some(*width);
                 self.sidebearing = *sidebearing;
-                self.x = 0.0;
-                self.y = 0.0;
-                self.start = None;
+                self.pen.reset_origin();
                 Ok(())
             }
             12 => {
@@ -1552,7 +1495,7 @@ impl<'a> Walker<'a> {
                     count: 0,
                 };
                 if let Some(first) = flex.points.first_mut() {
-                    *first = (self.x, self.y);
+                    *first = (self.pen.x, self.pen.y);
                 }
                 flex.count = 1;
                 self.flex = Some(flex);
@@ -1574,7 +1517,7 @@ impl<'a> Walker<'a> {
                 }
                 let index = flex.count.min(6);
                 if let Some(slot) = flex.points.get_mut(index) {
-                    *slot = (self.x, self.y);
+                    *slot = (self.pen.x, self.pen.y);
                 }
                 flex.count = flex.count.saturating_add(1);
                 Ok(())
@@ -1601,7 +1544,7 @@ impl<'a> Walker<'a> {
                 // discarded. They are the pen's own position, so the `setcurrentpoint` that
                 // reads them is a no-op — which is what makes it safe to have put the flex
                 // itself in the right place rather than leaving it to that correction.
-                let (x, y) = (self.x, self.y);
+                let (x, y) = (self.pen.x, self.pen.y);
                 self.results = 3;
                 self.flex_curve(flex);
                 self.push(0.0)?;
@@ -1648,19 +1591,23 @@ impl<'a> Walker<'a> {
         // The pen is where the flex started, whatever the six `rmoveto`s did to get there.
         // A contour that is not already open begins here, and `begin_if_needed` cannot do it:
         // it would use the pen's *current* position, which is the flex's last vertex.
-        self.x = p0.0;
-        self.y = p0.1;
-        self.begin_if_needed();
-        let (ax, ay) = self.ems(p1.0, p0.1);
-        let (bx, by) = self.ems(p2.0, p2.1);
-        let (cx, cy) = self.ems(p3.0, p3.1);
-        self.segments.push(Segment::Curve(ax, ay, bx, by, cx, cy));
-        let (ax, ay) = self.ems(p4.0, p3.1);
-        let (bx, by) = self.ems(p5.0, p5.1);
-        let (cx, cy) = self.ems(p6.0, p5.1);
-        self.segments.push(Segment::Curve(ax, ay, bx, by, cx, cy));
-        self.x = p6.0;
-        self.y = p5.1;
+        self.pen.x = p0.0;
+        self.pen.y = p0.1;
+        self.pen.begin_if_needed();
+        let (ax, ay) = self.pen.ems(p1.0, p0.1);
+        let (bx, by) = self.pen.ems(p2.0, p2.1);
+        let (cx, cy) = self.pen.ems(p3.0, p3.1);
+        self.pen
+            .segments
+            .push(Segment::Curve(ax, ay, bx, by, cx, cy));
+        let (ax, ay) = self.pen.ems(p4.0, p3.1);
+        let (bx, by) = self.pen.ems(p5.0, p5.1);
+        let (cx, cy) = self.pen.ems(p6.0, p5.1);
+        self.pen
+            .segments
+            .push(Segment::Curve(ax, ay, bx, by, cx, cy));
+        self.pen.x = p6.0;
+        self.pen.y = p5.1;
     }
 
     /// `setcurrentpoint`: where the pen should be, given the values a subroutine returned.
@@ -1682,15 +1629,10 @@ impl<'a> Walker<'a> {
         let Some(&dy) = args.get(args.len().wrapping_sub(1)) else {
             return Ok(());
         };
-        if (dx - self.x).abs() <= 1e-9 && (dy - self.y).abs() <= 1e-9 {
+        if (dx - self.pen.x).abs() <= 1e-9 && (dy - self.pen.y).abs() <= 1e-9 {
             return Ok(());
         }
-        self.close();
-        self.x = dx;
-        self.y = dy;
-        self.start = Some((self.x, self.y));
-        let (ex, ey) = self.ems(self.x, self.y);
-        self.segments.push(Segment::Move(ex, ey));
+        self.pen.move_to(dx, dy);
         Ok(())
     }
 }

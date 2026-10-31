@@ -794,6 +794,100 @@ impl Builder {
     }
 }
 
+/// A charstring pen walking in glyph units and emitting [`Segment`]s in ems.
+///
+/// Shared by the Type 2 (`cff`) and Type 1 (`type1`) charstring interpreters so both
+/// dialects apply the same relative-coordinate, implicit-start, and contour-closing rules.
+pub(crate) struct Pen {
+    pub(crate) font_matrix: [f32; 6],
+    pub(crate) segments: Vec<Segment>,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) start: Option<(f32, f32)>,
+}
+
+impl Pen {
+    pub(crate) fn new(font_matrix: [f32; 6]) -> Self {
+        Self {
+            font_matrix,
+            segments: Vec::new(),
+            x: 0.0,
+            y: 0.0,
+            start: None,
+        }
+    }
+
+    /// A point in glyph units as a point in ems.
+    #[allow(clippy::many_single_char_names)]
+    pub(crate) fn ems(&self, x: f32, y: f32) -> (f64, f64) {
+        let [a, b, c, d, e, f] = self.font_matrix;
+        (f64::from(a * x + c * y + e), f64::from(b * x + d * y + f))
+    }
+
+    pub(crate) fn move_to(&mut self, x: f32, y: f32) {
+        self.close();
+        self.x = x;
+        self.y = y;
+        self.start = Some((x, y));
+        let (ex, ey) = self.ems(x, y);
+        self.segments.push(Segment::Move(ex, ey));
+    }
+
+    pub(crate) fn move_rel(&mut self, dx: f32, dy: f32) {
+        self.move_to(self.x + dx, self.y + dy);
+    }
+
+    pub(crate) fn line_rel(&mut self, dx: f32, dy: f32) {
+        self.begin_if_needed();
+        self.x += dx;
+        self.y += dy;
+        let (ex, ey) = self.ems(self.x, self.y);
+        self.segments.push(Segment::Line(ex, ey));
+    }
+
+    /// One curve, from three offsets, each relative to the point before it.
+    pub(crate) fn curve_rel(&mut self, dx1: f32, dy1: f32, dx2: f32, dy2: f32, dx3: f32, dy3: f32) {
+        self.begin_if_needed();
+        let x1 = self.x + dx1;
+        let y1 = self.y + dy1;
+        let x2 = x1 + dx2;
+        let y2 = y1 + dy2;
+        self.x = x2 + dx3;
+        self.y = y2 + dy3;
+        let (ax, ay) = self.ems(x1, y1);
+        let (bx, by) = self.ems(x2, y2);
+        let (cx, cy) = self.ems(self.x, self.y);
+        self.segments.push(Segment::Curve(ax, ay, bx, by, cx, cy));
+    }
+
+    /// A `lineto` or a curve before any `moveto` starts a contour where the pen is.
+    pub(crate) fn begin_if_needed(&mut self) {
+        if self.start.is_none() {
+            self.start = Some((self.x, self.y));
+            let (ex, ey) = self.ems(self.x, self.y);
+            self.segments.push(Segment::Move(ex, ey));
+        }
+    }
+
+    /// Close the contour being drawn, if one is open.
+    pub(crate) fn close(&mut self) {
+        let Some((sx, sy)) = self.start.take() else {
+            return;
+        };
+        let (sx, sy) = self.ems(sx, sy);
+        let (ex, ey) = self.ems(self.x, self.y);
+        if (ex - sx).abs() > 1e-9 || (ey - sy).abs() > 1e-9 {
+            self.segments.push(Segment::Line(sx, sy));
+        }
+    }
+
+    pub(crate) fn reset_origin(&mut self) {
+        self.x = 0.0;
+        self.y = 0.0;
+        self.start = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Tests state their expectations with `expect` and index slices whose length they

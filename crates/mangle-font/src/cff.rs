@@ -58,7 +58,9 @@
 
 use ttf_parser::{Face, Tag};
 
-use crate::outline::{Outline, Segment};
+use crate::outline::Outline;
+#[cfg(test)]
+use crate::outline::Segment;
 
 /// The most values a Type 2 charstring may hold on its operand stack.
 ///
@@ -1770,16 +1772,8 @@ struct Walker<'a, 'b> {
     cff: &'b Cff<'a>,
     local_subrs: Index<'a>,
     glyph: u32,
-    segments: Vec<Segment>,
+    pen: crate::outline::Pen,
     stack: Vec<f32>,
-    /// The pen, in glyph units rather than ems. The drawing operators are relative, and
-    /// the matrix belongs where an absolute point becomes a segment.
-    x: f32,
-    y: f32,
-    /// Where the contour being drawn began, and whether one is open. `None` means the pen
-    /// is between contours, which is also when a `lineto` implies a `moveto` to where the
-    /// pen is.
-    start: Option<(f32, f32)>,
     /// How many stems have been declared, which is what says how long a hint mask is.
     hints: usize,
     /// How many bytes of mask the first `hintmask` asked for, once it has asked.
@@ -1798,11 +1792,8 @@ impl<'a, 'b> Walker<'a, 'b> {
             cff,
             local_subrs,
             glyph,
-            segments: Vec::new(),
+            pen: crate::outline::Pen::new(cff.font_matrix),
             stack: Vec::new(),
-            x: 0.0,
-            y: 0.0,
-            start: None,
             hints: 0,
             hint_bytes: 0,
             width_taken: false,
@@ -1849,10 +1840,10 @@ impl<'a, 'b> Walker<'a, 'b> {
                 frame.at = next;
             }
         }
-        self.close();
+        self.pen.close();
         Ok(Walked {
             outline: Outline {
-                segments: self.segments,
+                segments: self.pen.segments,
             },
             width: self.width,
         })
@@ -1910,88 +1901,20 @@ impl<'a, 'b> Walker<'a, 'b> {
 
     // ── geometry ─────────────────────────────────────────────────────────────────
 
-    /// A point in glyph units as a point in ems.
-    // The six names are the specification's own for the six numbers of a matrix, which is
-    // what a font matrix and a CTM both are.
-    #[allow(clippy::many_single_char_names)]
-    fn ems(&self, x: f32, y: f32) -> (f64, f64) {
-        let [a, b, c, d, e, f] = self.cff.font_matrix;
-        (f64::from(a * x + c * y + e), f64::from(b * x + d * y + f))
-    }
-
     fn move_rel(&mut self, dx: f32, dy: f32) {
-        self.close();
-        self.x += dx;
-        self.y += dy;
-        self.start = Some((self.x, self.y));
-        let (x, y) = self.ems(self.x, self.y);
-        self.segments.push(Segment::Move(x, y));
+        self.pen.move_rel(dx, dy);
     }
 
     fn line_rel(&mut self, dx: f32, dy: f32) {
-        self.begin_if_needed();
-        self.x += dx;
-        self.y += dy;
-        let (x, y) = self.ems(self.x, self.y);
-        self.segments.push(Segment::Line(x, y));
+        self.pen.line_rel(dx, dy);
     }
 
-    /// One curve, from three offsets.
-    ///
-    /// **Each of the three points is an offset from the point before it**, not from where
-    /// the pen was: the first from the current point, the second from the first, and the
-    /// third from the second. This is the single easiest thing to get wrong in the whole
-    /// interpreter, because the wrong reading produces a closed, plausible, wrong-shaped
-    /// glyph rather than an error — a serif face draws every stem too narrow and every
-    /// curve too flat, and nothing reports it. The spec is explicit: "the first specified
-    /// point is relative to the current point, the second is relative to the first, and the
-    /// third is relative to the second."
-    ///
-    /// The matrix goes on at the end, once each point is absolute, because the offsets are
-    /// not affected by it.
     fn curve_rel(&mut self, dx1: f32, dy1: f32, dx2: f32, dy2: f32, dx3: f32, dy3: f32) {
-        self.begin_if_needed();
-        let x1 = self.x + dx1;
-        let y1 = self.y + dy1;
-        let x2 = x1 + dx2;
-        let y2 = y1 + dy2;
-        self.x = x2 + dx3;
-        self.y = y2 + dy3;
-        let (ax, ay) = self.ems(x1, y1);
-        let (bx, by) = self.ems(x2, y2);
-        let (cx, cy) = self.ems(self.x, self.y);
-        self.segments.push(Segment::Curve(ax, ay, bx, by, cx, cy));
+        self.pen.curve_rel(dx1, dy1, dx2, dy2, dx3, dy3);
     }
 
-    /// A `lineto` or a curve before any `moveto` starts a contour where the pen is.
-    ///
-    /// The specification does not allow it, and every implementation that draws such a glyph
-    /// draws it from where the pen is. Refusing it would leave the pen's position undefined
-    /// for everything after it.
-    fn begin_if_needed(&mut self) {
-        if self.start.is_none() {
-            self.start = Some((self.x, self.y));
-            let (x, y) = self.ems(self.x, self.y);
-            self.segments.push(Segment::Move(x, y));
-        }
-    }
-
-    /// Close the contour being drawn, if one is open.
-    ///
-    /// A CFF contour is closed by the fill rule rather than by an operator: there is no
-    /// `closepath`, so the closing edge has to exist or the winding comes out with a notch
-    /// in it. The next `moveto` is what closes the last one.
     fn close(&mut self) {
-        let Some((sx, sy)) = self.start.take() else {
-            return;
-        };
-        let (sx, sy) = self.ems(sx, sy);
-        let (ex, ey) = self.ems(self.x, self.y);
-        // Already back where it started: the edge is there, and adding it again would be a
-        // figure of eight.
-        if (ex - sx).abs() > 1e-9 || (ey - sy).abs() > 1e-9 {
-            self.segments.push(Segment::Line(sx, sy));
-        }
+        self.pen.close();
     }
 
     /// How many bytes of hint mask follow a `hintmask` or `cntrmask`.
