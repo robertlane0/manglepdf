@@ -16,9 +16,7 @@
 use mangle_font::{Program, glyph_for_unicode, subset_truetype};
 
 fn liberation() -> Vec<u8> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/fonts/LiberationSans-Regular.ttf");
-    std::fs::read(&path).expect("the bundled face is checked in")
+    mangle_testkit::liberation().expect("the bundled face is checked in")
 }
 
 fn chars(text: &str) -> Vec<u32> {

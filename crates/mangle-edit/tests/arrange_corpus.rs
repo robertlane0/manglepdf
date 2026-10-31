@@ -69,19 +69,8 @@ fn resources_of(doc: &Document, page: &mangle_doc::Page) -> Resources {
 /// Taking an arrange's inserted bytes back out gives the original stream plus the moved bytes
 /// where they went, which is what "only this object moved" means in bytes.
 fn with_insertions_removed(after: &[u8], inserted: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(after.len());
-    let mut cursor = 0usize;
-    for bytes in inserted {
-        let at = after[cursor..]
-            .windows(bytes.len())
-            .position(|w| w == bytes)
-            .map(|i| cursor + i)
-            .expect("the arrange's own bytes are in the stream it wrote");
-        out.extend_from_slice(&after[cursor..at]);
-        cursor = at + bytes.len();
-    }
-    out.extend_from_slice(&after[cursor..]);
-    out
+    mangle_testkit::with_insertions_removed(after, inserted)
+        .expect("the arrange's own bytes are in the stream it wrote")
 }
 
 /// An arrange on a real page moves the object and leaves every other byte where it was.

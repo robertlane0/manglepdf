@@ -13,35 +13,12 @@
     clippy::indexing_slicing
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use mangle_syntax::object::{Dict, Object, Ref, Stream};
 use mangle_syntax::{Document, OpenOptions, SaveMode, SaveOptions};
-
-/// A scratch directory that cleans itself up.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(name: &str) -> Option<Self> {
-        let dir = std::env::temp_dir().join(format!("manglepdf-oracle-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).ok()?;
-        Some(Self(dir))
-    }
-
-    fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
-        let path = self.0.join(name);
-        std::fs::write(&path, bytes).expect("scratch file");
-        path
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use mangle_testkit::Scratch;
 
 fn have(tool: &str) -> bool {
     Command::new(tool)

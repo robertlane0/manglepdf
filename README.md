@@ -28,7 +28,7 @@ One workspace; dependencies flow one way and a lower crate never names a higher 
 | `crates/mangle-edit` | Commands, undo, write-back, annotations, forms, redaction |
 | `crates/mangle-ui` | The application |
 | `crates/mangle-cli` | The headless command line |
-| `crates/mangle-testkit` | Shared test helpers; empty so far |
+| `crates/mangle-testkit` | Shared test helpers: fixture/corpus discovery, PAM parsing, scratch directories |
 | `tools/fixturegen` | Deterministic fixtures, with no dependency on the product |
 | `xtask` | `cargo xtask policy`, fixtures, the corpus, icons; the acceptance run is not built yet |
 

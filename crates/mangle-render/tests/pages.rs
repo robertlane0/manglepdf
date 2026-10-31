@@ -1584,13 +1584,7 @@ fn the_corpus_pages_render_without_a_panic() {
     assert!(rendered >= 4, "only {rendered} pages were checked");
 }
 
-fn corpus_dir() -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)?;
-    let dir = root.join("fixtures");
-    dir.join("MANIFEST.toml").is_file().then_some(dir)
-}
+use mangle_testkit::{fixtures_dir as corpus_dir, read_pam, wild_file};
 
 // ── The oracle ────────────────────────────────────────────────────────────────
 
@@ -1630,75 +1624,20 @@ fn mutool_render(pdf: &Path, scale: f64, out: &Path) -> Option<Vec<u8>> {
     std::fs::read(out).ok()
 }
 
-/// A PAM file's pixels: the dimensions and the rows.
-///
-/// The format is a header of `KEY value` lines terminated by `ENDHDR`, then the bytes.
-/// Everything before `ENDHDR\n` is text and everything after is pixels, so the split is
-/// a search for that marker rather than a count of lines — `WIDTH` and `DEPTH` may be in
-/// either order and `TUPLTYPE` is optional.
-fn read_pam(data: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
-    let marker = b"ENDHDR\n";
-    let split = data.windows(marker.len()).position(|w| w == marker)?;
-    let header = String::from_utf8_lossy(&data[..split]).to_string();
-    if !header.starts_with("P7") {
-        return None;
-    }
-    let field = |name: &str| -> Option<usize> {
-        header
-            .lines()
-            .find_map(|l| l.trim().strip_prefix(name))
-            .and_then(|v| v.trim().parse().ok())
-    };
-    let (w, h, depth) = (field("WIDTH")?, field("HEIGHT")?, field("DEPTH")?);
-    let body = data.get(split + marker.len()..)?.to_vec();
-    // A truncated file is a failure rather than a shorter image: silently comparing a
-    // quarter of a page would pass on the part that happened to agree.
-    if body.len() < w * h * depth {
-        return None;
-    }
-    Some((w, h, depth, body))
-}
-
-/// Turn a PAM's pixels into an image, keeping the alpha channel.
-///
-/// `mutool` writes an unpainted page as fully transparent with black in the colour
-/// channels, while this renderer starts a page as opaque white paper. Both are defensible
-/// conventions and they are not the same picture, so the alpha is kept here and the
-/// comparison flattens both onto one background first. Comparing the raw buffers would be
-/// comparing conventions rather than renderers, and would report a disagreement on every
-/// pixel of a page's margin.
 fn pam_to_image(w: usize, h: usize, depth: usize, body: Vec<u8>) -> mangle_render::Image {
-    let mut image = mangle_render::Image::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let i = (y * w + x) * depth;
-            let at = |c: usize| body.get(i + c).copied().unwrap_or(255);
-            image.put(
-                x,
-                y,
-                [at(0), at(1), at(2), if depth > 3 { at(3) } else { 255 }],
-            );
-        }
+    mangle_render::Image {
+        width: w,
+        height: h,
+        pixels: mangle_testkit::pam_to_rgba(w, h, depth, &body),
     }
-    image
 }
 
-/// An image composited onto opaque white paper, which is what a page looks like on a desk.
 fn flatten_onto_paper(image: &mangle_render::Image) -> mangle_render::Image {
-    let mut out = mangle_render::Image::filled(image.width, image.height, [255, 255, 255, 255]);
-    for y in 0..image.height {
-        for x in 0..image.width {
-            let src = image.get(x, y).unwrap_or([255, 255, 255, 255]);
-            let a = f64::from(src[3]) / 255.0;
-            let mut over = [255u8; 4];
-            for c in 0..3 {
-                let s = f64::from(src[c]) / 255.0;
-                over[c] = ((s * a + 1.0 * (1.0 - a)) * 255.0).round() as u8;
-            }
-            out.put(x, y, over);
-        }
+    mangle_render::Image {
+        width: image.width,
+        height: image.height,
+        pixels: mangle_testkit::flatten_rgba_onto_paper(&image.pixels),
     }
-    out
 }
 
 /// The structural comparison against `mutool`, for the shapes page.
@@ -1997,17 +1936,6 @@ fn a_rotated_page_puts_its_ink_where_the_rotation_says() {
         region_is_fraction(&render.image, 0.05, 0.55, 0.45, 0.95, [255, 255, 255]),
         "and the quadrant that was empty is now paper"
     );
-}
-
-/// A file from the wild corpus, if it has been fetched.
-///
-/// `cargo xtask corpus fetch` is what puts it there, and the corpus is not in the repository.
-fn wild_file(name: &str) -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)?;
-    let path = root.join("corpus/wild").join(name);
-    path.is_file().then_some(path)
 }
 
 /// The pixels of `image` that are ink, as one bitmap per row.

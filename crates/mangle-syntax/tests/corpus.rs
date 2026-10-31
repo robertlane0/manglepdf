@@ -13,18 +13,8 @@
     clippy::indexing_slicing
 )]
 
-use std::path::{Path, PathBuf};
-
 use mangle_syntax::{Document, OpenOptions};
-
-fn corpus_dir() -> Option<PathBuf> {
-    // crates/mangle-syntax -> crates -> the repository root
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)?;
-    let dir = root.join("fixtures");
-    dir.join("MANIFEST.toml").is_file().then_some(dir)
-}
+use mangle_testkit::fixtures_dir as corpus_dir;
 
 /// One `[[fixture]]` block, read with the small amount of TOML the manifest uses.
 struct Entry {

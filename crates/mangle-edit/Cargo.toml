@@ -19,5 +19,8 @@ mangle-render.workspace = true
 mangle-text.workspace = true
 jpeg-encoder.workspace = true
 
+[dev-dependencies]
+mangle-testkit.workspace = true
+
 [lints]
 workspace = true

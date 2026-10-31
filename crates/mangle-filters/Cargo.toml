@@ -11,5 +11,8 @@ description = "PDF stream filters and codecs: inflate/deflate, LZW, RunLength, A
 [dependencies]
 thiserror.workspace = true
 
+[dev-dependencies]
+mangle-testkit.workspace = true
+
 [lints]
 workspace = true

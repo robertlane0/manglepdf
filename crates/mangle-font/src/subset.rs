@@ -907,8 +907,6 @@ mod tests {
     }
 
     fn liberation() -> Vec<u8> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/fonts/LiberationSans-Regular.ttf");
-        std::fs::read(&path).expect("the bundled face is checked in")
+        mangle_testkit::liberation().expect("the bundled face is checked in")
     }
 }

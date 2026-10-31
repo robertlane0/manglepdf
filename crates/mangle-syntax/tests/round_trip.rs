@@ -633,13 +633,7 @@ fn object_bodies(data: &[u8]) -> std::collections::BTreeMap<u32, Vec<u8>> {
     out
 }
 
-fn corpus_dir() -> Option<std::path::PathBuf> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)?;
-    let dir = root.join("fixtures");
-    dir.join("MANIFEST.toml").is_file().then_some(dir)
-}
+use mangle_testkit::fixtures_dir as corpus_dir;
 
 /// A minimal reader of the manifest, for the fields the corpus test needs.
 fn manifest() -> Vec<FixtureEntry> {

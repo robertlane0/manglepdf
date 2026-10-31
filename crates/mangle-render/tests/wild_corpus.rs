@@ -106,11 +106,7 @@ fn corpus_root() -> Option<PathBuf> {
     Some(root.join("corpus/wild"))
 }
 
-/// Where the corpus is, if it has been fetched.
-fn corpus_dir() -> Option<PathBuf> {
-    let dir = corpus_root()?;
-    dir.join("MANIFEST.toml").is_file().then_some(dir)
-}
+use mangle_testkit::{read_pam, wild_dir as corpus_dir};
 
 /// Where every report this harness writes lands. One place, so "the report directory"
 /// means the same directory in the run and in the tests.
@@ -233,73 +229,20 @@ fn mutool_render_all(
     got
 }
 
-/// A PAM file's pixels: the dimensions, the channel count and the rows.
-///
-/// Everything before `ENDHDR\n` is text and everything after is pixels, so the split is a
-/// search for that marker rather than a count of lines — `WIDTH` and `DEPTH` may be in
-/// either order and `TUPLTYPE` is optional. A short body is a failure rather than a
-/// shorter image: comparing a quarter of a page would pass on the part that happened to
-/// agree.
-fn read_pam(data: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
-    let marker = b"ENDHDR\n";
-    let split = data.windows(marker.len()).position(|w| w == marker)?;
-    let header = String::from_utf8_lossy(&data[..split]).to_string();
-    if !header.starts_with("P7") {
-        return None;
-    }
-    let field = |name: &str| -> Option<usize> {
-        header
-            .lines()
-            .find_map(|l| l.trim().strip_prefix(name))
-            .and_then(|v| v.trim().parse().ok())
-    };
-    let (w, h, depth) = (field("WIDTH")?, field("HEIGHT")?, field("DEPTH")?);
-    let body = data.get(split + marker.len()..)?.to_vec();
-    if body.len() < w * h * depth {
-        return None;
-    }
-    Some((w, h, depth, body))
-}
-
-/// A PAM turned into an image, keeping the alpha.
-///
-/// `mutool` writes an unpainted page as transparent black while this renderer starts a
-/// page as opaque white paper. Both are defensible conventions and they are not the same
-/// picture, so the alpha is kept and both are flattened onto white before they are
-/// compared. Comparing the raw buffers would be comparing conventions rather than
-/// renderers, and would report a disagreement over every pixel of a page's margin.
 fn pam_to_image(w: usize, h: usize, depth: usize, body: &[u8]) -> Image {
-    let mut image = Image::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let i = (y * w + x) * depth;
-            let at = |c: usize| body.get(i + c).copied().unwrap_or(255);
-            image.put(
-                x,
-                y,
-                [at(0), at(1), at(2), if depth > 3 { at(3) } else { 255 }],
-            );
-        }
+    Image {
+        width: w,
+        height: h,
+        pixels: mangle_testkit::pam_to_rgba(w, h, depth, body),
     }
-    image
 }
 
-/// An image composited onto opaque white paper, which is what a page looks like on a desk.
 fn flatten_onto_paper(image: &Image) -> Image {
-    let mut out = Image::filled(image.width, image.height, [255, 255, 255, 255]);
-    for y in 0..image.height {
-        for x in 0..image.width {
-            let src = image.get(x, y).unwrap_or([255, 255, 255, 255]);
-            let a = f64::from(src[3]) / 255.0;
-            let mut over = [255u8; 4];
-            for c in 0..3 {
-                let s = f64::from(src[c]) / 255.0;
-                over[c] = ((s * a + 1.0 * (1.0 - a)) * 255.0).round() as u8;
-            }
-            out.put(x, y, over);
-        }
+    Image {
+        width: image.width,
+        height: image.height,
+        pixels: mangle_testkit::flatten_rgba_onto_paper(&image.pixels),
     }
-    out
 }
 
 /// Write an image as a PAM, which is what `mutool convert` reads.

@@ -28,7 +28,7 @@ Dependencies flow one way only. A lower crate never names a higher one.
 | `mangle-edit` | Commands, undo, the page-object model, surgical write-back, annotations, forms, redaction, flatten, page operations, optimize. |
 | `mangle-ui` | The application. |
 | `mangle-cli` | The headless command line. It exists for the tests and the acceptance harness to drive; nothing in the tree runs it yet. |
-| `mangle-testkit` | Meant to hold shared fixtures, comparisons and tolerances for the layers above. It is empty today, and test files carry their own copies of those helpers. |
+| `mangle-testkit` | Shared test helpers: fixture and corpus discovery, bundled font loading, PAM parsing and alpha flattening, temporary scratch directories, and byte-span invariants. |
 | `tools/fixturegen` | Deterministic fixture generation. **Depends on no `mangle-*` crate on purpose.** |
 | `xtask` | Gate checks, fixtures, the corpus, icons and the dependency table. `gauntlet`, `fuzz` and `perf` are stubs. |
 

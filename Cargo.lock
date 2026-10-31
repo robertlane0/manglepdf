@@ -1956,12 +1956,14 @@ dependencies = [
  "mangle-filters",
  "mangle-font",
  "mangle-syntax",
+ "mangle-testkit",
 ]
 
 [[package]]
 name = "mangle-crypto"
 version = "0.1.0"
 dependencies = [
+ "mangle-testkit",
  "sha2",
  "thiserror 2.0.21",
  "unicode-normalization",
@@ -1986,6 +1988,7 @@ dependencies = [
  "mangle-font",
  "mangle-render",
  "mangle-syntax",
+ "mangle-testkit",
  "mangle-text",
 ]
 
@@ -1993,6 +1996,7 @@ dependencies = [
 name = "mangle-filters"
 version = "0.1.0"
 dependencies = [
+ "mangle-testkit",
  "thiserror 2.0.21",
 ]
 
@@ -2002,6 +2006,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "mangle-syntax",
+ "mangle-testkit",
  "tempfile",
  "ttf-parser",
 ]
@@ -2016,6 +2021,7 @@ dependencies = [
  "mangle-filters",
  "mangle-font",
  "mangle-syntax",
+ "mangle-testkit",
  "zune-jpeg 0.5.15",
 ]
 
@@ -2025,18 +2031,13 @@ version = "0.1.0"
 dependencies = [
  "mangle-crypto",
  "mangle-filters",
+ "mangle-testkit",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "mangle-testkit"
 version = "0.1.0"
-dependencies = [
- "mangle-doc",
- "mangle-render",
- "mangle-syntax",
- "thiserror 2.0.21",
-]
 
 [[package]]
 name = "mangle-text"

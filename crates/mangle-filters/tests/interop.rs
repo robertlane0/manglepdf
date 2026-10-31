@@ -24,34 +24,10 @@
     clippy::indexing_slicing
 )]
 
-use std::path::PathBuf;
 use std::process::Command;
 
 use mangle_filters::{DeflateLevel, deflate, deflate_raw, inflate};
-
-/// A directory for the files handed to Python, removed when the test ends.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(name: &str) -> Option<Self> {
-        let dir = std::env::temp_dir().join(format!("manglepdf-interop-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).ok()?;
-        Some(Self(dir))
-    }
-
-    fn write(&self, name: &[u8]) -> PathBuf {
-        let path = self.0.join("stream.zlib");
-        std::fs::write(&path, name).expect("scratch file");
-        path
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use mangle_testkit::Scratch;
 
 fn have(tool: &str) -> bool {
     Command::new(tool)
@@ -139,7 +115,7 @@ fn python_agrees_that_what_we_write_is_zlib() {
             DeflateLevel::Best,
         ] {
             let packed = deflate(&data, level);
-            let path = scratch.write(&packed);
+            let path = scratch.write("stream.zlib", &packed);
             let out = Command::new("python3")
                 .arg("-c")
                 .arg("import sys,zlib; sys.stdout.buffer.write(zlib.decompress(open(sys.argv[1],'rb').read()))")
@@ -175,7 +151,7 @@ fn python_agrees_about_the_adler32_we_write() {
     };
     for (name, data) in payloads() {
         let packed = deflate(&data, DeflateLevel::Default);
-        let path = scratch.write(&packed);
+        let path = scratch.write("stream.zlib", &packed);
         let out = Command::new("python3")
             .arg("-c")
             .arg(
@@ -213,7 +189,7 @@ fn python_rejects_the_raw_stream_that_flatedecode_does_not_name() {
     };
     let data = b"the form /FlateDecode does not name.\n".repeat(20);
     let packed = deflate_raw(&data, DeflateLevel::Default);
-    let path = scratch.write(&packed);
+    let path = scratch.write("stream.zlib", &packed);
     let out = Command::new("python3")
         .arg("-c")
         .arg("import sys,zlib; zlib.decompress(open(sys.argv[1],'rb').read())")

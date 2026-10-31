@@ -14,19 +14,10 @@
     clippy::indexing_slicing
 )]
 
-use std::path::{Path, PathBuf};
-
 use mangle_content::{ContentStream, Mark, Resources, run, run_with};
 use mangle_doc::PageTree;
 use mangle_syntax::{Document, OpenOptions, stream::decode_stream};
-
-fn corpus_dir() -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)?;
-    let dir = root.join("fixtures");
-    dir.join("MANIFEST.toml").is_file().then_some(dir)
-}
+use mangle_testkit::fixtures_dir as corpus_dir;
 
 /// A two-page document: one page with shapes, one with text.
 fn sample() -> Vec<u8> {

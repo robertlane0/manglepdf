@@ -62,14 +62,8 @@ mod tests {
 
     use super::*;
 
-    /// Hex-encode, upper case, for the test vectors below.
     fn hex(d: &[u8]) -> String {
-        use std::fmt::Write as _;
-        let mut s = String::with_capacity(d.len() * 2);
-        for b in d {
-            let _ = write!(s, "{b:02X}");
-        }
-        s
+        mangle_testkit::hex(d).to_ascii_uppercase()
     }
 
     #[test]

@@ -45,15 +45,7 @@ use std::process::Command;
 
 use mangle_font::Program;
 use mangle_font::cff::Cff;
-
-/// Where the wild corpus is, if it has been fetched.
-fn corpus_dir() -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)?;
-    let dir = root.join("corpus/wild");
-    dir.join("MANIFEST.toml").is_file().then_some(dir)
-}
+use mangle_testkit::wild_dir as corpus_dir;
 
 /// Whether `fontTools` is installed, and which version.
 fn fonttools() -> Option<String> {

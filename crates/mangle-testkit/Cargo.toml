@@ -6,13 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Test support: image differencing, invariants, fixture manifest, evidence writer"
+description = "Shared test helpers: fixture and corpus discovery, PAM parsing, scratch directories, and byte-span invariants"
 
 [dependencies]
-thiserror.workspace = true
-mangle-syntax.workspace = true
-mangle-render.workspace = true
-mangle-doc.workspace = true
 
 [lints]
 workspace = true

@@ -16,6 +16,7 @@ mangle-font.workspace = true
 [dev-dependencies]
 mangle-filters.workspace = true
 mangle-doc.workspace = true
+mangle-testkit.workspace = true
 
 [lints]
 workspace = true

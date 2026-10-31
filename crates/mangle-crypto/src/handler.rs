@@ -552,16 +552,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
-
-    /// Hex-encode for readable assertions.
-    fn hex(d: &[u8]) -> String {
-        use std::fmt::Write as _;
-        let mut s = String::with_capacity(d.len() * 2);
-        for b in d {
-            let _ = write!(s, "{b:02x}");
-        }
-        s
-    }
+    use mangle_testkit::hex;
 
     #[test]
     fn constant_time_eq_works() {

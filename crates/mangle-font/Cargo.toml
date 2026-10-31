@@ -15,6 +15,7 @@ ttf-parser.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+mangle-testkit.workspace = true
 
 [lints]
 workspace = true

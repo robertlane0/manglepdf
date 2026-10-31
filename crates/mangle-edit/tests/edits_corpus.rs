@@ -128,19 +128,8 @@ fn biggest(model: &PageModel) -> Option<usize> {
 /// of the stream exactly as they went in**, so removing what the edit inserted must give the
 /// original stream back byte for byte. A re-serialisation could not pass it, which is the point.
 fn with_insertions_removed(after: &[u8], inserted: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(after.len());
-    let mut cursor = 0usize;
-    for bytes in inserted {
-        let at = after[cursor..]
-            .windows(bytes.len())
-            .position(|w| w == bytes)
-            .map(|i| cursor + i)
-            .expect("the edit's own bytes are in the stream it wrote");
-        out.extend_from_slice(&after[cursor..at]);
-        cursor = at + bytes.len();
-    }
-    out.extend_from_slice(&after[cursor..]);
-    out
+    mangle_testkit::with_insertions_removed(after, inserted)
+        .expect("the edit's own bytes are in the stream it wrote")
 }
 
 /// A move on a real page moves the object it was aimed at, and leaves the rest of the stream
