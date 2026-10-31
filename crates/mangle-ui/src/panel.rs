@@ -10,15 +10,17 @@
 //! an absolute value computed from it. [`PanelRow`] is what a row turns out to be, and
 //! [`panel_row`] is the decision, taken as plain values so a test can take it without a mouse.
 //!
-//! # What is not here, and is not pretended
+//! # What is here, and what is not pretended
 //!
-//! The Text panel has ten labelled rows. Four of them are numbers the interpreter already
-//! records, and those four are steppers here; the content field retypes and the font row
-//! shows the resource name. The rest — style, colour, alignment, render mode — need the
-//! font layer (what the resource name resolves to, and what weight its descriptor declares)
-//! and the colour, which a record does not carry. Those rows are [`PanelRow::Empty`]:
-//! a field with nothing in it. A panel that invented "Regular" for a style it had not read
-//! would be a panel that lies, and a blank field is at least honest about it.
+//! The Text panel has ten labelled rows, following `docs/design/reference-mockup.html`
+//! and `GOAL.md` §8.4. Content retypes the selection; Font and Style show the family and
+//! weight resolved by the worker (or the resource name when unresolved, and blank when the
+//! style is unknown); Size, Line Spacing, Character Spacing and Baseline Shift are steppers;
+//! Colour is a `#RRGGBB` hex field when the fill converts to sRGB; and Alignment is the
+//! four-segment control (`Left`/`Center`/`Right`/`Justify`). Render Mode — and any row whose
+//! value is not known — is [`PanelRow::Empty`]: a field with nothing in it. A panel that
+//! invented "Regular" for a style it had not read would be a panel that lies, and a blank
+//! field is at least honest about it.
 
 use crate::shell::RightPanel;
 use mangle_content::state::TextState;
@@ -112,8 +114,8 @@ pub const ACTION_ROWS: [&str; 3] = ["Rotate -90\u{b0}", "Rotate 90\u{b0}", "Dele
 /// The alignment is the point — a label added, removed, or reordered here without
 /// the matching change there puts the wrong name beside a control, and a test
 /// below pins the pairs. Rows whose control is [`PanelRow::Empty`] are honest
-/// blanks for the pickers that do not exist yet (family, style, colour,
-/// alignment, render mode), not missing labels.
+/// blanks when a value is unknown or a control does not exist yet (such as an
+/// unresolved style, an non-sRGB colour, or Render Mode), not missing labels.
 pub const TEXT_ROWS: [&str; 10] = [
     "Content",
     "Font",
@@ -526,7 +528,8 @@ mod tests {
     /// The panel once listed the mockup's nouns in the mockup's order while the
     /// controls ran in panel order, so "Colour" labelled a size stepper and
     /// "Style" labelled a font name. This pins the pairs: content, font name,
-    /// the four steppers, and honest blanks for the rest.
+    /// the four steppers, hex colour, the alignment segments, and honest blanks
+    /// when a value is absent or not yet wired.
     #[test]
     fn every_label_names_the_control_beside_it() {
         use mangle_content::state::{Colour, ColourSpace};

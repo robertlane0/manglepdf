@@ -3,7 +3,7 @@
 
 > Companion document: `FINISH.md` ("The Gauntlet") defines the only acceptable meaning of *done*. Read both documents completely before writing any code, and re-read the relevant sections at the start of every milestone.
 
-**Conventions.** **MUST / MUST NOT** = non-negotiable. **SHOULD** = strong default; deviate only with a written reason (an ADR in `docs/decisions/`). Priority tags: **[P0]** required for v1.0 and gated by the Gauntlet · **[P1]** should ship (scored as SHOULD) · **[P2]** later. The reference screenshot of the target UI is supplied with this prompt; on day one save a copy at `docs/design/reference-mockup.png` so you can look at it again at any time with your vision.
+**Conventions.** **MUST / MUST NOT** = non-negotiable. **SHOULD** = strong default; deviate only with a written reason (an ADR in `docs/decisions/`). Priority tags: **[P0]** required for v1.0 and gated by the Gauntlet · **[P1]** should ship (scored as SHOULD) · **[P2]** later. The reference mockup of the target UI is `docs/design/reference-mockup.html` (refined from the initial `docs/design/reference-mockup.png` screenshot); use `docs/design/reference-mockup.html` as the canonical reference for Rust UI comparison.
 
 ---
 
@@ -229,7 +229,7 @@ Principles:
 ## 8. UI specification (derived from the mockup)
 
 ### 8.1 Feel
-Calm, modern, light, macOS-adjacent: generous whitespace, hairline dividers, soft 8 px radii, a single blue accent, restrained shadows, large legible labels, everything on a 4 px grid. The document is the hero; the chrome is quiet. The screenshot is a **feel-and-layout reference, not a pixel spec** — it is an AI-generated mockup, so where it is ambiguous, inconsistent, or warped (icons, thumbnail micro-text, the photo), follow Acrobat/macOS conventions and good taste.
+Calm, modern, light, macOS-adjacent: generous whitespace, hairline dividers, soft 8 px radii, a single blue accent, restrained shadows, large legible labels, everything on a 4 px grid. The document is the hero; the chrome is quiet. The HTML reference mockup at `docs/design/reference-mockup.html` (replacing the initial AI-generated `docs/design/reference-mockup.png` screenshot) is the reference for Rust UI comparison; where any detail remains open, follow Acrobat/macOS conventions and good taste.
 
 ### 8.2 Layout (reference window 1536×1024 logical; content ≈ 1440×936)
 Top to bottom:
@@ -380,7 +380,7 @@ Top to bottom:
 
 ## 12. Deliverables and references
 
-**Deliverables:** the repo per §7; binaries `manglepdf` (GUI) and `manglepdf-cli`; `README.md`, `docs/{ARCHITECTURE,STATUS,DEPENDENCIES,PDF-QUIRKS,TESTING,ICONS}.md`, `THIRD_PARTY_LICENSES.md`, ADRs, `docs/design/` (mockup + tokens); `cargo xtask {policy,fixtures,gauntlet,fuzz,perf,icons}`; assets with licences; and the acceptance Evidence Pack defined in the companion prompt.
+**Deliverables:** the repo per §7; binaries `manglepdf` (GUI) and `manglepdf-cli`; `README.md`, `docs/{ARCHITECTURE,STATUS,DEPENDENCIES,PDF-QUIRKS,TESTING,ICONS}.md`, `THIRD_PARTY_LICENSES.md`, ADRs, `docs/design/reference-mockup.html` (reference mockup + `assets/theme/tokens.toml`); `cargo xtask {policy,fixtures,gauntlet,fuzz,perf,icons}`; assets with licences; and the acceptance Evidence Pack defined in the companion prompt.
 
 **References (cited from memory — obtain and read the real documents; never implement from memory):** ISO 32000-2 (PDF 2.0) and ISO 32000-1 (PDF 1.7) as the primary specification; Adobe's supplement covering AES-256 R5 ("Extension Level 3"); Adobe technical notes on CMap/CIDFont files, the Type 1 font format, CFF, and Type 2 charstrings; the Adobe Glyph List specification; PDF Association interoperability guidance (annotation appearances, QuadPoints, etc.); public test corpora (PDF.js test PDFs, qpdf and poppler test files, veraPDF corpus, Isartor suite, Ghent output suite, GovDocs1) if the network allows.
 

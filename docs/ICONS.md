@@ -5,10 +5,11 @@ mockup, nothing is auto-traced, and no raster image is used as an icon.
 
 ## Rules
 
-The reference screenshot in `docs/design/` is a *design* reference. Taking its pixels
+The reference mockup in `docs/design/reference-mockup.html` (and the initial screenshot
+`docs/design/reference-mockup.png`) is a *design* reference. Taking pixels from a screenshot
 and turning them into icons would produce artwork nobody drew, at a resolution nobody
 chose, with a licence nobody cleared. Icons are drawn from the same geometric language
-as the mockup — stroke weight, corner radius, optical size — not from its pixels.
+as the reference mockup — stroke weight, corner radius, optical size — not from raster pixels.
 
 An icon is:
 

@@ -5,9 +5,10 @@
 ## Context
 
 The target look is a specific one: a light, dense, macOS-adjacent document tool with a
-custom chrome. The reference is a screenshot, not a design system we can implement
-against. That rules out any toolkit whose widgets we would have to restyle one at a
-time, and it puts a premium on a canvas we can paint exactly.
+custom chrome. The reference is the HTML mockup at `docs/design/reference-mockup.html`
+(refined from the initial `docs/design/reference-mockup.png` screenshot), not a native
+widget library's design system. That rules out any toolkit whose widgets we would have
+to restyle one at a time, and it puts a premium on a canvas we can paint exactly.
 
 We also need HiDPI, real IME and keyboard input, a real clipboard, real file dialogs,
 and accessibility.

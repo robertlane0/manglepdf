@@ -5,9 +5,10 @@
 //! change, and what makes the dark theme a second file rather than a second
 //! application (ADR-0004).
 //!
-//! The values are sampled from the reference design: a light, dense, macOS-adjacent
-//! document tool. They are recorded here rather than read from the image at run time,
-//! because a screenshot is a reference, not a dependency.
+//! The values are sampled from the reference mockup (`docs/design/reference-mockup.html`
+//! and `assets/theme/tokens.toml`): a light, dense, macOS-adjacent document tool. They
+//! are recorded here rather than parsed at run time, because the mockup is a reference,
+//! not a runtime dependency.
 
 use eframe::egui::{Color32, FontId};
 
@@ -175,7 +176,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// The light theme, matching the reference design.
+    /// The light theme, matching the reference mockup (`docs/design/reference-mockup.html`).
     #[must_use]
     pub fn light() -> Self {
         let spacing = Spacing::default();

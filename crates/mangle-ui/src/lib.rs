@@ -2,7 +2,7 @@
 //!
 //! The window shell and the design tokens it paints from. Everything visible is drawn
 //! here rather than taken from a toolkit widget, so the interface is one program with
-//! the look we intend (ADR-0004).
+//! the look we intend (`docs/design/reference-mockup.html`, ADR-0004).
 //!
 //! The rule from the charter that shapes this crate hardest: the UI thread never
 //! parses, decodes or rasterizes. It draws rectangles and text, and it waits for a

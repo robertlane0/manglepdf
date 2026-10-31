@@ -69,7 +69,7 @@ xtask/           gate checks, fixtures, icons, the gauntlet
 corpus/          Tier B real-world PDFs; corpus/wild is a git submodule, its own repository
 fixtures/        Tier A: MANIFEST.toml is checked in, the PDFs are generated and git-ignored
 scripts/         dev scripts that use external tools as oracles
-docs/            this documentation and the decision records
+docs/            this documentation, decision records, and docs/design/reference-mockup.html (UI reference)
 ```
 
 ## Adding code

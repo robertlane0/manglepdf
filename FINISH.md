@@ -359,7 +359,7 @@ Thresholds on the reference hardware (relaxation rules are in §1):
 
 ## 10. Gate 8 — UI fidelity audit [G]
 
-**Reproduce the mockup state:** window 1536×1024 @1×, light theme; open F31; Edit tab; click "Explore". Screenshot it beside `docs/design/reference-mockup.png`. The composition must be recognizably the same. Confirm each item:
+**Reproduce the mockup state:** window 1536×1024 @1×, light theme; open F31; Edit tab; click "Explore". Screenshot it beside `docs/design/reference-mockup.html`. The composition must be recognizably the same. Confirm each item:
 
 1. All regions present with proportions within ±10%: title bar, tab row, left sidebar, canvas, right panel, bottom bar.
 2. Title bar: window controls (native), "ManglePDF" label, centred "TravelGuide.pdf" with chevron menu, search field with placeholder "Search (⌘F)" (Ctrl+F elsewhere), Share button.

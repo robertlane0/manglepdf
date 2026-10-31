@@ -24,7 +24,8 @@ use crate::panel::{self, PanelRow, stepped};
 use crate::theme::{Size, Theme};
 use crate::worker::{BookmarkRow, EditRequest, Job, JobResult, Supervisor};
 
-/// The six regions of the window, in the layout the mockup describes.
+/// The six regions of the window, in the layout the reference mockup
+/// (`docs/design/reference-mockup.html`) describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
     /// The title bar, the menu and the toolbar.

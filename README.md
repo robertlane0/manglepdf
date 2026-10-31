@@ -62,6 +62,7 @@ See [`docs/DEV.md`](docs/DEV.md).
 | [`docs/PDF-QUIRKS.md`](docs/PDF-QUIRKS.md) | Facts about the format that bite |
 | [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) | Every dependency and why it is not in-house |
 | [`docs/ICONS.md`](docs/ICONS.md) | The icon set and how it is drawn |
+| [`docs/design/reference-mockup.html`](docs/design/reference-mockup.html) | The reference UI mockup used for Rust UI comparison |
 | [`docs/decisions/`](docs/decisions/) | Architectural decision records |
 | [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) | Bundled assets and their licences |
 
