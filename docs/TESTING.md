@@ -13,12 +13,14 @@
 ## Oracles
 
 Independent implementations may be used **as test oracles only** — never linked, never
-called from product code, and never required for `cargo test` to pass. When one is
-absent the test skips, and the gauntlet report (not yet built) is where the skips will be
-listed. One test is stricter: `crates/mangle-content/tests/text_space_diff.rs` fails when `mutool`
-is absent, because a comparison that compared nothing proves nothing.
+called from product code, and never required for `cargo test` to pass (`GOAL.md` §2.3). When an
+oracle is absent from `PATH` the test prints a `skipped:` note and returns, and the gauntlet
+report (not yet built) is where oracle-absent skips are listed. When the oracle *is* installed,
+the test requires its comparisons to execute and pass (for example, `text_space_diff` asserts
+that `checked > 0` once `mutool` is found, so a broken test fixture cannot masquerade as an
+absent tool).
 
-Currently used, each skipped when absent apart from that one:
+Currently used, each skipped when absent:
 
 - `qpdf` — cross-reference and encryption dictionaries, `--check` on generated output
 - `mutool` — page counts, glyph trace comparisons, and rendering

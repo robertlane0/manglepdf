@@ -15,9 +15,9 @@ cargo vendor                # optional: to vendor for an air-gapped machine
 The fixtures are deterministic and `fixtures/MANIFEST.toml` pins their hashes, so
 `cargo xtask fixtures --check` verifies that `tools/fixturegen` reproduces the checked-in bytes.
 
-The oracle tests also call `qpdf`, `mutool`, `pdftotext`, `pdfinfo` and `python3`. When
-`mutool` is missing they skip, except `text_space_diff`, which fails because a comparison that
-compared nothing proves nothing. See `docs/TESTING.md`.
+The oracle tests also call `qpdf`, `mutool`, `pdftotext`, `pdfinfo` and `python3`. When an
+oracle is missing the test prints a `skipped:` note and returns (per `GOAL.md` §2.3); when the
+oracle is installed, every comparison must run and pass. See `docs/TESTING.md`.
 
 `cargo xtask` is an alias for the `xtask` binary, defined in `.cargo/config.toml` at the
 repository root, so `cargo xtask policy` works from a clean checkout. G0.9 checks that the alias

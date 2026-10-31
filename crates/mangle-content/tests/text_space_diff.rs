@@ -320,8 +320,20 @@ fn generated_cases() -> Vec<Case> {
 ///
 /// A single test rather than one per case: the cases share the setup, the external process
 /// is the slow part, and a failure names the case in its message.
+/// Whether `mutool` is installed on this machine.
+fn has_mutool() -> bool {
+    Command::new("mutool")
+        .arg("-v")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 #[test]
 fn the_placements_agree_with_an_independent_renderer() {
+    if !has_mutool() {
+        eprintln!("skipped: mutool is not installed");
+        return;
+    }
     let mut all = cases();
     all.extend(generated_cases());
     let mut checked = 0;
@@ -347,15 +359,13 @@ fn the_placements_agree_with_an_independent_renderer() {
         }
         checked += 1;
     }
-    // Not skipping: a test that quietly checks nothing is worse than no test, because it
-    // reads as coverage. If the renderer is not there, say so by failing.
+    // `mutool` is installed, so zero compared cases means our test PDF or trace parser
+    // broke rather than the oracle being absent.
     assert_ne!(
         checked, 0,
-        "no case could be compared, so this test has checked nothing. `mutool draw -F \
-         trace` is the reference it needs, and the cases it would have run were: {skipped:?}"
+        "mutool is installed but no case could be compared; the cases were: {skipped:?}"
     );
     if !skipped.is_empty() {
-        // Not a failure: a renderer that cannot open a file is an environment, not a model.
         eprintln!("skipped {} of the cases: {skipped:?}", skipped.len());
     }
 }
