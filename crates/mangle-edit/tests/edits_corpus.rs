@@ -532,18 +532,22 @@ fn an_object_from_inside_a_form_is_refused_rather_than_misread() {
 /// requiring one.
 /// A page whose inline image cannot be read refuses an edit, and names the reason.
 ///
-/// `pdfjs__TAMReview.pdf` page 1 holds a `BI` whose dictionary does not parse, so the tokeniser
-/// leaves the `BI` bare and its data is read as ordinary content. On such a page what a byte
+/// A `BI` whose dictionary does not parse is left bare by the tokeniser, and its data is read as
+/// ordinary content. The page here is a real one (`pdfjs__TAMReview.pdf` page 1) with such an
+/// image appended: a `BI` followed by a token that is not a name. On such a page what a byte
 /// *means* depends on what follows it: an edit inserted beside that `BI` changes how the bytes
 /// after it tokenise, and the stream comes out unbalanced. The corpus found this as a panic in the
 /// balance check; this is the honest answer to it.
 #[test]
 fn a_page_with_an_unreadable_inline_image_refuses_an_edit_by_name() {
     const WITH_UNREADABLE_IMAGE: &str = "pdfjs__TAMReview.pdf";
-    let Some((stream, resources)) = page_one(WITH_UNREADABLE_IMAGE) else {
+    let Some((mut stream, resources)) = page_one(WITH_UNREADABLE_IMAGE) else {
         eprintln!("skipped: {WITH_UNREADABLE_IMAGE} is not fetched");
         return;
     };
+    // Inject a genuinely malformed inline image (`BI` followed by a non-name token) so the
+    // tokeniser leaves a bare `BI` operator behind.
+    stream.extend_from_slice(b"\nq BI 42 ID \x00 EI Q");
     let before = run_with(&ContentStream::parse(&stream), &resources);
     let model = PageModel::build(&before.records);
     let mut refused = 0usize;

@@ -27,9 +27,15 @@ use mangle_doc::PageTree;
 use mangle_syntax::object::Object;
 use mangle_syntax::{Document, OpenOptions};
 
-/// Pages to run over: a scanned government publication and a government form. Chosen for
-/// different text — prose and a title — not for their scores.
-const PAGES: &[&str] = &["gov__nist-sp800-88.pdf", "gov__irs-f1040.pdf"];
+/// Pages to run over: a scanned government publication, a government form, and two TeX papers,
+/// whose word spaces are `TJ` gaps rather than glyphs. Chosen for different text — prose, a
+/// title, typeset columns — not for their scores.
+const PAGES: &[&str] = &[
+    "gov__nist-sp800-88.pdf",
+    "gov__irs-f1040.pdf",
+    "gov__arxiv-1206.5537.pdf",
+    "gov__arxiv-1512.03385.pdf",
+];
 
 /// Page 1 of `name`, decoded run by run.
 fn page_for(name: &str) -> Option<Vec<mangle_text::Decoded>> {

@@ -424,25 +424,51 @@ fn first_of(subpaths: &[Subpath]) -> (f64, f64) {
 
 /// The dash pattern's on and off lengths, with the dash array expanded to the pairs the
 /// walk needs.
+///
+/// Per ISO 32000-1 §8.4.3.6, an odd-length dash array cycles through its elements
+/// alternating on and off across repetitions, which is equivalent to repeating the array
+/// once to obtain an even number of elements.
 #[must_use]
 pub fn dash_pairs(dash: &mangle_content::Dash) -> Vec<(f64, f64)> {
-    let mut out = Vec::with_capacity(dash.array.len() / 2);
-    // A dash array is an alternating list, so an odd length leaves a final element with
-    // no partner. It is dropped rather than paired with a zero, which would introduce a
-    // dash of no length where the file asked for none.
-    for pair in dash.array.chunks_exact(2) {
-        let (Some(on), Some(off)) = (pair.first(), pair.get(1)) else {
-            break;
-        };
-        out.push((on.max(0.0), off.max(0.0)));
+    if dash.array.is_empty() {
+        return Vec::new();
     }
-    out
+    if dash.array.len() % 2 == 0 {
+        let mut out = Vec::with_capacity(dash.array.len() / 2);
+        for pair in dash.array.chunks_exact(2) {
+            let (Some(on), Some(off)) = (pair.first(), pair.get(1)) else {
+                break;
+            };
+            out.push((on.max(0.0), off.max(0.0)));
+        }
+        out
+    } else {
+        let doubled: Vec<f64> = dash
+            .array
+            .iter()
+            .chain(dash.array.iter())
+            .map(|v| v.max(0.0))
+            .collect();
+        let mut out = Vec::with_capacity(dash.array.len());
+        for pair in doubled.chunks_exact(2) {
+            let (Some(&on), Some(&off)) = (pair.first(), pair.get(1)) else {
+                break;
+            };
+            out.push((on, off));
+        }
+        out
+    }
 }
+
+/// Maximum number of dash runs a single subpath may expand into before falling back to a
+/// solid stroke.
+pub const MAX_DASH_RUNS: usize = 4096;
 
 /// Walk a polyline, calling `emit` for each on-dash and off-dash run in turn.
 ///
 /// The phase is consumed first, which is what the specification's `/Phase` means, and a
-/// pattern whose total length is zero is solid rather than an infinite loop.
+/// pattern whose total length is zero (or whose dash count exceeds [`MAX_DASH_RUNS`]) is
+/// drawn solid rather than expanding without bound.
 pub fn walk_dashes(
     points: &[(f64, f64)],
     pairs: &[(f64, f64)],
@@ -457,7 +483,23 @@ pub fn walk_dashes(
         return;
     }
     let total: f64 = pairs.iter().map(|(on, off)| on + off).sum();
-    if total <= 0.0 {
+    if !total.is_finite() || total <= 0.0 {
+        emit(true, points);
+        return;
+    }
+    let mut path_length = 0.0f64;
+    for window in points.windows(2) {
+        let (Some(a), Some(b)) = (window.first(), window.get(1)) else {
+            continue;
+        };
+        let seg = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        if !seg.is_finite() {
+            return;
+        }
+        path_length += seg;
+    }
+    let estimated_runs = (path_length / total) * (pairs.len() as f64 * 2.0);
+    if !estimated_runs.is_finite() || estimated_runs > MAX_DASH_RUNS as f64 {
         emit(true, points);
         return;
     }
@@ -467,13 +509,16 @@ pub fn walk_dashes(
     // so there is no index arithmetic to get wrong.
     let mut cursor = Cursor::at(pairs, 0, true);
     let mut remaining = phase.rem_euclid(total);
-    while remaining > 0.0 {
+    let mut spin_guard = 0usize;
+    let max_spin = pairs.len().saturating_mul(2).max(1);
+    while remaining > 0.0 && spin_guard < max_spin {
         let length = cursor.length();
         if remaining < length {
             break;
         }
         remaining -= length;
         cursor = cursor.advance();
+        spin_guard += 1;
     }
 
     let mut run: Vec<(f64, f64)> = Vec::new();
@@ -482,6 +527,7 @@ pub fn walk_dashes(
     // begin there, or every run after the first would be measured from the segment's
     // own start and the dashes would drift.
     let mut run_start = points.first().copied().unwrap_or((0.0, 0.0));
+    let mut emitted_runs = 0usize;
 
     for window in points.windows(2) {
         let (Some(a), Some(b)) = (window.first(), window.get(1)) else {
@@ -494,6 +540,9 @@ pub fn walk_dashes(
         }
         let mut travelled = 0.0;
         while travelled < segment {
+            if emitted_runs >= MAX_DASH_RUNS {
+                break;
+            }
             let step = budget.min(segment - travelled);
             travelled += step;
             budget -= step;
@@ -507,6 +556,7 @@ pub fn walk_dashes(
             if budget <= f64::EPSILON {
                 if !run.is_empty() {
                     emit(cursor.on, &run);
+                    emitted_runs += 1;
                 }
                 run.clear();
                 cursor = cursor.advance();
@@ -519,7 +569,7 @@ pub fn walk_dashes(
             }
         }
     }
-    if !run.is_empty() {
+    if !run.is_empty() && emitted_runs < MAX_DASH_RUNS {
         emit(cursor.on, &run);
     }
 }
@@ -1517,7 +1567,7 @@ impl Device {
         let Some(bounds) = polygon.bounds() else {
             return;
         };
-        let area = bounds.intersect(self.clip);
+        let area = bounds.intersect(self.clip).intersect(self.image.rect());
         if area.is_empty() {
             return;
         }
@@ -1555,6 +1605,20 @@ impl Device {
     /// from a flat one.
     #[must_use]
     pub fn stroke_outline(&self, polygon: &Polygon, style: &StrokeStyle) -> Vec<Polygon> {
+        let visible = self.clip.intersect(self.image.rect());
+        if visible.is_empty() {
+            return Vec::new();
+        }
+        // A dash pattern is walked over the part of the path that can reach the canvas, which
+        // is the visible area grown by how far a stroke reaches past its path. Walking the whole
+        // path would turn a line that runs far off the page into dashes nobody sees.
+        let margin = style.width.abs() * style.miter_limit.max(1.0) + 4.0;
+        let clip_box = Rect {
+            x0: visible.x0 - margin,
+            y0: visible.y0 - margin,
+            x1: visible.x1 + margin,
+            y1: visible.y1 + margin,
+        };
         let pairs = dash_pairs(&style.dash);
         let mut out = Vec::new();
         for subpath in &polygon.subpaths {
@@ -1579,26 +1643,138 @@ impl Device {
                 continue;
             }
             let mut outline = Polygon::default();
+            let pieces = if !pairs.is_empty() && !all_inside(&walk, clip_box) {
+                clip_polyline_for_dash(&walk, clip_box, style.dash.phase)
+            } else {
+                vec![(walk.clone(), style.dash.phase)]
+            };
             // Only the **on** runs are inked. The walk already alternates and says which is
             // which; drawing the off runs as well fills the gaps back in and turns every
             // pattern into a solid line, which is why a dashed line's length was once
             // measured as the whole line. A gap is not a thinner stroke, it is no stroke.
-            walk_dashes(&walk, &pairs, style.dash.phase, |on, run| {
-                if !on {
-                    return;
-                }
-                // A dash run has ends, so it is stroked as an open path however it was
-                // drawn; only a run that covers the whole of a closed subpath is a ring,
-                // because that is the one whose ends meet and are not ends at all.
-                let piece = stroke_outline(run, closed && run.len() == walk.len(), style);
-                outline.subpaths.extend(piece.subpaths);
-            });
+            for (piece_pts, piece_phase) in &pieces {
+                walk_dashes(piece_pts, &pairs, *piece_phase, |on, run| {
+                    if !on {
+                        return;
+                    }
+                    // A dash run has ends, so it is stroked as an open path however it was
+                    // drawn; only a run that covers the whole of a closed subpath is a ring,
+                    // because that is the one whose ends meet and are not ends at all. A walk
+                    // cut by the clip is in pieces, and none of them is a ring.
+                    let is_full_ring = closed && pieces.len() == 1 && run.len() == walk.len();
+                    let piece = stroke_outline(run, is_full_ring, style);
+                    outline.subpaths.extend(piece.subpaths);
+                });
+            }
             if !outline.is_empty() {
                 out.push(outline);
             }
         }
         out
     }
+}
+
+/// Whether every point is inside `rect`, its edges included.
+fn all_inside(points: &[(f64, f64)], rect: Rect) -> bool {
+    points
+        .iter()
+        .all(|&(x, y)| x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1)
+}
+
+/// The part of the segment `a` to `b` inside `rect`, as the parameter range `(t0, t1)` along it
+/// (Liang-Barsky), or `None` when the segment misses `rect` altogether.
+fn clip_segment(a: (f64, f64), b: (f64, f64), rect: Rect) -> Option<(f64, f64)> {
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    let mut t0 = 0.0f64;
+    let mut t1 = 1.0f64;
+    for (p, q) in [
+        (-dx, a.0 - rect.x0),
+        (dx, rect.x1 - a.0),
+        (-dy, a.1 - rect.y0),
+        (dy, rect.y1 - a.1),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 {
+                    return None;
+                }
+                if r > t0 {
+                    t0 = r;
+                }
+            } else {
+                if r < t0 {
+                    return None;
+                }
+                if r < t1 {
+                    t1 = r;
+                }
+            }
+        }
+    }
+    (t0 <= t1).then_some((t0, t1))
+}
+
+/// Cut a polyline to the pieces inside `rect`, each with the dash phase it starts at.
+///
+/// The phase of a piece counts the length of everything cut away before it, so the pattern
+/// carries on across the gap exactly as if the whole path had been walked.
+fn clip_polyline_for_dash(
+    points: &[(f64, f64)],
+    rect: Rect,
+    initial_phase: f64,
+) -> Vec<(Vec<(f64, f64)>, f64)> {
+    let mut out = Vec::new();
+    let mut current_phase = initial_phase;
+    let mut current_piece: Vec<(f64, f64)> = Vec::new();
+    let mut piece_phase = current_phase;
+
+    for window in points.windows(2) {
+        let (Some(&a), Some(&b)) = (window.first(), window.get(1)) else {
+            continue;
+        };
+        let seg_len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        if !seg_len.is_finite() || seg_len <= 0.0 {
+            continue;
+        }
+        let Some((t0, t1)) = clip_segment(a, b, rect) else {
+            if current_piece.len() >= 2 {
+                out.push((std::mem::take(&mut current_piece), piece_phase));
+            }
+            current_piece.clear();
+            current_phase += seg_len;
+            continue;
+        };
+        if t0 > 0.0 {
+            if current_piece.len() >= 2 {
+                out.push((std::mem::take(&mut current_piece), piece_phase));
+            }
+            current_piece.clear();
+            current_phase += t0 * seg_len;
+        }
+        if current_piece.is_empty() {
+            piece_phase = current_phase;
+            current_piece.push((a.0 + (b.0 - a.0) * t0, a.1 + (b.1 - a.1) * t0));
+        }
+        current_piece.push((a.0 + (b.0 - a.0) * t1, a.1 + (b.1 - a.1) * t1));
+        current_phase += (t1 - t0) * seg_len;
+        if t1 < 1.0 {
+            if current_piece.len() >= 2 {
+                out.push((std::mem::take(&mut current_piece), piece_phase));
+            }
+            current_piece.clear();
+            current_phase += (1.0 - t1) * seg_len;
+        }
+    }
+    if current_piece.len() >= 2 {
+        out.push((current_piece, piece_phase));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2937,6 +3113,67 @@ mod tests {
             Some([255, 255, 255, 255]),
             "before the start"
         );
+    }
+
+    #[test]
+    fn a_far_off_page_shape_is_clipped_without_allocating_for_the_gap() {
+        let mut device = paper(200, 200);
+        let far = square(10_000_000.0, 0.0, 10_000_005.0, 200.0);
+        device.fill_polygon(&far, FillRule::NonZero, [255, 0, 0, 255], BlendMode::Normal);
+        assert_eq!(device.image().get(100, 100), Some([255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn odd_length_dash_arrays_cycle_per_spec() {
+        // [10] 0 d -> 10 on, 10 off
+        let single = mangle_content::Dash {
+            array: vec![10.0],
+            phase: 0.0,
+        };
+        assert_eq!(dash_pairs(&single), vec![(10.0, 10.0)]);
+        let mut runs = Vec::new();
+        walk_dashes(
+            &[(0.0, 0.0), (200.0, 0.0)],
+            &dash_pairs(&single),
+            0.0,
+            |on, _| {
+                runs.push(on);
+            },
+        );
+        assert_eq!(runs.len(), 20, "20 alternating 10-pixel runs");
+        assert!(runs.iter().step_by(2).all(|&on| on));
+        assert!(runs.iter().skip(1).step_by(2).all(|&on| !on));
+
+        // [20 10 5] 0 d -> (20, 10), (5, 20), (10, 5)
+        let triple = mangle_content::Dash {
+            array: vec![20.0, 10.0, 5.0],
+            phase: 0.0,
+        };
+        assert_eq!(
+            dash_pairs(&triple),
+            vec![(20.0, 10.0), (5.0, 20.0), (10.0, 5.0)]
+        );
+    }
+
+    #[test]
+    fn unbounded_dash_expansion_is_clipped_and_capped() {
+        let mut device = paper(200, 200);
+        let style = StrokeStyle {
+            width: 2.0,
+            dash: mangle_content::Dash {
+                array: vec![0.001, 0.001],
+                phase: 0.0,
+            },
+            ..StrokeStyle::default()
+        };
+        let huge_line = Polygon {
+            subpaths: vec![Subpath::open(vec![(0.0, 100.0), (1_000_000.0, 100.0)])],
+        };
+        let outlines = device.stroke_outline(&huge_line, &style);
+        assert_eq!(outlines.len(), 1);
+        assert!(outlines[0].subpaths.len() <= MAX_DASH_RUNS);
+        device.stroke_polygon(&huge_line, &style, BLACK, BlendMode::Normal);
+        assert_eq!(device.image().get(100, 100), Some(BLACK));
     }
 
     fn clip(w: f64, h: f64) -> Rect {

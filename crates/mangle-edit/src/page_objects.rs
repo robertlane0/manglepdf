@@ -409,6 +409,9 @@ fn font_names(
 /// Joined from every run on the page, not from the objects: an object's own content is what the
 /// panel shows, and a search has to run over the *page*, because a phrase a user types is a phrase
 /// of prose and prose does not respect where one object's box ends.
+///
+/// Read glyph by glyph, with no word spaces inferred from the gaps: it has to be the text the panel
+/// shows, and the panel cuts what a user retypes across the glyphs by count.
 #[must_use]
 pub fn page_text(
     resources: &mangle_content::Resources,
@@ -439,7 +442,7 @@ pub fn page_text(
                 _ => None,
             })
         })
-        .filter_map(|run| mangle_text::decode(resources, &|o| doc.resolve_object(o), &run))
+        .filter_map(|run| mangle_text::decode_glyphs(resources, &|o| doc.resolve_object(o), &run))
         .collect();
     mangle_text::text_of(&runs)
 }
@@ -449,6 +452,10 @@ pub fn page_text(
 /// The runs are decoded one at a time and joined by [`mangle_text::text_of`], which is the same
 /// path a page's text goes through — so the panel's content field and a search over the page agree
 /// by construction rather than by two implementations that happen to match.
+///
+/// One character for each glyph code, as [`mangle_text::decode_glyphs`] reads it: a retype is cut
+/// across the object's glyphs by count, so the text a user starts from cannot have a space in it
+/// that is only a gap between two glyphs.
 ///
 /// `None` for an object with no text in it, which is the honest answer for a photograph.
 #[must_use]
@@ -481,7 +488,7 @@ pub fn content(
             }),
             _ => None,
         })
-        .filter_map(|run| mangle_text::decode(resources, &|o| doc.resolve_object(o), &run))
+        .filter_map(|run| mangle_text::decode_glyphs(resources, &|o| doc.resolve_object(o), &run))
         .collect();
     if runs.is_empty() {
         return None;
@@ -733,6 +740,7 @@ mod tests {
                 matrix: Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
                 inline: false,
                 fill: Colour::black(),
+                data: None,
             },
             span: at..at + 4,
             ctm: Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
@@ -905,6 +913,7 @@ mod tests {
             matrix: Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
             inline: false,
             fill: Colour::black(),
+            data: None,
         };
         let top = run(0.0, 0.0, 100.0, 100.0, 4);
         let m = PageModel::build(&[bottom, top]);

@@ -727,6 +727,7 @@ mod tests {
                 matrix: Matrix::IDENTITY,
                 inline: false,
                 fill: Colour::black(),
+                data: None,
             },
             at..at + len,
         )

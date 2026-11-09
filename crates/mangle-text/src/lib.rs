@@ -83,11 +83,40 @@ pub struct Decoded {
 /// is a CMap, so the byte is not a glyph selector and this has nothing to say. That is a real
 /// finding about the file and a caller has to surface it rather than return an empty string and
 /// call it a page with no text on it.
+///
+/// A gap between two glyphs of the run wider than a tenth of the type size reads as a word space
+/// and is written into the text, because a TeX file has no space glyphs at all: its words are
+/// separated by `TJ` adjustments, and without this they run together. The text is then no longer
+/// one character per code, which is what [`decode_glyphs`] is for.
 #[must_use]
 pub fn decode(
     resources: &mangle_content::Resources,
     resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
     run: &Run<'_>,
+) -> Option<Decoded> {
+    decode_with(resources, resolve, run, true)
+}
+
+/// [`decode`] without the inferred word spaces: one character for each code the font maps.
+///
+/// What an editor reads, because a string retyped over a run is cut across the run's glyphs by
+/// count, and a space that is only a gap between two glyphs has no glyph to take its share.
+#[must_use]
+pub fn decode_glyphs(
+    resources: &mangle_content::Resources,
+    resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+    run: &Run<'_>,
+) -> Option<Decoded> {
+    decode_with(resources, resolve, run, false)
+}
+
+/// The one reading behind [`decode`] and [`decode_glyphs`]; `spaces` says whether to infer word
+/// spaces from the glyph positions.
+fn decode_with(
+    resources: &mangle_content::Resources,
+    resolve: &dyn Fn(&mangle_syntax::object::Object) -> Option<mangle_syntax::object::Object>,
+    run: &Run<'_>,
+    spaces: bool,
 ) -> Option<Decoded> {
     // A form carries its own table, and a form with none inherits the page's — which is what an
     // absent entry means here, not "use nothing".
@@ -99,6 +128,7 @@ pub fn decode(
     };
     let name = run.font?;
     let font = table.fonts.get(name)?;
+    let widths = table.font_widths(name);
     let resolved = resolve(font).unwrap_or_else(|| font.clone());
     let dict = resolved.as_dict()?;
     let to_unicode = mangle_font::ToUnicode::from_font_dict(dict, resolve);
@@ -112,19 +142,42 @@ pub fn decode(
             size: run.size,
             ..Decoded::default()
         };
-        let codes = run.text.chunks_exact(2).filter_map(|pair| {
-            let hi = *pair.first()?;
-            let lo = *pair.get(1)?;
-            Some(u32::from(u16::from_be_bytes([hi, lo])))
-        });
-        for (code, origin) in codes.zip(run.origins.iter().copied()) {
+        let codes: Vec<u32> = run
+            .text
+            .chunks_exact(2)
+            .filter_map(|pair| {
+                let hi = *pair.first()?;
+                let lo = *pair.get(1)?;
+                Some(u32::from(u16::from_be_bytes([hi, lo])))
+            })
+            .collect();
+        let base_tc = estimate_base_char_spacing(&codes, &run.origins, widths, run.size, 1000);
+        let mut prev: Option<((f64, f64), u32)> = None;
+        for (code, origin) in codes.into_iter().zip(run.origins.iter().copied()) {
             match cmap.get(code) {
                 Some(s) if !s.is_empty() => {
+                    if spaces
+                        && let Some((prev_origin, prev_code)) = prev
+                        && should_insert_in_run_space(
+                            prev_origin,
+                            prev_code,
+                            origin,
+                            widths,
+                            run.size,
+                            1000,
+                            base_tc,
+                            &out.text,
+                            s,
+                        )
+                    {
+                        out.text.push(' ');
+                    }
                     out.extent = Some(match out.extent {
                         Some((first, _)) => (first, origin),
                         None => (origin, origin),
                     });
                     out.text.push_str(s);
+                    prev = Some((origin, code));
                 }
                 _ => out.unmapped += 1,
             }
@@ -140,20 +193,35 @@ pub fn decode(
         size: run.size,
         ..Decoded::default()
     };
-    for (code, origin) in run
-        .text
-        .iter()
-        .map(|b| u32::from(*b))
-        .zip(run.origins.iter().copied())
-    {
+    let codes: Vec<u32> = run.text.iter().map(|b| u32::from(*b)).collect();
+    let base_tc = estimate_base_char_spacing(&codes, &run.origins, widths, run.size, 500);
+    let mut prev: Option<((f64, f64), u32)> = None;
+    for (code, origin) in codes.into_iter().zip(run.origins.iter().copied()) {
         if let Some(s) = to_unicode.as_ref().and_then(|cmap| cmap.get(code))
             && !s.is_empty()
         {
+            if spaces
+                && let Some((prev_origin, prev_code)) = prev
+                && should_insert_in_run_space(
+                    prev_origin,
+                    prev_code,
+                    origin,
+                    widths,
+                    run.size,
+                    500,
+                    base_tc,
+                    &out.text,
+                    s,
+                )
+            {
+                out.text.push(' ');
+            }
             out.extent = Some(match out.extent {
                 Some((first, _)) => (first, origin),
                 None => (origin, origin),
             });
             out.text.push_str(s);
+            prev = Some((origin, code));
             continue;
         }
         let Some(glyph) = encoding.as_ref().and_then(|enc| enc.glyph_for(code)) else {
@@ -162,6 +230,24 @@ pub fn decode(
         };
         match mangle_font::agl(glyph).and_then(char::from_u32) {
             Some(c) => {
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                if spaces
+                    && let Some((prev_origin, prev_code)) = prev
+                    && should_insert_in_run_space(
+                        prev_origin,
+                        prev_code,
+                        origin,
+                        widths,
+                        run.size,
+                        500,
+                        base_tc,
+                        &out.text,
+                        s,
+                    )
+                {
+                    out.text.push(' ');
+                }
                 let (ox, oy) = origin;
                 let at = (ox, oy);
                 out.extent = Some(match out.extent {
@@ -169,11 +255,85 @@ pub fn decode(
                     None => (at, at),
                 });
                 out.text.push(c);
+                prev = Some((at, code));
             }
             None => out.unmapped += 1,
         }
     }
     Some(out)
+}
+
+/// Estimate uniform `Tc` character spacing when every inter-glyph gap in a run is equal.
+fn estimate_base_char_spacing(
+    codes: &[u32],
+    origins: &[(f64, f64)],
+    widths: Option<&mangle_font::metrics::DeclaredWidths>,
+    size: f64,
+    default_width: u16,
+) -> f64 {
+    if codes.len() < 3 || origins.len() < 3 {
+        return 0.0;
+    }
+    let mut min_gap = f64::INFINITY;
+    let mut max_gap = f64::NEG_INFINITY;
+    let mut count = 0usize;
+    for i in 0..codes.len().min(origins.len()).saturating_sub(1) {
+        let (Some(&code), Some(&o0), Some(&o1)) =
+            (codes.get(i), origins.get(i), origins.get(i + 1))
+        else {
+            continue;
+        };
+        if code == 32 {
+            continue;
+        }
+        let w = widths
+            .and_then(|fw| fw.width_of(code))
+            .unwrap_or(default_width);
+        let adv = (f64::from(w) / 1000.0) * size;
+        let dist = (o1.0 - o0.0).hypot(o1.1 - o0.1);
+        let gap = dist - adv;
+        min_gap = min_gap.min(gap);
+        max_gap = max_gap.max(gap);
+        count += 1;
+    }
+    if count >= 2 && min_gap > size * 0.08 && (max_gap - min_gap).abs() <= size * 0.04 {
+        min_gap
+    } else {
+        0.0
+    }
+}
+
+/// Whether the gap between two glyph origins within one run is a word space.
+///
+/// The gap is how far the pen travelled less the previous glyph's advance and the run's own
+/// character spacing, so a `TJ` adjustment shows up as a single number. It is a space when it
+/// is more than a tenth of the type size, about where poppler breaks; a run that already has a
+/// space on either side of the gap is left alone.
+#[allow(clippy::too_many_arguments)]
+fn should_insert_in_run_space(
+    prev_origin: (f64, f64),
+    prev_code: u32,
+    curr_origin: (f64, f64),
+    widths: Option<&mangle_font::metrics::DeclaredWidths>,
+    size: f64,
+    default_width: u16,
+    base_tc: f64,
+    accumulated: &str,
+    next_str: &str,
+) -> bool {
+    if accumulated.is_empty()
+        || accumulated.ends_with(char::is_whitespace)
+        || next_str.starts_with(char::is_whitespace)
+    {
+        return false;
+    }
+    let w = widths
+        .and_then(|fw| fw.width_of(prev_code))
+        .unwrap_or(default_width);
+    let adv = (f64::from(w) / 1000.0) * size + base_tc;
+    let dist = (curr_origin.0 - prev_origin.0).hypot(curr_origin.1 - prev_origin.1);
+    let gap = dist - adv;
+    gap > size * 0.10
 }
 
 /// Join decoded runs into a page's text, in the order they are given.
@@ -203,9 +363,12 @@ pub fn text_of(runs: &[Decoded]) -> String {
             // how far apart two baselines have to be to count as different: a superscript sits
             // further from its line than its own size is tall.
             let tall = before.size.max(run.size);
-            if (here.sy - before.ey).abs() > tall * 0.3 || here.sx < before.sx - tall * 0.5 {
+            if (here.sy - before.ey).abs() > tall * 0.55 || here.sx < before.sx - tall * 0.5 {
                 out.push('\n');
-            } else if here.sx - before.ex > tall * 0.25 {
+            } else if here.sx - before.ex > tall * 0.25
+                && !out.ends_with(char::is_whitespace)
+                && !run.text.starts_with(char::is_whitespace)
+            {
                 out.push(' ');
             }
         }
@@ -340,18 +503,37 @@ fn xy_cut(items: &[(usize, Placed)], depth: usize, out: &mut Vec<usize>) {
         return;
     }
 
-    // 3. Base case: sort top-to-bottom by baseline (within 0.3 * size), then left-to-right.
-    let mut sorted = items.to_vec();
-    sorted.sort_by(|(_, a), (_, b)| {
-        let tall = a.size.max(b.size);
-        if (a.sy - b.sy).abs() <= tall * 0.3 {
-            a.sx.total_cmp(&b.sx)
-        } else {
-            b.sy.total_cmp(&a.sy)
-        }
+    // 3. Base case: group runs into baseline bands (keeping superscripts and subscripts with
+    // their line), then sort top-to-bottom by line and left-to-right within each line.
+    let mut by_baseline = items.to_vec();
+    by_baseline.sort_by(|(_, a), (_, b)| {
+        b.size
+            .total_cmp(&a.size)
+            .then_with(|| b.sy.total_cmp(&a.sy))
+            .then_with(|| a.sx.total_cmp(&b.sx))
     });
-    for (idx, _) in sorted {
-        out.push(idx);
+    let mut lines: Vec<Band> = Vec::new();
+    for (idx, placed) in by_baseline {
+        if let Some(line) = lines.iter_mut().find(|line| {
+            let tall = line.size.max(placed.size);
+            (placed.sy - line.y).abs() <= tall * 0.55
+        }) {
+            line.size = line.size.max(placed.size);
+            line.members.push((idx, placed));
+        } else {
+            lines.push(Band {
+                y: placed.sy,
+                size: placed.size,
+                members: vec![(idx, placed)],
+            });
+        }
+    }
+    lines.sort_by(|a, b| b.y.total_cmp(&a.y));
+    for mut line in lines {
+        line.members.sort_by(|(_, a), (_, b)| a.sx.total_cmp(&b.sx));
+        for (idx, _) in line.members {
+            out.push(idx);
+        }
     }
 }
 
@@ -430,6 +612,15 @@ impl Placed {
             size,
         }
     }
+}
+
+/// One line of text: where its baseline sits, the tallest type on it, and the runs on it.
+///
+/// Named rather than a `(f64, f64, Vec<..>)` for the same reason as [`Placed`].
+struct Band {
+    y: f64,
+    size: f64,
+    members: Vec<(usize, Placed)>,
 }
 
 // ---- search ----
@@ -569,5 +760,149 @@ mod tests {
             text_of(&ordered),
             "Header\nCol1-Row1\nCol1-Row2\nCol2-Row1\nCol2-Row2"
         );
+    }
+
+    /// Resources with one Helvetica face, `F1`, in WinAnsi.
+    fn helvetica_resources() -> mangle_content::Resources {
+        let mut font = mangle_syntax::object::Dict::new();
+        font.set("Type", mangle_syntax::object::Object::name("Font"));
+        font.set("Subtype", mangle_syntax::object::Object::name("Type1"));
+        font.set("BaseFont", mangle_syntax::object::Object::name("Helvetica"));
+        font.set(
+            "Encoding",
+            mangle_syntax::object::Object::name("WinAnsiEncoding"),
+        );
+        let mut fonts = mangle_syntax::object::Dict::new();
+        fonts.set("F1", mangle_syntax::object::Object::Dict(font));
+        let mut res_dict = mangle_syntax::object::Dict::new();
+        res_dict.set("Font", mangle_syntax::object::Object::Dict(fonts));
+        mangle_content::Resources::from_dict(&res_dict, &|o| Some(o.clone()))
+    }
+
+    #[test]
+    fn decode_glyphs_has_one_character_per_code_where_decode_infers_word_spaces() {
+        let resources = helvetica_resources();
+        let stream = mangle_content::ContentStream::parse(
+            b"BT /F1 10 Tf 72 700 Td [(The)-242(technical)-241(documentation)] TJ ET",
+        );
+        let content = mangle_content::interp::run_with(&stream, &resources);
+        let raw = content
+            .records
+            .iter()
+            .find_map(|r| match &r.mark {
+                mangle_content::interp::Mark::Glyphs {
+                    text,
+                    placements,
+                    size,
+                    ..
+                } => Some((
+                    text.clone(),
+                    placements.iter().map(|m| (m.e, m.f)).collect::<Vec<_>>(),
+                    *size,
+                )),
+                _ => None,
+            })
+            .expect("a glyph run");
+        let run = Run {
+            form: None,
+            font: Some("F1"),
+            text: &raw.0,
+            origins: raw.1.clone(),
+            size: raw.2,
+        };
+        let resolve = |o: &mangle_syntax::object::Object| Some(o.clone());
+        assert_eq!(
+            decode(&resources, &resolve, &run).expect("readable").text,
+            "The technical documentation"
+        );
+        let glyphs = decode_glyphs(&resources, &resolve, &run).expect("readable");
+        assert_eq!(glyphs.text, "Thetechnicaldocumentation");
+        assert_eq!(
+            glyphs.text.chars().count(),
+            run.text.len(),
+            "one character for each code, which is what an editor cuts a retype by"
+        );
+    }
+
+    #[test]
+    fn tj_numeric_adjustments_insert_word_spaces_at_a_tenth_of_an_em() {
+        let resources = helvetica_resources();
+
+        let stream = mangle_content::ContentStream::parse(
+            b"BT /F1 12 Tf 72 700 Td [(alpha) -150 (beta) -250 (gamma) -300 (delta) -500 (epsilon) -1000 (zeta)] TJ ET",
+        );
+        let content = mangle_content::interp::run_with(&stream, &resources);
+        let text = extract_records_in_reading_order(
+            &content.records,
+            &resources,
+            &|o| Some(o.clone()),
+            &[],
+        );
+        assert_eq!(text, "alpha beta gamma delta epsilon zeta");
+
+        let tex_stream = mangle_content::ContentStream::parse(
+            b"BT /F1 10 Tf 72 700 Td [(The)-242(technical)-241(documentation)] TJ ET",
+        );
+        let tex_content = mangle_content::interp::run_with(&tex_stream, &resources);
+        let tex_text = extract_records_in_reading_order(
+            &tex_content.records,
+            &resources,
+            &|o| Some(o.clone()),
+            &[],
+        );
+        assert_eq!(tex_text, "The technical documentation");
+    }
+
+    #[test]
+    fn superscript_offset_above_three_tenths_of_an_em_stays_in_line_order() {
+        let runs = vec![
+            (
+                None,
+                Decoded {
+                    text: "E = mc".into(),
+                    unmapped: 0,
+                    extent: Some(((72.0, 700.0), (105.0, 700.0))),
+                    size: 10.0,
+                },
+            ),
+            (
+                None,
+                Decoded {
+                    text: "2".into(),
+                    unmapped: 0,
+                    extent: Some(((106.0, 704.2), (110.0, 704.2))),
+                    size: 7.0,
+                },
+            ),
+            (
+                None,
+                Decoded {
+                    text: "and H".into(),
+                    unmapped: 0,
+                    extent: Some(((114.0, 700.0), (140.0, 700.0))),
+                    size: 10.0,
+                },
+            ),
+            (
+                None,
+                Decoded {
+                    text: "2".into(),
+                    unmapped: 0,
+                    extent: Some(((144.0, 697.5), (148.0, 697.5))),
+                    size: 7.0,
+                },
+            ),
+            (
+                None,
+                Decoded {
+                    text: "O".into(),
+                    unmapped: 0,
+                    extent: Some(((152.0, 700.0), (160.0, 700.0))),
+                    size: 10.0,
+                },
+            ),
+        ];
+        let ordered = reading_order_runs(&runs, &[]);
+        assert_eq!(text_of(&ordered), "E = mc2 and H 2 O");
     }
 }

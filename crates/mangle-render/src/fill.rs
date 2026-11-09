@@ -415,7 +415,9 @@ pub fn polygon(
     let Some(bounds) = shape.bounds() else {
         return false;
     };
-    let area = bounds.intersect(device.clip());
+    let area = bounds
+        .intersect(device.clip())
+        .intersect(device.image().rect());
     if area.is_empty() {
         return false;
     }

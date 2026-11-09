@@ -958,6 +958,14 @@ fn split_counts(object: &PageObject, text: &str) -> Result<Vec<String>, Refusal>
         }
         pieces.push(piece);
     }
+    // What is left over has no run to go in. Dropping it would write the rest of the text
+    // somewhere other than where it was typed, and the edit would report success.
+    if chars.next().is_some() {
+        return Err(Refusal::GlyphCountMismatch {
+            want: text.chars().count(),
+            have,
+        });
+    }
     Ok(pieces)
 }
 
@@ -2551,6 +2559,7 @@ mod tests {
                 matrix: Matrix::IDENTITY,
                 inline: false,
                 fill: Colour::black(),
+                data: None,
             },
             at..at + len,
         )
@@ -3368,6 +3377,48 @@ mod tests {
             refused = true;
         }
         assert!(refused, "the TJ run was in the model");
+        let _ = before;
+    }
+
+    #[test]
+    fn a_retype_across_runs_refuses_a_longer_text_instead_of_dropping_its_tail() {
+        let stream = b"BT /F1 12 Tf (Hi) Tj (Yo) Tj ET";
+        let before = run(&ContentStream::parse(stream));
+        let model = PageModel::build(&before.records);
+        let resources = winansi_resources("F1");
+        let fonts = winansi_fonts(&resources);
+        let mut checked = false;
+        for o in model.objects() {
+            if !matches!(o.kind, Kind::Line | Kind::Block | Kind::LooseRun) || o.records.len() != 2
+            {
+                continue;
+            }
+            // The right total still works, so the refusal below is about the total alone.
+            patches_for_with(
+                stream,
+                o,
+                &Change::Retype {
+                    text: "HeYa".to_string(),
+                },
+                Some(&fonts),
+            )
+            .expect("four glyphs over four glyphs");
+            let err = patches_for_with(
+                stream,
+                o,
+                &Change::Retype {
+                    text: "HeYaX".to_string(),
+                },
+                Some(&fonts),
+            )
+            .expect_err("a fifth character has no run to go in");
+            assert!(
+                matches!(err, Refusal::GlyphCountMismatch { want: 5, have: 4 }),
+                "the refusal counts both sides: {err}"
+            );
+            checked = true;
+        }
+        assert!(checked, "the two runs were one object in the model");
         let _ = before;
     }
 

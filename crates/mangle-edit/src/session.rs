@@ -2142,6 +2142,35 @@ mod tests {
     }
 
     #[test]
+    fn the_text_the_editor_shows_has_a_character_for_each_glyph_not_for_each_gap() {
+        // The word space here is a kern, as a TeX file writes it, and not a glyph.
+        let (doc, page) = doc_with_helvetica("BT /F1 12 Tf 72 700 Td [(Hel)-400(lo)] TJ ET");
+        let resources = page
+            .inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .unwrap_or_default();
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &resources).expect("editable");
+        assert_eq!(
+            page_text(&resources, editor.document(), &editor.model()),
+            "Hello",
+            "a gap is not a character, because a retype is cut across the glyphs by count"
+        );
+        editor
+            .apply(
+                0,
+                &Change::Retype {
+                    text: "Hallo".to_string(),
+                },
+            )
+            .expect("five glyphs over five, each kern kept with its gap");
+    }
+
+    #[test]
     fn an_embedded_type0_font_extracts_and_retypes_through_its_tounicode() {
         let (doc, page) = doc_with_helvetica("BT /F1 12 Tf (Hi) Tj ET");
         let resources = page

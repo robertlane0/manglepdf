@@ -599,7 +599,8 @@ fn inline_image(
                 let Ok(value) = lex.next_token() else {
                     return data.len();
                 };
-                dict.insert(Name::from_bytes(key), object_of(&value.token));
+                let parsed = read_inline_value(lex, &value.token, 0);
+                dict.insert(Name::from_bytes(key), parsed);
             }
             other => {
                 // Not a key: this is not an inline image after all, so `BI` is an ordinary
@@ -624,6 +625,61 @@ fn inline_image(
                 return spanned.end;
             }
         }
+    }
+}
+
+/// One value in an inline image's dictionary: a scalar, or an array or dictionary of them, as in
+/// `/D [1 0]` or `/DP << /K -1 >>`. Nesting past eight levels is read as null, not followed.
+fn read_inline_value(lex: &mut Lexer<'_>, first: &Token, depth: usize) -> Object {
+    if depth > 8 {
+        return Object::Null;
+    }
+    match first {
+        Token::ArrayOpen => {
+            let mut items = Vec::new();
+            loop {
+                lex.skip_space();
+                if lex.at_end() {
+                    break;
+                }
+                let Ok(spanned) = lex.next_token() else {
+                    break;
+                };
+                if matches!(spanned.token, Token::ArrayClose | Token::Eof) {
+                    break;
+                }
+                items.push(read_inline_value(lex, &spanned.token, depth + 1));
+            }
+            Object::Array(items)
+        }
+        Token::DictOpen => {
+            let mut d = Dict::new();
+            loop {
+                lex.skip_space();
+                if lex.at_end() {
+                    break;
+                }
+                let Ok(spanned) = lex.next_token() else {
+                    break;
+                };
+                match &spanned.token {
+                    Token::DictClose | Token::Eof => break,
+                    Token::Name(k) => {
+                        lex.skip_space();
+                        let Ok(val) = lex.next_token() else {
+                            break;
+                        };
+                        d.insert(
+                            Name::from_bytes(k),
+                            read_inline_value(lex, &val.token, depth + 1),
+                        );
+                    }
+                    _ => break,
+                }
+            }
+            Object::Dict(d)
+        }
+        other => object_of(other),
     }
 }
 

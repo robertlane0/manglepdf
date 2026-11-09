@@ -7946,3 +7946,57 @@ fn an_unimplemented_blend_mode_is_reported_and_still_draws() {
         render.notes
     );
 }
+
+#[test]
+fn inline_images_draw_across_raw_hex_filter_arrays_full_keys_and_masks() {
+    let cases: &[(&[u8], [u8; 3])] = &[
+        // 1. Raw gray
+        (b"q 100 0 0 100 0 0 cm BI /W 1 /H 1 /BPC 8 /CS /G ID \x40 EI Q", [64, 64, 64]),
+        // 2. ASCIIHex RGB
+        (
+            b"q 100 0 0 100 0 0 cm BI /W 1 /H 1 /BPC 8 /CS /RGB /F /AHx ID 1080f0> EI Q",
+            [0x10, 0x80, 0xf0],
+        ),
+        // 3. Filter array [/AHx]
+        (
+            b"q 100 0 0 100 0 0 cm BI /W 1 /H 1 /BPC 8 /CS /RGB /F [/AHx] ID 204060> EI Q",
+            [0x20, 0x40, 0x60],
+        ),
+        // 4. Full key names
+        (
+            b"q 100 0 0 100 0 0 cm BI /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB /Filter /ASCIIHexDecode ID a0b0c0> EI Q",
+            [0xa0, 0xb0, 0xc0],
+        ),
+        // 5. ImageMask with /D [1 0] painted in red
+        (
+            b"q 1 0 0 rg 100 0 0 100 0 0 cm BI /W 1 /H 1 /IM true /D [1 0] ID \x80 EI Q",
+            [255, 0, 0],
+        ),
+        // 6. Indexed inline image
+        (
+            b"q 100 0 0 100 0 0 cm BI /W 1 /H 1 /BPC 8 /CS [/I /RGB 1 <112233445566>] ID \x01 EI Q",
+            [0x44, 0x55, 0x66],
+        ),
+    ];
+    for (stream, want) in cases {
+        let r = render(pattern_page("", stream, &[]), 1.0);
+        assert!(r.notes.is_empty(), "unexpected notes: {:?}", r.notes);
+        let px = r.image.get(50, 50).expect("pixel");
+        assert_eq!(
+            [px[0], px[1], px[2]],
+            *want,
+            "stream: {}",
+            String::from_utf8_lossy(stream)
+        );
+    }
+}
+
+#[test]
+fn a_far_off_page_shape_on_a_pdf_page_renders_blank_immediately() {
+    let r = render(
+        pattern_page("", b"1 0 0 rg 10000000 0 5 200 re f", &[]),
+        1.0,
+    );
+    assert!(r.notes.is_empty());
+    assert_eq!(r.image.get(50, 50), Some([255, 255, 255, 255]));
+}

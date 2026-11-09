@@ -54,9 +54,7 @@ pub struct Rect {
 }
 
 impl Rect {
-    /// A rectangle with its corners ordered. A rectangle that would be inverted is empty
-    /// rather than inverted, which is the difference between drawing nothing and drawing
-    /// everything.
+    /// A rectangle with its corners ordered so `x0 <= x1` and `y0 <= y1`.
     #[must_use]
     pub fn normalised(self) -> Self {
         Self {
@@ -70,6 +68,13 @@ impl Rect {
     /// The pixel columns and rows this rectangle covers.
     #[must_use]
     pub fn pixels(self) -> Option<(Range<usize>, Range<usize>)> {
+        if !self.x0.is_finite()
+            || !self.y0.is_finite()
+            || !self.x1.is_finite()
+            || !self.y1.is_finite()
+        {
+            return None;
+        }
         let r = self.normalised();
         if r.x1 <= r.x0 || r.y1 <= r.y0 {
             return None;
@@ -78,24 +83,48 @@ impl Rect {
         let y0 = r.y0.floor().max(0.0) as usize;
         let x1 = r.x1.ceil().max(0.0) as usize;
         let y1 = r.y1.ceil().max(0.0) as usize;
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
         Some((x0..x1, y0..y1))
     }
 
-    /// Clip to another rectangle.
+    /// Clip to another rectangle. Disjoint inputs yield an empty rectangle.
     #[must_use]
     pub fn intersect(self, other: Self) -> Self {
         let a = self.normalised();
         let b = other.normalised();
-        Self {
-            x0: a.x0.max(b.x0),
-            y0: a.y0.max(b.y0),
-            x1: a.x1.min(b.x1),
-            y1: a.y1.min(b.y1),
+        let x0 = a.x0.max(b.x0);
+        let y0 = a.y0.max(b.y0);
+        let x1 = a.x1.min(b.x1);
+        let y1 = a.y1.min(b.y1);
+        if x1 <= x0
+            || y1 <= y0
+            || !x0.is_finite()
+            || !y0.is_finite()
+            || !x1.is_finite()
+            || !y1.is_finite()
+        {
+            Self {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 0.0,
+                y1: 0.0,
+            }
+        } else {
+            Self { x0, y0, x1, y1 }
         }
     }
 
     #[must_use]
     pub fn is_empty(self) -> bool {
+        if !self.x0.is_finite()
+            || !self.y0.is_finite()
+            || !self.x1.is_finite()
+            || !self.y1.is_finite()
+        {
+            return true;
+        }
         let r = self.normalised();
         r.x1 <= r.x0 || r.y1 <= r.y0
     }
@@ -224,6 +253,9 @@ pub fn footprint(area: usize) -> usize {
     area.saturating_mul(8)
 }
 
+/// Maximum byte footprint (`alpha` + `winding`) of a single coverage buffer (64 megapixels).
+pub const MAX_COVERAGE_FOOTPRINT: usize = 64 * 1024 * 1024 * 8;
+
 /// The most sub-bands one pixel row may be cut into.
 ///
 /// A row with an edge crossing every pixel boundary needs about one cut per pixel of
@@ -244,11 +276,15 @@ pub fn rasterise(edges: &[Edge], clip: Rect, rule: FillRule) -> Coverage {
     };
     let width = columns.end - columns.start;
     let height = rows.end - rows.start;
+    let area = width.saturating_mul(height);
+    if area == 0 || footprint(area) > MAX_COVERAGE_FOOTPRINT {
+        return Coverage::default();
+    }
     let mut coverage = Coverage {
         width,
         height,
-        alpha: vec![0.0; width * height],
-        winding: vec![0; width * height],
+        alpha: vec![0.0; area],
+        winding: vec![0; area],
         rule,
     };
     let Some(bounds) = bounds(edges) else {
@@ -815,6 +851,36 @@ mod tests {
     fn the_footprint_is_arithmetic_and_saturates() {
         assert_eq!(footprint(1000), 8000);
         assert_eq!(footprint(usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn disjoint_rectangles_intersect_to_an_empty_rectangle() {
+        let page = Rect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 200.0,
+            y1: 200.0,
+        };
+        let far_off = Rect {
+            x0: 10_000_000.0,
+            y0: 0.0,
+            x1: 10_000_005.0,
+            y1: 200.0,
+        };
+        let inter = far_off.intersect(page);
+        assert!(inter.is_empty());
+        assert_eq!(inter.pixels(), None);
+
+        // And rasterise enforces the footprint ceiling directly.
+        let huge = Rect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10_000_000.0,
+            y1: 200.0,
+        };
+        let cov = rasterise(&rect_edges(0.0, 0.0, 10.0, 10.0), huge, FillRule::NonZero);
+        assert!(cov.is_empty());
+        assert_eq!((cov.width, cov.height), (0, 0));
     }
 
     #[test]

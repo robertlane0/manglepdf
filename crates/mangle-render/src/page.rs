@@ -1380,7 +1380,7 @@ fn image_for(
     let Object::Stream(stream) = resolved else {
         return Err(format!("`/{name}` is named by `Do` but is not a stream"));
     };
-    let resolver = |o: &Object| doc.resolve_object(o);
+    let resolver = colour_space_resolver(resources, doc);
     let mut notes = Vec::new();
     let raster = image::decode(&stream, &resolver, &mut notes).ok_or_else(|| {
         if notes.is_empty() {
@@ -1396,6 +1396,25 @@ fn image_for(
         .map(|note| format!("`/{name}`: {note}"))
         .collect();
     Ok((raster, notes))
+}
+
+/// How an image's colour-space objects are resolved: a name is looked up in the page's
+/// `/ColorSpace` resources first, because an image's `/ColorSpace` may name one there, and
+/// anything else is resolved as it is anywhere else in the file.
+fn colour_space_resolver<'a>(
+    resources: &'a Resources,
+    doc: &'a Document,
+) -> impl Fn(&Object) -> Option<Object> + 'a {
+    move |o| match o {
+        Object::Name(n) => {
+            let key = String::from_utf8_lossy(n.as_bytes());
+            resources
+                .colour_spaces
+                .get(key.as_ref())
+                .map(|entry| doc.resolve_object(entry).unwrap_or_else(|| entry.clone()))
+        }
+        _ => doc.resolve_object(o),
+    }
 }
 
 /// A shading lookup: a name to the shading it names, and the pattern's own transformation.
@@ -1958,11 +1977,36 @@ fn draw_mark(
                 Err(reason) => notes.push(reason),
             },
         },
-        Mark::Image { name, fill, .. } => match name.as_deref() {
-            // An XObject that is neither an image nor a form never reaches here: the
-            // interpreter reports it by name rather than recording a mark for it, because a
-            // mark is a claim that something was drawn.
-            Some(name) => match images(name, resources) {
+        Mark::Image {
+            name, fill, data, ..
+        } => {
+            let decoded = match name.as_deref() {
+                // An XObject that is neither an image nor a form never reaches here: the
+                // interpreter reports it by name rather than recording a mark for it, because a
+                // mark is a claim that something was drawn.
+                Some(name) => images(name, resources),
+                // An inline image's samples are in the content stream, which the interpreter
+                // carries out on the mark as a stream whose keys are already in their long form.
+                None => match data.as_ref() {
+                    Some(inline_stream) => {
+                        let resolver = colour_space_resolver(resources, doc);
+                        let mut inline_notes = Vec::new();
+                        match image::decode(inline_stream, &resolver, &mut inline_notes) {
+                            Some(raster) => Ok((raster, inline_notes)),
+                            None => Err(if inline_notes.is_empty() {
+                                "an inline image could not be decoded".into()
+                            } else {
+                                inline_notes.join("; ")
+                            }),
+                        }
+                    }
+                    None => Err(
+                        "an inline image was found and not drawn: its samples could not be read"
+                            .into(),
+                    ),
+                },
+            };
+            match decoded {
                 Ok((raster, said)) => {
                     // Whatever the decode had to report goes on the page even though the
                     // picture was drawn — an image whose soft mask could not be read is on
@@ -2022,26 +2066,19 @@ fn draw_mark(
                     } else {
                         None
                     };
-                    image::draw(
+                    let blend = blend_for(record, notes);
+                    image::draw_blended(
                         device,
                         &raster,
                         to_device,
                         record.fill_alpha,
                         paint.as_ref(),
+                        blend,
                     );
                 }
                 Err(reason) => notes.push(reason),
-            },
-            None => {
-                // An inline image's samples are in the content stream rather than in a
-                // resource, so the content layer has to carry them out; it does not yet.
-                notes.push(
-                    "an inline image was found and not drawn: its samples live in the content \
-                     stream and are not carried out of it yet"
-                        .into(),
-                );
             }
-        },
+        }
         Mark::Glyphs {
             font,
             codes,

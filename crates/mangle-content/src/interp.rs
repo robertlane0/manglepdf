@@ -21,7 +21,7 @@ use crate::state::{
     Clip, ClipBounds, ClipPath, Colour, ColourSpace, Dash, GraphicsState, LineCap, LineJoin,
     PathSegment, StateStack, TextState,
 };
-use crate::tokens::{ContentStream, ContentToken, Operation};
+use crate::tokens::{ContentKind, ContentStream, ContentToken, Operation};
 
 /// One thing the page drew.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +100,8 @@ pub enum Mark {
         /// colour, so a renderer that painted a mask in anything but this would paint every
         /// mask on every page black and be right only where the page was.
         fill: Colour,
+        /// The decoded inline image dictionary and raw payload when `inline` is true.
+        data: Option<Stream>,
     },
     /// A shading, filled into the current clip.
     Shading { name: String, matrix: Matrix },
@@ -1261,6 +1263,7 @@ impl Context<'_> {
                 matrix: self.state.ctm,
                 inline: false,
                 fill: self.state.fill.clone(),
+                data: None,
             },
             b"Tj" | b"TJ" | b"'" | b"\"" => {
                 self.record_text(op, operands, matches!(name, b"'" | b"\""));
@@ -1270,12 +1273,21 @@ impl Context<'_> {
                 }
                 return;
             }
-            b"BI" => Mark::Image {
-                name: None,
-                matrix: self.state.ctm,
-                inline: true,
-                fill: self.state.fill.clone(),
-            },
+            b"BI" => {
+                let inline_stream = op.operands.first().and_then(|t| match &t.kind {
+                    ContentKind::InlineImage { dict, data } => {
+                        Some(expand_inline_image(dict, data))
+                    }
+                    _ => None,
+                });
+                Mark::Image {
+                    name: None,
+                    matrix: self.state.ctm,
+                    inline: true,
+                    fill: self.state.fill.clone(),
+                    data: inline_stream,
+                }
+            }
             _ => return,
         };
 
@@ -1342,7 +1354,7 @@ impl Context<'_> {
         // A kern applies to the last glyph pushed, which is the one it follows.
         let kern = |value: f64, kern_after: &mut Vec<f64>| {
             if let Some(last) = kern_after.last_mut() {
-                *last = value;
+                *last += value;
             }
         };
         for operand in operands {
@@ -1605,6 +1617,118 @@ pub fn form_bbox(entry: Option<&Object>) -> BBox {
     } else {
         BBox::Box(ordered)
     }
+}
+
+fn expand_inline_color_space(obj: &Object) -> Object {
+    match obj {
+        Object::Name(n) => match n.as_bytes() {
+            b"G" => Object::name("DeviceGray"),
+            b"RGB" => Object::name("DeviceRGB"),
+            b"CMYK" => Object::name("DeviceCMYK"),
+            b"I" | b"Idx" => Object::name("Indexed"),
+            _ => obj.clone(),
+        },
+        Object::Array(items) => {
+            let expanded = items.iter().map(expand_inline_color_space).collect();
+            Object::Array(expanded)
+        }
+        _ => obj.clone(),
+    }
+}
+
+fn expand_inline_filter(obj: &Object) -> Object {
+    match obj {
+        Object::Name(n) => match n.as_bytes() {
+            b"AHx" => Object::name("ASCIIHexDecode"),
+            b"A85" => Object::name("ASCII85Decode"),
+            b"LZW" => Object::name("LZWDecode"),
+            b"Fl" => Object::name("FlateDecode"),
+            b"RL" => Object::name("RunLengthDecode"),
+            b"CCF" => Object::name("CCITTFaxDecode"),
+            b"DCT" => Object::name("DCTDecode"),
+            _ => obj.clone(),
+        },
+        Object::Array(items) => {
+            let expanded = items.iter().map(expand_inline_filter).collect();
+            Object::Array(expanded)
+        }
+        _ => obj.clone(),
+    }
+}
+
+fn expand_inline_image(dict: &Dict, data: &[u8]) -> Stream {
+    let mut out = Dict::new();
+    for (k, v) in dict.iter() {
+        let key = match k.as_bytes() {
+            b"BPC" => "BitsPerComponent",
+            b"CS" => "ColorSpace",
+            b"D" => "Decode",
+            b"DP" => "DecodeParms",
+            b"F" => "Filter",
+            b"H" => "Height",
+            b"IM" => "ImageMask",
+            b"I" => "Interpolate",
+            b"W" => "Width",
+            other => &String::from_utf8_lossy(other),
+        };
+        let value = match key {
+            "ColorSpace" => expand_inline_color_space(v),
+            "Filter" => expand_inline_filter(v),
+            _ => v.clone(),
+        };
+        out.set(key, value);
+    }
+    if out.get("ImageMask").and_then(Object::as_bool) == Some(true)
+        && out.get("BitsPerComponent").is_none()
+    {
+        out.set("BitsPerComponent", Object::Int(1));
+    }
+    // Trim the single trailing whitespace delimiter immediately preceding `EI`.
+    let trimmed = if data.ends_with(b"\r\n") {
+        data.get(..data.len().saturating_sub(2)).unwrap_or(data)
+    } else if data.last().is_some_and(u8::is_ascii_whitespace) {
+        data.get(..data.len().saturating_sub(1)).unwrap_or(data)
+    } else {
+        data
+    };
+    let payload = if out.get("Filter").is_some() {
+        trimmed.to_vec()
+    } else {
+        let w = out
+            .get("Width")
+            .and_then(Object::as_i64)
+            .unwrap_or(0)
+            .max(0) as usize;
+        let h = out
+            .get("Height")
+            .and_then(Object::as_i64)
+            .unwrap_or(0)
+            .max(0) as usize;
+        let bpc = out
+            .get("BitsPerComponent")
+            .and_then(Object::as_i64)
+            .unwrap_or(8)
+            .max(1) as usize;
+        let comps = match out.get("ColorSpace") {
+            Some(Object::Name(n)) => match n.as_bytes() {
+                b"DeviceRGB" | b"CalRGB" | b"Lab" => 3,
+                b"DeviceCMYK" => 4,
+                _ => 1,
+            },
+            _ => 1,
+        };
+        let needed = w
+            .saturating_mul(comps)
+            .saturating_mul(bpc)
+            .div_ceil(8)
+            .saturating_mul(h);
+        if needed > 0 && trimmed.len() < needed && data.len() >= needed {
+            data.to_vec()
+        } else {
+            trimmed.to_vec()
+        }
+    };
+    Stream::new(out, payload)
 }
 
 #[cfg(test)]

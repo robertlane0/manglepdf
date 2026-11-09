@@ -57,12 +57,12 @@
 //! exists — because a mask nobody can check is a claim about transparency that must be reported
 //! rather than believed. See [`decode_soft_mask`].
 
-use mangle_content::{IccBased, Matrix};
+use mangle_content::{Function, IccBased, Matrix};
 use mangle_syntax::object::{Dict, Object, Stream};
 use mangle_syntax::stream::decode_stream;
 
 use crate::fill::FillColour;
-use crate::{Device, Rect};
+use crate::{BlendMode, Device, Rect, over_blend};
 
 /// The most pixels an image may have. A page can ask for an image larger than memory, and
 /// the answer has to be a refusal rather than an allocation failure.
@@ -105,28 +105,63 @@ pub struct Raster {
 enum Space {
     /// One component, as luminance.
     Gray { decode: [f64; 2] },
+    /// Calibrated grey with gamma.
+    CalGray { decode: [f64; 2], gamma: f64 },
     /// Three components.
     Rgb { decode: [f64; 6] },
+    /// Calibrated RGB with white point, gamma, and 3x3 linear XYZ matrix.
+    CalRgb {
+        decode: [f64; 6],
+        white_point: [f64; 3],
+        gamma: [f64; 3],
+        matrix: [f64; 9],
+    },
     /// Four components, subtractive.
     Cmyk { decode: [f64; 8] },
+    /// CIE 1976 L*a*b* with white point and `[Lmin Lmax amin amax bmin bmax]` decode.
+    Lab {
+        decode: [f64; 6],
+        white_point: [f64; 3],
+        range: [f64; 4],
+    },
     /// A palette: one component indexing a table of colours.
     Indexed {
         palette: Vec<[u8; 3]>,
         /// The largest index the palette holds.
         high: usize,
         decode: [f64; 2],
+        explicit_decode: bool,
     },
-    /// One bit per sample, where zero paints. The colour comes from the graphics state.
-    Stencil,
+    /// Single-colorant spot space with tint transform into an alternate space.
+    Separation {
+        decode: [f64; 2],
+        is_none: bool,
+        alternate: Box<Space>,
+        function: Function,
+    },
+    /// Multi-colorant space with tint transform into an alternate space.
+    DeviceN {
+        decode: Vec<f64>,
+        colorants: usize,
+        alternate: Box<Space>,
+        function: Function,
+    },
+    /// One bit per sample, where decoded 0 paints. The colour comes from the graphics state.
+    Stencil { decode: [f64; 2] },
 }
 
 impl Space {
     /// How many stored components make up one sample in this space.
     fn components(&self) -> usize {
         match self {
-            Self::Gray { .. } | Self::Indexed { .. } | Self::Stencil => 1,
-            Self::Rgb { .. } => 3,
+            Self::Gray { .. }
+            | Self::CalGray { .. }
+            | Self::Indexed { .. }
+            | Self::Separation { .. }
+            | Self::Stencil { .. } => 1,
+            Self::Rgb { .. } | Self::CalRgb { .. } | Self::Lab { .. } => 3,
             Self::Cmyk { .. } => 4,
+            Self::DeviceN { colorants, .. } => *colorants,
         }
     }
 
@@ -134,10 +169,15 @@ impl Space {
     fn name(&self) -> &'static str {
         match self {
             Self::Gray { .. } => "DeviceGray",
+            Self::CalGray { .. } => "CalGray",
             Self::Rgb { .. } => "DeviceRGB",
+            Self::CalRgb { .. } => "CalRGB",
             Self::Cmyk { .. } => "DeviceCMYK",
+            Self::Lab { .. } => "Lab",
             Self::Indexed { .. } => "Indexed",
-            Self::Stencil => "an image mask",
+            Self::Separation { .. } => "Separation",
+            Self::DeviceN { .. } => "DeviceN",
+            Self::Stencil { .. } => "an image mask",
         }
     }
 }
@@ -254,9 +294,9 @@ pub fn flat<const N: usize>(values: &[f64]) -> [f64; N] {
 
 /// Read an image's colour space, following an indirect reference with `resolve`.
 ///
-/// `None` means the space cannot be read at all, which is different from reading it and
-/// producing the wrong colour: Lab and Separation need an alternate space or a white point
-/// that this does not have, and refusing is better than a plausible wrong answer.
+/// `None` means the space cannot be read at all, which is different from reading it and producing
+/// the wrong colour: a Lab space with no white point, or a Separation whose alternate or tint
+/// function this cannot read, is refused, and refusing is better than a plausible wrong answer.
 fn read_space(
     object: Option<&Object>,
     resolve: &dyn Fn(&Object) -> Option<Object>,
@@ -306,40 +346,170 @@ fn read_space(
                 }),
             }
         }
-        b"Indexed" | b"I" => {
-            // `[/Indexed base hival lookup]`, where the lookup is a string of three bytes
-            // per entry or a stream holding the same.
+        b"Indexed" | b"I" | b"Idx" => {
+            // `[/Indexed base hival lookup]`, where the lookup is a string or a stream holding one
+            // entry per index, as many bytes to an entry as the base space has components.
+            let base = read_space(array.get(1), resolve).unwrap_or(Space::Rgb {
+                decode: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            });
+            let base_components = base.components().max(1);
             let high = array.get(2).and_then(Object::as_i64).unwrap_or(0).max(0) as usize;
-            let bytes: Vec<u8> = match array.get(3).and_then(resolve) {
+            let lookup_obj = array
+                .get(3)
+                .and_then(resolve)
+                .or_else(|| array.get(3).cloned());
+            let bytes: Vec<u8> = match lookup_obj {
                 Some(Object::String(s)) => s,
                 Some(Object::Stream(s)) => decode_stream(&s).data,
                 _ => Vec::new(),
             };
             let count = high.saturating_add(1).min(MAX_IMAGE_PIXELS);
+            // Convert each `base_components`-byte entry through the base colour space.
+            let converted = to_rgba(
+                &bytes,
+                &base,
+                count,
+                1,
+                SampleRange::declared(8),
+                base_components,
+                &[],
+            );
             let mut palette = Vec::with_capacity(count);
-            for i in 0..count {
-                let at = i.saturating_mul(3);
+            for rgba in converted.chunks_exact(4) {
                 palette.push([
-                    bytes.get(at).copied().unwrap_or(0),
-                    bytes.get(at.saturating_add(1)).copied().unwrap_or(0),
-                    bytes.get(at.saturating_add(2)).copied().unwrap_or(0),
+                    rgba.first().copied().unwrap_or(0),
+                    rgba.get(1).copied().unwrap_or(0),
+                    rgba.get(2).copied().unwrap_or(0),
                 ]);
             }
             Some(Space::Indexed {
                 palette,
                 high,
-                // The default `/Decode` for an indexed image maps the *index* rather than a
-                // colour, so its range is 0 to hival and not 0 to 1. With one entry in the
-                // palette a stored byte of 255 is index 1 and a byte of 1 is index 0.
-                decode: [0.0, high as f64],
+                decode: [0.0, 255.0],
+                explicit_decode: false,
             })
         }
-        b"CalRGB" => Some(Space::Rgb {
-            decode: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
-        }),
-        b"CalGray" => Some(Space::Gray { decode: [0.0, 1.0] }),
+        b"CalRGB" => {
+            let dict_obj = array
+                .get(1)
+                .and_then(resolve)
+                .or_else(|| array.get(1).cloned());
+            if let Some(dict) = dict_obj.as_ref().and_then(Object::as_dict)
+                && let Some(wp) = read_triple(dict.get("WhitePoint"))
+                && wp[1] > 0.0
+            {
+                let gamma = read_triple(dict.get("Gamma")).unwrap_or([1.0, 1.0, 1.0]);
+                let matrix = read_matrix9(dict.get("Matrix"))
+                    .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+                return Some(Space::CalRgb {
+                    decode: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+                    white_point: wp,
+                    gamma,
+                    matrix,
+                });
+            }
+            Some(Space::Rgb {
+                decode: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            })
+        }
+        b"CalGray" => {
+            let dict_obj = array
+                .get(1)
+                .and_then(resolve)
+                .or_else(|| array.get(1).cloned());
+            if let Some(dict) = dict_obj.as_ref().and_then(Object::as_dict) {
+                let gamma = dict.get("Gamma").and_then(Object::as_f64).unwrap_or(1.0);
+                return Some(Space::CalGray {
+                    decode: [0.0, 1.0],
+                    gamma: gamma.max(0.0),
+                });
+            }
+            Some(Space::Gray { decode: [0.0, 1.0] })
+        }
+        b"Lab" => {
+            let dict_obj = array
+                .get(1)
+                .and_then(resolve)
+                .or_else(|| array.get(1).cloned())?;
+            let dict = dict_obj.as_dict()?;
+            let wp = read_triple(dict.get("WhitePoint"))?;
+            if wp[0] <= 0.0 || wp[1] <= 0.0 || wp[2] <= 0.0 {
+                return None;
+            }
+            let range = read_quad(dict.get("Range")).unwrap_or([-100.0, 100.0, -100.0, 100.0]);
+            Some(Space::Lab {
+                decode: [0.0, 100.0, range[0], range[1], range[2], range[3]],
+                white_point: wp,
+                range,
+            })
+        }
+        b"Separation" => {
+            let name_obj = array
+                .get(1)
+                .and_then(resolve)
+                .or_else(|| array.get(1).cloned());
+            let is_none = name_obj.as_ref().and_then(Object::as_name) == Some(b"None");
+            let alternate = Box::new(read_space(array.get(2), resolve)?);
+            let function = Function::parse(array.get(3)?, resolve)?;
+            Some(Space::Separation {
+                decode: [0.0, 1.0],
+                is_none,
+                alternate,
+                function,
+            })
+        }
+        b"DeviceN" => {
+            let names_obj = array
+                .get(1)
+                .and_then(resolve)
+                .or_else(|| array.get(1).cloned())?;
+            let colorants = names_obj.as_array()?.len().max(1);
+            let alternate = Box::new(read_space(array.get(2), resolve)?);
+            let function = Function::parse(array.get(3)?, resolve)?;
+            let mut decode = Vec::with_capacity(colorants * 2);
+            for _ in 0..colorants {
+                decode.extend_from_slice(&[0.0, 1.0]);
+            }
+            Some(Space::DeviceN {
+                decode,
+                colorants,
+                alternate,
+                function,
+            })
+        }
         other => simple_space(other),
     }
+}
+
+fn read_triple(obj: Option<&Object>) -> Option<[f64; 3]> {
+    let a = obj?.as_array()?;
+    Some([
+        a.first()?.as_f64()?,
+        a.get(1)?.as_f64()?,
+        a.get(2)?.as_f64()?,
+    ])
+}
+
+fn read_quad(obj: Option<&Object>) -> Option<[f64; 4]> {
+    let a = obj?.as_array()?;
+    Some([
+        a.first()?.as_f64()?,
+        a.get(1)?.as_f64()?,
+        a.get(2)?.as_f64()?,
+        a.get(3)?.as_f64()?,
+    ])
+}
+
+fn read_matrix9(obj: Option<&Object>) -> Option<[f64; 9]> {
+    let a = obj?.as_array()?;
+    if a.len() < 9 {
+        return None;
+    }
+    let mut out = [0.0f64; 9];
+    for (slot, item) in out.iter_mut().zip(a.iter()) {
+        *slot = item.as_f64()?;
+    }
+    Some(out)
 }
 
 /// The device spaces, which need no parameters.
@@ -357,23 +527,89 @@ fn simple_space(name: &[u8]) -> Option<Space> {
 }
 
 /// Fold a `/Decode` array into the space it belongs to.
-fn apply_decode(space: Space, values: &[f64]) -> Space {
+fn apply_decode(space: Space, decode_obj: Option<&Object>, bpc: usize) -> Space {
+    let components = space.components();
+    let has_explicit = decode_obj.and_then(Object::as_array).is_some();
+    let values = read_decode(decode_obj, components);
     match space {
         Space::Gray { .. } => Space::Gray {
-            decode: flat::<2>(values),
+            decode: flat::<2>(&values),
+        },
+        Space::CalGray { gamma, .. } => Space::CalGray {
+            decode: flat::<2>(&values),
+            gamma,
         },
         Space::Rgb { .. } => Space::Rgb {
-            decode: flat::<6>(values),
+            decode: flat::<6>(&values),
+        },
+        Space::CalRgb {
+            white_point,
+            gamma,
+            matrix,
+            ..
+        } => Space::CalRgb {
+            decode: flat::<6>(&values),
+            white_point,
+            gamma,
+            matrix,
         },
         Space::Cmyk { .. } => Space::Cmyk {
-            decode: flat::<8>(values),
+            decode: flat::<8>(&values),
         },
-        Space::Indexed { palette, high, .. } => Space::Indexed {
-            palette,
-            high,
-            decode: flat::<2>(values),
+        Space::Lab {
+            decode,
+            white_point,
+            range,
+        } => Space::Lab {
+            decode: if has_explicit {
+                flat::<6>(&values)
+            } else {
+                decode
+            },
+            white_point,
+            range,
         },
-        other @ Space::Stencil => other,
+        Space::Indexed { palette, high, .. } => {
+            // The default `/Decode` for an indexed image maps the *index* rather than a colour, and
+            // its range is 0 to 2^bpc - 1 (ISO 32000-1 8.9.5): a stored sample is the index itself,
+            // whatever `hival` says.
+            let max_sample = f64::from((1u32 << bpc.min(16)) - 1);
+            Space::Indexed {
+                palette,
+                high,
+                decode: if has_explicit {
+                    flat::<2>(&values)
+                } else {
+                    [0.0, max_sample]
+                },
+                explicit_decode: has_explicit,
+            }
+        }
+        Space::Separation {
+            is_none,
+            alternate,
+            function,
+            ..
+        } => Space::Separation {
+            decode: flat::<2>(&values),
+            is_none,
+            alternate,
+            function,
+        },
+        Space::DeviceN {
+            colorants,
+            alternate,
+            function,
+            ..
+        } => Space::DeviceN {
+            decode: values,
+            colorants,
+            alternate,
+            function,
+        },
+        Space::Stencil { .. } => Space::Stencil {
+            decode: flat::<2>(&values),
+        },
     }
 }
 
@@ -448,6 +684,8 @@ enum Role {
     Picture,
     /// An `/SMask`: the alpha of another image.
     SoftMask,
+    /// An explicit `/Mask` stream: a 1-bit stencil masking another image.
+    ExplicitMask,
 }
 
 /// Decode an image XObject into samples ready to place.
@@ -626,14 +864,15 @@ fn decode_samples(
         return None;
     }
 
-    let is_stencil = dict
-        .get("ImageMask")
-        .and_then(Object::as_bool)
-        .unwrap_or(false);
+    let is_stencil = role == Role::ExplicitMask
+        || dict
+            .get("ImageMask")
+            .and_then(Object::as_bool)
+            .unwrap_or(false);
     let declared_bits = dict
         .get("BitsPerComponent")
         .and_then(Object::as_i64)
-        .unwrap_or(8)
+        .unwrap_or(if is_stencil { 1 } else { 8 })
         .max(0) as usize;
 
     // Read off the dictionary, which costs nothing, and asked before anything is decoded: a
@@ -700,7 +939,7 @@ fn decode_samples(
         }
         _ => {
             let space = if is_stencil {
-                Space::Stencil
+                Space::Stencil { decode: [0.0, 1.0] }
             } else {
                 match read_space(dict.get("ColorSpace"), resolve) {
                     Some(s) => s,
@@ -772,7 +1011,7 @@ fn decode_samples(
     }
 
     let components = space.components();
-    let space = apply_decode(space, &read_decode(dict.get("Decode"), components));
+    let space = apply_decode(space, dict.get("Decode"), range.value);
 
     // A decode that reported damage is not a picture, and drawing it is worse than not drawing
     // it. `sample_at` past the end of the buffer answers zero, so a decode that lost its place
@@ -816,42 +1055,66 @@ fn decode_samples(
         }
     }
 
-    let pixels = to_rgba(&samples, &space, width, height, range, components);
+    let resolved_mask = if role == Role::Picture {
+        dict.get("Mask")
+            .and_then(|o| resolve(o).or_else(|| Some(o.clone())))
+    } else {
+        None
+    };
+
+    let key_ranges: Vec<[f64; 2]> = match &resolved_mask {
+        Some(Object::Array(a)) if a.len() >= components.saturating_mul(2) && !is_stencil => (0
+            ..components)
+            .map(|c| {
+                let lo = a.get(c * 2).and_then(Object::as_f64).unwrap_or(0.0);
+                let hi = a.get(c * 2 + 1).and_then(Object::as_f64).unwrap_or(0.0);
+                [lo.min(hi), lo.max(hi)]
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let key_range = key_ranges.first().copied();
+
+    let pixels = to_rgba(
+        &samples,
+        &space,
+        width,
+        height,
+        range,
+        components,
+        &key_ranges,
+    );
     let _ = space.name();
 
-    // A mask's own `/SMask` is not followed. A soft mask's luminance *is* its alpha, so a mask
-    // under a mask is a claim the specification does not make, and following it would make the
-    // depth of a chain of them the only thing standing between a file and the stack: each link
-    // is a legal image reference, and a few hundred of them is a few hundred nested calls. It
-    // is reported rather than dropped silently, because a file that writes one is telling us
-    // something about itself.
-    let soft_mask = if role == Role::SoftMask {
-        if dict.get("SMask").is_some() {
+    let soft_mask = if role != Role::Picture {
+        // A mask's own `/SMask` is not followed. A soft mask's luminance *is* its alpha, so a mask
+        // under a mask is a claim the specification does not make, and following it would make the
+        // depth of a chain of them the only thing standing between a file and the stack: each link
+        // is a legal image reference, and a few hundred of them is a few hundred nested calls. It
+        // is reported rather than dropped silently, because a file that writes one is telling us
+        // something about itself.
+        if role == Role::SoftMask && dict.get("SMask").is_some() {
             notes.push("a soft mask carries a soft mask of its own, which is not read".to_owned());
         }
         None
     } else {
-        dict.get("SMask")
-            .and_then(resolve)
+        let smask = dict
+            .get("SMask")
+            .and_then(|o| resolve(o).or_else(|| Some(o.clone())))
             .and_then(|o| match o {
                 Object::Stream(s) => Some(s),
                 _ => None,
             })
             .and_then(|s| decode_soft_mask(&s, width, height, resolve, notes))
-            .map(Box::new)
+            .map(Box::new);
+        if smask.is_some() {
+            smask
+        } else if let Some(Object::Stream(mask_stream)) = resolved_mask {
+            decode_role(&mask_stream, resolve, notes, Role::ExplicitMask).map(Box::new)
+        } else {
+            None
+        }
     };
-
-    let key_range = dict
-        .get("Mask")
-        .filter(|o| !matches!(o, Object::Ref(_)))
-        .and_then(Object::as_array)
-        .filter(|a| a.len() >= 2)
-        .map(|a| {
-            [
-                a.first().and_then(Object::as_f64).unwrap_or(0.0),
-                a.get(1).and_then(Object::as_f64).unwrap_or(1.0),
-            ]
-        });
 
     Some(Raster {
         width,
@@ -915,10 +1178,186 @@ fn jpeg(data: &[u8], notes: &mut Vec<String>) -> Option<(Vec<u8>, usize, usize)>
     Some((pixels, usize::from(info.width), usize::from(info.height)))
 }
 
+/// Linearly interpolate `t` in `0.0..=1.0` across a `/Decode` `[lo, hi]` pair.
+fn interpolate_decode(t: f64, [lo, hi]: [f64; 2]) -> f64 {
+    lo + t.clamp(0.0, 1.0) * (hi - lo)
+}
+
+fn srgb_compand(u: f64) -> f64 {
+    let u = u.clamp(0.0, 1.0);
+    if u <= 0.003_130_8 {
+        12.92 * u
+    } else {
+        1.055 * u.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn xyz_to_srgb(x: f64, y: f64, z: f64, wp: [f64; 3]) -> (f64, f64, f64) {
+    let xw = wp[0].max(f64::EPSILON);
+    let yw = wp[1].max(f64::EPSILON);
+    let zw = wp[2].max(f64::EPSILON);
+    let xd = x * (0.950_47 / xw);
+    let yd = y * (1.0 / yw);
+    let zd = z * (1.088_83 / zw);
+    let r_lin = 3.240_6 * xd - 1.537_2 * yd - 0.498_6 * zd;
+    let g_lin = -0.968_9 * xd + 1.875_8 * yd + 0.041_5 * zd;
+    let b_lin = 0.055_7 * xd - 0.204_0 * yd + 1.057_0 * zd;
+    (
+        srgb_compand(r_lin),
+        srgb_compand(g_lin),
+        srgb_compand(b_lin),
+    )
+}
+
+fn lab_g(t: f64) -> f64 {
+    if t >= 6.0 / 29.0 {
+        t * t * t
+    } else {
+        (108.0 / 841.0) * (t - 4.0 / 29.0)
+    }
+}
+
+/// Convert domain-decoded component values in `space` to `(r, g, b, a)`.
+fn domain_to_rgba(space: &Space, vals: &[f64]) -> (f64, f64, f64, f64) {
+    match space {
+        Space::Stencil { .. } => (0.0, 0.0, 0.0, 1.0),
+        Space::Gray { .. } => {
+            let v = vals.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            (v, v, v, 1.0)
+        }
+        Space::CalGray { gamma, .. } => {
+            let a = vals.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let v = if (*gamma - 1.0).abs() < 1e-6 {
+                a
+            } else {
+                srgb_compand(a.powf(*gamma))
+            };
+            (v, v, v, 1.0)
+        }
+        Space::Rgb { .. } => (
+            vals.first().copied().unwrap_or(0.0).clamp(0.0, 1.0),
+            vals.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0),
+            vals.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0),
+            1.0,
+        ),
+        Space::CalRgb {
+            white_point,
+            gamma,
+            matrix,
+            ..
+        } => {
+            let a = vals
+                .first()
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0)
+                .powf(gamma[0]);
+            let b = vals
+                .get(1)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0)
+                .powf(gamma[1]);
+            let c = vals
+                .get(2)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0)
+                .powf(gamma[2]);
+            let x = matrix[0] * a + matrix[3] * b + matrix[6] * c;
+            let y = matrix[1] * a + matrix[4] * b + matrix[7] * c;
+            let z = matrix[2] * a + matrix[5] * b + matrix[8] * c;
+            let (r, g, bl) = xyz_to_srgb(x, y, z, *white_point);
+            (r, g, bl, 1.0)
+        }
+        Space::Cmyk { .. } => {
+            // Subtractive: each component removes light, and black removes all of it.
+            let c = vals.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let m = vals.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let y = vals.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let k = vals.get(3).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            (
+                (1.0 - c) * (1.0 - k),
+                (1.0 - m) * (1.0 - k),
+                (1.0 - y) * (1.0 - k),
+                1.0,
+            )
+        }
+        Space::Lab {
+            white_point, range, ..
+        } => {
+            let l_star = vals.first().copied().unwrap_or(0.0).clamp(0.0, 100.0);
+            let a_star = vals
+                .get(1)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(range[0].min(range[1]), range[0].max(range[1]));
+            let b_star = vals
+                .get(2)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(range[2].min(range[3]), range[2].max(range[3]));
+            let m = (l_star + 16.0) / 116.0;
+            let l = m + a_star / 500.0;
+            let n = m - b_star / 200.0;
+            let x = white_point[0] * lab_g(l);
+            let y = white_point[1] * lab_g(m);
+            let z = white_point[2] * lab_g(n);
+            let (r, g, b) = xyz_to_srgb(x, y, z, *white_point);
+            (r, g, b, 1.0)
+        }
+        Space::Indexed { palette, high, .. } => {
+            // A damaged index outside the palette is clamped to its nearest end rather than
+            // wrapped; black is only for a palette too short to hold the entry.
+            let last = f64::from(u32::try_from(*high).unwrap_or(0));
+            let index = vals
+                .first()
+                .copied()
+                .unwrap_or(0.0)
+                .round()
+                .clamp(0.0, last) as usize;
+            match palette.get(index) {
+                Some(entry) => (
+                    f64::from(entry[0]) / 255.0,
+                    f64::from(entry[1]) / 255.0,
+                    f64::from(entry[2]) / 255.0,
+                    1.0,
+                ),
+                None => (0.0, 0.0, 0.0, 1.0),
+            }
+        }
+        Space::Separation {
+            is_none,
+            alternate,
+            function,
+            ..
+        } => {
+            if *is_none {
+                return (1.0, 1.0, 1.0, 0.0);
+            }
+            let tint = vals.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            let Some(out) = function.apply(&[tint]) else {
+                return (0.0, 0.0, 0.0, 1.0);
+            };
+            domain_to_rgba(alternate, &out)
+        }
+        Space::DeviceN {
+            alternate,
+            function,
+            ..
+        } => {
+            let Some(out) = function.apply(vals) else {
+                return (0.0, 0.0, 0.0, 1.0);
+            };
+            domain_to_rgba(alternate, &out)
+        }
+    }
+}
+
 /// Turn packed samples into RGBA.
 ///
 /// `range` answers the two questions separately: `layout` says which byte a sample is
-/// in, and `value` says what that sample is worth. A stencil asks neither — see below.
+/// in, and `value` says what that sample is worth.
 fn to_rgba(
     samples: &[u8],
     space: &Space,
@@ -926,86 +1365,86 @@ fn to_rgba(
     height: usize,
     range: SampleRange,
     components: usize,
+    key_ranges: &[[f64; 2]],
 ) -> Vec<u8> {
     let max = f64::from((1u32 << range.value.min(16)) - 1);
     let mut out = Vec::with_capacity(width.saturating_mul(height).saturating_mul(4));
+    let mut domain_vals = vec![0.0f64; components.max(1)];
     for y in 0..height {
         for x in 0..width {
+            let is_key_masked = !key_ranges.is_empty()
+                && key_ranges.len() >= components
+                && (0..components).all(|c| {
+                    let v = f64::from(sample_at(samples, x, y, width, components, range.layout, c));
+                    let [lo, hi] = key_ranges.get(c).copied().unwrap_or([0.0, -1.0]);
+                    v >= lo && v <= hi
+                });
             let raw = |c: usize| -> f64 {
                 let v = sample_at(samples, x, y, width, components, range.layout, c);
                 if max > 0.0 { f64::from(v) / max } else { 0.0 }
             };
-            let (r, g, b, a): (f64, f64, f64, f64) = match space {
-                Space::Stencil => {
-                    // Zero paints and one does not, which is a stencil and not a picture.
-                    // The test is on the *stored bit*, not on the value it normalises to,
-                    // because a stencil's sample is a bit however many bits of byte the
-                    // codec that expanded it chose to write that bit into: a fax decoder
-                    // writes the byte 1 for "do not paint", and comparing 1/255 against
-                    // one half decides that byte 0 paints and byte 1 paints too.
-                    let painted = sample_at(samples, x, y, width, components, range.layout, 0) == 0;
-                    if painted {
+            let (r, g, b, mut a): (f64, f64, f64, f64) = match space {
+                Space::Stencil { decode } => {
+                    // Zero paints and one does not, unless `/Decode [1 0]` swaps them, which is a
+                    // stencil and not a picture. The test is on the *stored bit*, not on the value
+                    // it normalises to, because a stencil's sample is a bit however many bits of
+                    // byte the codec that expanded it chose to write that bit into: a fax decoder
+                    // writes the byte 1 for "do not paint", and comparing 1/255 against one half
+                    // decides that byte 0 paints and byte 1 paints too.
+                    let bit = usize::from(
+                        sample_at(samples, x, y, width, components, range.layout, 0) != 0,
+                    );
+                    let decoded = decode.get(bit).copied().unwrap_or(bit as f64);
+                    if decoded < 0.5 {
                         (0.0, 0.0, 0.0, 1.0)
                     } else {
                         (0.0, 0.0, 0.0, 0.0)
                     }
                 }
-                Space::Gray { decode } => {
-                    let v = decode_component(raw(0), *decode);
-                    (v, v, v, 1.0)
+                Space::Gray { decode }
+                | Space::CalGray { decode, .. }
+                | Space::Indexed { decode, .. }
+                | Space::Separation { decode, .. } => {
+                    domain_to_rgba(space, &[interpolate_decode(raw(0), *decode)])
                 }
-                Space::Rgb { decode } => {
+                Space::Rgb { decode }
+                | Space::CalRgb { decode, .. }
+                | Space::Lab { decode, .. } => {
                     let d = pairs(decode, 3);
-                    let pair = |i: usize| d.get(i).copied().unwrap_or([0.0, 1.0]);
-                    (
-                        decode_component(raw(0), pair(0)),
-                        decode_component(raw(1), pair(1)),
-                        decode_component(raw(2), pair(2)),
-                        1.0,
-                    )
+                    for c in 0..3 {
+                        let pair = d.get(c).copied().unwrap_or([0.0, 1.0]);
+                        if let Some(slot) = domain_vals.get_mut(c) {
+                            *slot = interpolate_decode(raw(c), pair);
+                        }
+                    }
+                    domain_to_rgba(space, domain_vals.get(..3).unwrap_or_default())
                 }
                 Space::Cmyk { decode } => {
                     let d = pairs(decode, 4);
-                    let pair = |i: usize| d.get(i).copied().unwrap_or([0.0, 1.0]);
-                    // Subtractive: each component removes light, and black removes all of it.
-                    let (c, m, y, k) = (
-                        decode_component(raw(0), pair(0)),
-                        decode_component(raw(1), pair(1)),
-                        decode_component(raw(2), pair(2)),
-                        decode_component(raw(3), pair(3)),
-                    );
-                    (
-                        (1.0 - c) * (1.0 - k),
-                        (1.0 - m) * (1.0 - k),
-                        (1.0 - y) * (1.0 - k),
-                        1.0,
-                    )
-                }
-                Space::Indexed {
-                    palette,
-                    high,
-                    decode,
-                } => {
-                    let t = decode_component(raw(0), *decode);
-                    let last = f64::from(u32::try_from(*high).unwrap_or(0));
-                    let index = (t * last).round();
-                    if index < 0.0 || index > last {
-                        // Outside the palette is a damaged index; black is the documented
-                        // outcome and is better than an arbitrary wrap.
-                        (0.0, 0.0, 0.0, 1.0)
-                    } else {
-                        match palette.get(index as usize) {
-                            Some(entry) => {
-                                let c = |i: usize| {
-                                    f64::from(entry.get(i).copied().unwrap_or(0)) / 255.0
-                                };
-                                (c(0), c(1), c(2), 1.0)
-                            }
-                            None => (0.0, 0.0, 0.0, 1.0),
+                    for c in 0..4 {
+                        let pair = d.get(c).copied().unwrap_or([0.0, 1.0]);
+                        if let Some(slot) = domain_vals.get_mut(c) {
+                            *slot = interpolate_decode(raw(c), pair);
                         }
                     }
+                    domain_to_rgba(space, domain_vals.get(..4).unwrap_or_default())
+                }
+                Space::DeviceN {
+                    decode, colorants, ..
+                } => {
+                    let d = pairs(decode, *colorants);
+                    for c in 0..*colorants {
+                        let pair = d.get(c).copied().unwrap_or([0.0, 1.0]);
+                        if let Some(slot) = domain_vals.get_mut(c) {
+                            *slot = interpolate_decode(raw(c), pair);
+                        }
+                    }
+                    domain_to_rgba(space, domain_vals.get(..*colorants).unwrap_or_default())
                 }
             };
+            if is_key_masked {
+                a = 0.0;
+            }
             out.push((r.clamp(0.0, 1.0) * 255.0).round() as u8);
             out.push((g.clamp(0.0, 1.0) * 255.0).round() as u8);
             out.push((b.clamp(0.0, 1.0) * 255.0).round() as u8);
@@ -1082,24 +1521,42 @@ impl Raster {
         ]
     }
 
-    /// The alpha the soft mask gives this fractional sample, or 1.0.
+    /// The alpha the soft or explicit mask gives this fractional sample, or 1.0.
     fn mask_alpha(&self, u: f64, v: f64) -> f64 {
         let Some(mask) = &self.soft_mask else {
             return 1.0;
         };
-        let [r, g, b, _] = mask.sample(u, v);
-        // A soft mask's luminance is its alpha. A mask in DeviceGray has equal channels, so
-        // a weighted sum and the single channel agree; the sum is right for the rest.
-        (f64::from(r) * 0.2126 + f64::from(g) * 0.7152 + f64::from(b) * 0.0722) / 255.0
+        let [r, g, b, a] = mask.sample(u, v);
+        if mask.is_stencil {
+            f64::from(a) / 255.0
+        } else {
+            // A soft mask's luminance is its alpha. A mask in DeviceGray has equal channels, so
+            // a weighted sum and the single channel agree; the sum is right for the rest.
+            (f64::from(r) * 0.2126 + f64::from(g) * 0.7152 + f64::from(b) * 0.0722) / 255.0
+        }
     }
 }
 
-/// Draw an image through a transformation.
+/// Draw an image through a transformation with `BlendMode::Normal`; see [`draw_blended`].
+pub fn draw(
+    device: &mut Device,
+    raster: &Raster,
+    matrix: &Matrix,
+    alpha: f64,
+    fill: Option<&FillColour>,
+) -> bool {
+    draw_blended(device, raster, matrix, alpha, fill, BlendMode::Normal)
+}
+
+/// Draw an image through a transformation, with a blend mode and a constant alpha.
 ///
-/// `matrix` maps the unit square onto the device. `fill` is the graphics state's fill colour,
-/// which is what paints an image mask's *zero* bits; `None` means there is no colour to paint
-/// in, which for a stencil draws nothing rather than guessing one — an image that is not a
-/// stencil paints its own samples and ignores it. Returns whether anything was drawn.
+/// `matrix` maps the unit square onto the device. `alpha` and `blend` are the graphics state's
+/// constant alpha and blend mode, applied to the image as a whole on top of whatever alpha its
+/// own samples and masks carry. `fill` is the graphics state's fill colour, which is what
+/// paints an image mask's painting bits (the zero bits, unless `/Decode` swaps them); `None`
+/// means there is no colour to paint in, which for a stencil draws nothing rather than
+/// guessing one — an image that is not a stencil paints its own samples and ignores it.
+/// Returns whether anything was drawn.
 ///
 /// A stencil's colour is a [`FillColour`] rather than a plain `Rgba` because a mask painted in
 /// a pattern takes a different colour at every pixel: `scn` with a `/Pattern` colour space
@@ -1110,12 +1567,13 @@ impl Raster {
 /// through the transformation with its vertical axis the way an image's is: row zero at the
 /// top. Both are stated because both were once wrong, and each put an image in the wrong
 /// place on its own — see D5b in `docs/known-diffs.md`.
-pub fn draw(
+pub fn draw_blended(
     device: &mut Device,
     raster: &Raster,
     matrix: &Matrix,
     alpha: f64,
     fill: Option<&FillColour>,
+    blend: BlendMode,
 ) -> bool {
     let corners = [
         matrix.apply(0.0, 0.0),
@@ -1139,7 +1597,9 @@ pub fn draw(
         x1: max_x,
         y1: max_y,
     };
-    let area = bounds.intersect(device.clip());
+    let area = bounds
+        .intersect(device.clip())
+        .intersect(device.image().rect());
     let Some((columns, rows)) = area.pixels() else {
         return false;
     };
@@ -1175,6 +1635,7 @@ pub fn draw(
     } else {
         None
     };
+    let const_alpha = alpha.clamp(0.0, 1.0);
     // `rows` is consumed by the outer loop and `columns` by the inner one, and a range is
     // not `Copy`; the clone is two words and is clearer than restructuring the walk.
     for y in rows.clone() {
@@ -1189,30 +1650,29 @@ pub fn draw(
             // an alpha of 0, so the alpha is what says which is which — painting the bits
             // *without* colour turns a mask into a solid block, which is the opposite of what
             // a stencil is for.
-            if let Some(sampler) = stencil.as_ref() {
+            let mut src_a = if let Some(sampler) = stencil.as_ref() {
                 if px[3] == 0 {
                     continue;
                 }
                 // A pattern that does not reach this pixel leaves the paper there, which is
                 // the same answer a path fill gives a gradient that stops short.
-                let Some(colour) = sampler.at(x, y, alpha) else {
+                let Some(colour) = sampler.at(x, y, const_alpha) else {
                     continue;
                 };
+                let sa = (f64::from(px[3]) / 255.0) * (f64::from(colour[3]) / 255.0);
                 px = colour;
-            }
+                sa
+            } else {
+                (f64::from(px[3]) / 255.0) * const_alpha
+            };
             // The soft mask multiplies whatever alpha the samples had.
-            let masked = raster.mask_alpha(u, v);
-            if let Some(a) = px.get_mut(3) {
-                *a = (f64::from(*a) * masked).clamp(0.0, 255.0).round() as u8;
-            }
+            src_a *= raster.mask_alpha(u, v);
             // And the clip does the same, for the same reason and with the same result at
             // the edge: a clip that is a region antialiases rather than steps.
             if let Some(share) = device.clip_coverage(x, y) {
-                if let Some(a) = px.get_mut(3) {
-                    *a = (f64::from(*a) * share).clamp(0.0, 255.0).round() as u8;
-                }
+                src_a *= share;
             }
-            if px.get(3).copied().unwrap_or(0) == 0 {
+            if src_a <= 0.0 {
                 continue;
             }
             // The device position is the one the pixel was computed for. `area` is in
@@ -1220,7 +1680,19 @@ pub fn draw(
             // area's origin is where the placement happens to start, not where the device
             // starts, and subtracting it drew every image not at the page origin at the
             // page origin.
-            device.put(x, y, px);
+            let Some(dst) = device.image().get(x, y) else {
+                continue;
+            };
+            device.put(
+                x,
+                y,
+                over_blend(
+                    dst,
+                    [px[0], px[1], px[2], 255],
+                    src_a.clamp(0.0, 1.0),
+                    blend,
+                ),
+            );
             drawn += 1;
         }
     }
@@ -1524,7 +1996,7 @@ mod tests {
 
     #[test]
     fn the_component_counts_are_the_specifications() {
-        assert_eq!(Space::Stencil.components(), 1);
+        assert_eq!(Space::Stencil { decode: [0.0, 1.0] }.components(), 1);
         assert_eq!(Space::Gray { decode: [0.0; 2] }.components(), 1);
         assert_eq!(Space::Rgb { decode: [0.0; 6] }.components(), 3);
         assert_eq!(Space::Cmyk { decode: [0.0; 8] }.components(), 4);
@@ -1709,6 +2181,7 @@ mod tests {
                 value: 1,
             },
             1,
+            &[],
         );
         assert_eq!(
             &pixels[..4],
@@ -1728,7 +2201,7 @@ mod tests {
     #[test]
     fn the_same_bytes_normalised_over_255_are_the_black_page_they_were() {
         let gray = Space::Gray { decode: [0.0, 1.0] };
-        let pixels = to_rgba(&[0, 1], &gray, 2, 1, SampleRange::declared(8), 1);
+        let pixels = to_rgba(&[0, 1], &gray, 2, 1, SampleRange::declared(8), 1, &[]);
         assert_eq!(&pixels[..4], &[0, 0, 0, 255]);
         assert_eq!(
             &pixels[4..8],
@@ -1753,6 +2226,7 @@ mod tests {
                 value: 1,
             },
             1,
+            &[],
         );
         assert_eq!(
             &pixels[..4],
@@ -1770,7 +2244,7 @@ mod tests {
     fn the_same_bytes_read_as_a_packed_bit_stream_are_unchanged() {
         let gray = Space::Gray { decode: [0.0, 1.0] };
         let bytes = [0b1010_1010u8, 0b0101_0101];
-        let packed = to_rgba(&bytes, &gray, 13, 1, SampleRange::declared(1), 1);
+        let packed = to_rgba(&bytes, &gray, 13, 1, SampleRange::declared(1), 1, &[]);
         let grey = row_of(&decode_ok(&grey_image(13, 1, bytes.to_vec(), 1)).0);
         for (x, got) in packed.chunks_exact(4).enumerate() {
             assert_eq!(got[0], grey[x], "column {x} of thirteen");
@@ -1997,26 +2471,249 @@ mod tests {
 
     #[test]
     fn an_indexed_image_reads_its_palette() {
+        // 8-bit with hival 7: sample value IS the index (default Decode [0, 2^bpc - 1]).
         let mut dict = Dict::new();
         dict.set("Width", Object::Int(2));
         dict.set("Height", Object::Int(1));
         dict.set("BitsPerComponent", Object::Int(8));
+        let mut lut = vec![0u8; 8 * 3];
+        lut[0..3].copy_from_slice(&[0x10, 0x20, 0x30]);
+        lut[7 * 3..8 * 3].copy_from_slice(&[0x40, 0x50, 0x60]);
         dict.set(
             "ColorSpace",
             Object::Array(vec![
                 Object::name("Indexed"),
                 Object::name("DeviceRGB"),
-                Object::Int(1),
-                Object::string("\x10\x20\x30\x40\x50\x60"),
+                Object::Int(7),
+                Object::String(lut),
             ]),
         );
-        // Eight bits per component against a two-entry palette: the whole byte range maps
-        // onto the two indices, so index 0 is the byte 0 and index 1 is the byte 255.
-        let (raster, _) = decode_ok(&Stream::new(dict, vec![0, 255]));
+        let (raster, _) = decode_ok(&Stream::new(dict, vec![0, 7]));
         assert_eq!(
             raster.pixels,
             vec![0x10, 0x20, 0x30, 255, 0x40, 0x50, 0x60, 255]
         );
+
+        // 4-bit with hival 7: packed nybbles 0 and 7 map to indices 0 and 7.
+        let mut dict4 = Dict::new();
+        dict4.set("Width", Object::Int(2));
+        dict4.set("Height", Object::Int(1));
+        dict4.set("BitsPerComponent", Object::Int(4));
+        let mut lut4 = vec![0u8; 8 * 3];
+        lut4[0..3].copy_from_slice(&[200, 10, 20]);
+        lut4[7 * 3..8 * 3].copy_from_slice(&[10, 200, 30]);
+        dict4.set(
+            "ColorSpace",
+            Object::Array(vec![
+                Object::name("Indexed"),
+                Object::name("DeviceRGB"),
+                Object::Int(7),
+                Object::String(lut4),
+            ]),
+        );
+        let (raster4, _) = decode_ok(&Stream::new(dict4, vec![0x07]));
+        assert_eq!(raster4.pixels, vec![200, 10, 20, 255, 10, 200, 30, 255]);
+
+        // DeviceGray base space: 1 byte per palette entry.
+        let mut dict_gray = Dict::new();
+        dict_gray.set("Width", Object::Int(2));
+        dict_gray.set("Height", Object::Int(1));
+        dict_gray.set("BitsPerComponent", Object::Int(8));
+        dict_gray.set(
+            "ColorSpace",
+            Object::Array(vec![
+                Object::name("Indexed"),
+                Object::name("DeviceGray"),
+                Object::Int(2),
+                Object::String(vec![10, 128, 240]),
+            ]),
+        );
+        let (raster_gray, _) = decode_ok(&Stream::new(dict_gray, vec![1, 2]));
+        assert_eq!(
+            raster_gray.pixels,
+            vec![128, 128, 128, 255, 240, 240, 240, 255]
+        );
+    }
+
+    #[test]
+    fn gradient_smask_blends_over_backdrop_and_keeps_page_opaque() {
+        let mask = soft_mask(2, 1, vec![65, 190], 8);
+        let img = with_mask(2, 1, vec![65, 131, 98, 65, 131, 98], 8, &mask);
+        let (raster, _) = decode_ok(&img);
+        // Yellow backdrop (230, 230, 50, 255).
+        let mut device = Device::new(crate::Image::filled(2, 1, [230, 230, 50, 255]));
+        let m = Matrix::new(2.0, 0.0, 0.0, -1.0, 0.0, 1.0);
+        assert!(draw(&mut device, &raster, &m, 1.0, None));
+        let page = device.into_image();
+        let p0 = page.get(0, 0).expect("pixel 0");
+        assert_eq!(p0[3], 255, "backdrop remains opaque after compositing");
+        assert!((i32::from(p0[0]) - 188).abs() <= 1, "got {p0:?}");
+        assert!((i32::from(p0[1]) - 205).abs() <= 1, "got {p0:?}");
+        assert!((i32::from(p0[2]) - 62).abs() <= 1, "got {p0:?}");
+    }
+
+    #[test]
+    fn explicit_mask_colour_key_mask_and_inverted_stencil_decode_work() {
+        // 1. Inverted stencil Decode [1 0]: bit 1 paints, bit 0 does not.
+        let mut inv = Dict::new();
+        inv.set("Width", Object::Int(2));
+        inv.set("Height", Object::Int(1));
+        inv.set("ImageMask", Object::Bool(true));
+        inv.set("BitsPerComponent", Object::Int(1));
+        inv.set(
+            "Decode",
+            Object::Array(vec![Object::Int(1), Object::Int(0)]),
+        );
+        let (inv_raster, _) = decode_ok(&Stream::new(inv, vec![0b1000_0000]));
+        assert_eq!(
+            inv_raster.at(0, 0)[3],
+            255,
+            "bit 1 paints under Decode [1 0]"
+        );
+        assert_eq!(
+            inv_raster.at(1, 0)[3],
+            0,
+            "bit 0 is transparent under Decode [1 0]"
+        );
+
+        // 2. Colour-key /Mask [255 255 0 0 255 255] masks magenta (255, 0, 255) and keeps green.
+        let mut keyed = rgb_image(2, 1, vec![255, 0, 255, 0, 255, 0]);
+        keyed.dict.set(
+            "Mask",
+            Object::Array(vec![
+                Object::Int(255),
+                Object::Int(255),
+                Object::Int(0),
+                Object::Int(0),
+                Object::Int(255),
+                Object::Int(255),
+            ]),
+        );
+        let (keyed_raster, _) = decode_ok(&keyed);
+        assert_eq!(keyed_raster.at(0, 0)[3], 0, "magenta pixel is masked out");
+        assert_eq!(
+            keyed_raster.at(1, 0),
+            [0, 255, 0, 255],
+            "green pixel is opaque"
+        );
+
+        // 3. Explicit /Mask stream behind an indirect reference Object::Ref.
+        let mut mask_dict = Dict::new();
+        mask_dict.set("Width", Object::Int(2));
+        mask_dict.set("Height", Object::Int(1));
+        mask_dict.set("ImageMask", Object::Bool(true));
+        mask_dict.set("BitsPerComponent", Object::Int(1));
+        let mask_stream = Stream::new(mask_dict, vec![0b0100_0000]);
+        let mut base = rgb_image(2, 1, vec![255, 0, 0, 0, 0, 255]);
+        base.dict
+            .set("Mask", Object::Ref(mangle_syntax::object::Ref::new(42, 0)));
+        let mut notes = Vec::new();
+        let exp_raster = decode(
+            &base,
+            &|o| match o {
+                Object::Ref(r) if r.num == 42 => Some(Object::Stream(mask_stream.clone())),
+                other => Some(other.clone()),
+            },
+            &mut notes,
+        )
+        .expect("decodes with indirect explicit mask");
+        let mut dev = Device::new(crate::Image::filled(2, 1, [255, 255, 255, 255]));
+        let m = Matrix::new(2.0, 0.0, 0.0, -1.0, 0.0, 1.0);
+        assert!(draw(&mut dev, &exp_raster, &m, 1.0, None));
+        let drawn = dev.into_image();
+        assert_eq!(
+            drawn.get(0, 0),
+            Some([255, 0, 0, 255]),
+            "bit 0 shows base image"
+        );
+        assert_eq!(
+            drawn.get(1, 0),
+            Some([255, 255, 255, 255]),
+            "bit 1 is masked out"
+        );
+    }
+
+    #[test]
+    fn separation_and_lab_images_and_image_blend_modes_render() {
+        // Separation image with exponential tint transform (FunctionType 2) into DeviceRGB.
+        let mut fn_dict = Dict::new();
+        fn_dict.set("FunctionType", Object::Int(2));
+        fn_dict.set(
+            "Domain",
+            Object::Array(vec![Object::Real(0.0), Object::Real(1.0)]),
+        );
+        fn_dict.set(
+            "C0",
+            Object::Array(vec![
+                Object::Real(1.0),
+                Object::Real(1.0),
+                Object::Real(1.0),
+            ]),
+        );
+        fn_dict.set(
+            "C1",
+            Object::Array(vec![
+                Object::Real(1.0),
+                Object::Real(0.5),
+                Object::Real(0.0),
+            ]),
+        );
+        fn_dict.set("N", Object::Real(1.0));
+        let mut sep_dict = Dict::new();
+        sep_dict.set("Width", Object::Int(2));
+        sep_dict.set("Height", Object::Int(1));
+        sep_dict.set("BitsPerComponent", Object::Int(8));
+        sep_dict.set(
+            "ColorSpace",
+            Object::Array(vec![
+                Object::name("Separation"),
+                Object::name("OrangeSpot"),
+                Object::name("DeviceRGB"),
+                Object::Dict(fn_dict),
+            ]),
+        );
+        let (sep_raster, notes) = decode_ok(&Stream::new(sep_dict, vec![0, 255]));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(sep_raster.at(0, 0), [255, 255, 255, 255]);
+        assert_eq!(sep_raster.at(1, 0), [255, 128, 0, 255]);
+
+        // Lab image with D65 white point: L*=0 -> black, L*=100, a*=0, b*=0 -> white.
+        let mut lab_params = Dict::new();
+        lab_params.set(
+            "WhitePoint",
+            Object::Array(vec![
+                Object::Real(0.95047),
+                Object::Real(1.0),
+                Object::Real(1.08883),
+            ]),
+        );
+        let mut lab_dict = Dict::new();
+        lab_dict.set("Width", Object::Int(2));
+        lab_dict.set("Height", Object::Int(1));
+        lab_dict.set("BitsPerComponent", Object::Int(8));
+        lab_dict.set(
+            "ColorSpace",
+            Object::Array(vec![Object::name("Lab"), Object::Dict(lab_params)]),
+        );
+        let (lab_raster, lab_notes) =
+            decode_ok(&Stream::new(lab_dict, vec![0, 128, 128, 255, 128, 128]));
+        assert!(lab_notes.is_empty(), "{lab_notes:?}");
+        assert!(lab_raster.at(0, 0)[0] <= 2, "L*=0 is black");
+        assert!(lab_raster.at(1, 0)[0] >= 253, "L*=100 is white");
+
+        // Constant alpha ca=0.5 and Multiply blend mode on an image.
+        let mut dev = Device::new(crate::Image::filled(1, 1, [200, 100, 50, 255]));
+        let m = Matrix::new(1.0, 0.0, 0.0, -1.0, 0.0, 1.0);
+        let (src, _) = decode_ok(&rgb_image(1, 1, vec![128, 128, 128]));
+        assert!(draw_blended(
+            &mut dev,
+            &src,
+            &m,
+            1.0,
+            None,
+            BlendMode::Multiply
+        ));
+        assert_eq!(dev.into_image().get(0, 0), Some([100, 50, 25, 255]));
     }
 
     #[test]
