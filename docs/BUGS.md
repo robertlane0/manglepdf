@@ -119,6 +119,19 @@ Found by a corpus test asserting that **a span never splits a token**: the objec
 start where a token starts and end where one ends. 1873 provenance spans on three pages, all
 checked.
 
+### B11 — Every save discarded the undo history
+
+**S2.** The worker re-opens the file after every edit so the canvas draws what was saved. It
+also threw the editing session away at that moment, because the session had been opened over
+the old bytes. The result was that Ctrl+Z after any edit answered "nothing has been edited on
+this page yet", and a shared-form edit could not be undone at all. The session is now rebased
+onto the saved file, keeping its page-stream history, and form edits carry their before and
+after file bytes in the same operation stack so undo steps over them in order.
+
+*Caught by* `crates/mangle-edit/src/session.rs`'s `a_rebased_session_undoes_across_a_save` and
+`crates/mangle-ui/src/worker.rs`'s `an_edit_can_be_undone_and_redone_after_it_is_saved`, plus
+the form-undo assertions in `a_shared_form_edit_refuses_then_saves_with_a_scope`.
+
 ## What the pattern is
 
 Most of these share one shape, and it is worth stating plainly rather than filing them

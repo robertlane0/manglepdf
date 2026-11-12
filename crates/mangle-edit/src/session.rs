@@ -310,6 +310,43 @@ impl Editor {
         }
     }
 
+    /// Re-open the saved file under this session, keeping its history.
+    ///
+    /// A save replaces the document's bytes, and the worker re-opens them so the canvas draws
+    /// what the file now holds. Without this the session would be discarded with the old
+    /// document and its undo history with it. The snapshots are page streams, which the save
+    /// has just written, so they stay valid against the new file; the file's own views and
+    /// resource dictionaries are what change.
+    pub fn rebase(
+        &mut self,
+        doc: std::sync::Arc<Document>,
+        page: &Page,
+        resources: &Resources,
+    ) -> Result<(), OpenError> {
+        if doc.info().encryption.encrypted {
+            return Err(OpenError::Encrypted);
+        }
+        let views = crate::writeback::parts_of(&doc, page)?;
+        let current = self.history.current().get();
+        if views.len() != current.len()
+            || views
+                .iter()
+                .zip(current)
+                .any(|(view, part)| view.decoded != *part)
+        {
+            return Err(OpenError::NotSavable(
+                "the saved page no longer holds the streams this session last wrote".to_string(),
+            ));
+        }
+        self.doc = doc;
+        self.page = page.clone();
+        self.resources = resources.clone();
+        self.parts = views;
+        self.staged.clear();
+        self.current_res = None;
+        Ok(())
+    }
+
     /// The page's content streams, decoded, one per stream in `/Contents` order.
     ///
     /// This is what was opened: the file's own bytes, unchanged.
@@ -455,9 +492,9 @@ impl Editor {
     /// The object's spans are offsets into the *form's* stream, so the patches are
     /// built against the form's decoded bytes — never the page's — with the form's
     /// own font table, then written with the chosen scope: this page only
-    /// (copy-on-write) or everywhere the form is used. The save bypasses the
-    /// session history, which only snapshots page streams: undo integration for
-    /// form edits is still open, and the worker says so in its notice.
+    /// (copy-on-write) or everywhere the form is used. The save carries the whole
+    /// file rather than one page stream; the worker records the before and after
+    /// bytes so the form edit can be undone without discarding the page history.
     pub fn apply_shared(
         &mut self,
         index: usize,
@@ -2336,6 +2373,77 @@ mod tests {
             "redo returns the edited state, which is U3's other half"
         );
         assert_eq!(editor.depth(), (1, 0));
+    }
+
+    /// A save must not throw the undo stack away.
+    ///
+    /// The worker re-opens the file it just wrote so the canvas draws what is saved. A session
+    /// that was discarded at that point could not undo the edit the user had just made, which
+    /// is what a rebase onto the saved file prevents.
+    #[test]
+    fn a_rebased_session_undoes_across_a_save() {
+        let (doc, page) = doc_with(&["q 1 0 0 1 0 0 cm /Im0 Do Q"]);
+        let mut editor =
+            crate::Editor::open(std::sync::Arc::new(doc), &page, &Resources::default())
+                .expect("editable");
+        let original = editor.stream();
+        editor
+            .apply(0, &Change::move_by(7.0, 0.0))
+            .expect("a move on a real object");
+        let edited = editor.stream();
+
+        let save = editor.save().expect("it saves");
+        let reopened = std::sync::Arc::new(
+            Document::open(save.bytes, OpenOptions::default()).expect("the save reopens"),
+        );
+        let tree = mangle_doc::PageTree::build(
+            reopened.as_ref(),
+            reopened
+                .catalog()
+                .expect("a catalogue")
+                .get("Pages")
+                .and_then(Object::as_ref_id)
+                .expect("a tree"),
+        )
+        .expect("the tree walks");
+        let page2 = tree.pages().first().expect("a page").clone();
+        editor
+            .rebase(reopened, &page2, &Resources::default())
+            .expect("the saved page is the one the session wrote");
+
+        assert!(!editor.is_dirty(), "a rebased session starts clean");
+        assert_eq!(editor.depth(), (1, 0), "and keeps the edit that was saved");
+
+        editor.undo().expect("the saved edit is still undoable");
+        assert_eq!(
+            editor.stream(),
+            original,
+            "undo reaches the bytes as opened"
+        );
+        let save2 = editor.save().expect("the undo saves");
+        let reopened2 = Document::open(save2.bytes, OpenOptions::default()).expect("it reopens");
+        let tree2 = mangle_doc::PageTree::build(
+            &reopened2,
+            reopened2
+                .catalog()
+                .expect("a catalogue")
+                .get("Pages")
+                .and_then(Object::as_ref_id)
+                .expect("a tree"),
+        )
+        .expect("the tree walks");
+        assert_eq!(
+            tree2
+                .pages()
+                .first()
+                .expect("a page")
+                .decoded_contents(&reopened2),
+            original,
+            "the file holds the original bytes again"
+        );
+
+        editor.redo().expect("and the edit is still redoable");
+        assert_eq!(editor.stream(), edited, "redo returns the edited state");
     }
 
     /// A second edit discards the redo stack, which is what keeps a redo from being wrong rather

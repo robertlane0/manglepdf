@@ -335,6 +335,39 @@ pub enum JobResult {
     },
 }
 
+/// One undoable operation.
+///
+/// Page edits are undone through the edit session, whose history holds the page streams. A
+/// form edit writes a whole revision and bypasses that history, so its bytes are kept here
+/// instead; keeping both kinds in one stack preserves the order the user made them in.
+#[derive(Debug, Clone)]
+enum Step {
+    /// A page-content edit, named for the history notice.
+    Page { label: String },
+    /// A form edit, with the file before and after it.
+    Form {
+        before: Vec<u8>,
+        after: Vec<u8>,
+        label: String,
+    },
+}
+
+impl Step {
+    /// The bytes this step holds, for the history's memory bound.
+    fn held_bytes(&self) -> usize {
+        match self {
+            Self::Page { .. } => 0,
+            Self::Form { before, after, .. } => before.len() + after.len(),
+        }
+    }
+}
+
+/// The most file bytes the form-step history may hold.
+///
+/// Page history is streams rather than whole files and is bounded by the session; a form
+/// edit is rarer and has to keep both revisions, so it gets its own ceiling.
+const HISTORY_BYTES: usize = 256 * 1024 * 1024;
+
 /// Everything the worker holds between jobs.
 struct Worker {
     /// The open document, shared with the edit session.
@@ -347,6 +380,10 @@ struct Worker {
     session: Option<mangle_edit::Editor>,
     /// Replacement system font directories (`--font-dirs`) for renders and fallbacks.
     system_dirs: Vec<PathBuf>,
+    /// The operations that can be undone or redone, oldest first.
+    history: Vec<Step>,
+    /// How many history entries are applied; everything after is redoable.
+    at: usize,
 }
 
 impl Worker {
@@ -368,6 +405,8 @@ impl Worker {
             resources,
             session: None,
             system_dirs,
+            history: Vec::new(),
+            at: 0,
         })
     }
 
@@ -522,8 +561,8 @@ impl Worker {
         let Some(change) = Self::change_of(editor, object, request, outbox) else {
             return;
         };
-        let notice = match editor.apply(object, &change) {
-            Ok(outcome) => outcome.notice,
+        let (notice, label) = match editor.apply(object, &change) {
+            Ok(outcome) => (outcome.notice, outcome.label),
             Err(mangle_edit::SessionError::Change(mangle_edit::ChangeError::Refused(
                 mangle_edit::Refusal::InsideForm { form },
             ))) => return self.form_choice(outbox, page, object, request, form),
@@ -534,7 +573,7 @@ impl Worker {
                 return;
             }
         };
-        self.save_and_redraw(outbox, page, notice);
+        self.save_and_redraw(outbox, page, notice, label);
     }
 
     /// Route an edit that landed inside a form: prompt when the form is shared,
@@ -595,9 +634,10 @@ impl Worker {
 
     /// Edit an object drawn inside a shared form, then draw the file as saved.
     ///
-    /// Form edits save outside the session history, which only snapshots page
-    /// streams: the notice says what was edited and where, and undo integration
-    /// for form edits is still open (see `Editor::apply_shared`).
+    /// A form edit writes a whole revision rather than one page stream, so the worker keeps
+    /// its before and after bytes as the undo step. The page session survives the re-open and
+    /// is rebased onto the saved file, so page edits made before the form edit stay undoable
+    /// too.
     fn edit_shared(
         &mut self,
         outbox: &Sender<JobResult>,
@@ -629,17 +669,26 @@ impl Worker {
             mangle_edit::SharedFormScope::ThisPageOnly => "on this page only",
             mangle_edit::SharedFormScope::Everywhere => "everywhere it is used",
         };
+        let before = editor.document().bytes().to_vec();
         match editor.apply_shared(object, &change, scope) {
             Ok(save) => {
-                let _ = outbox.send(JobResult::Saved {
-                    bytes: save.bytes.len(),
-                    objects: save.rewritten.len() + save.installed.len(),
-                    notice: Some(format!(
-                        "edited /{form} {scope_note} (form edits are not undoable yet)"
-                    )),
-                });
-                self.reopen(save.bytes, outbox);
-                self.page(outbox, page, 1.0);
+                let label = format!("edit /{form} {scope_note}");
+                let bytes = save.bytes.len();
+                let objects = save.rewritten.len() + save.installed.len();
+                let after = save.bytes;
+                if self.reopen(after.clone(), Some(page), outbox) {
+                    self.push_step(Step::Form {
+                        before,
+                        after,
+                        label: label.clone(),
+                    });
+                    let _ = outbox.send(JobResult::Saved {
+                        bytes,
+                        objects,
+                        notice: Some(label),
+                    });
+                    self.page(outbox, page, 1.0);
+                }
             }
             Err(e) => {
                 let _ = outbox.send(JobResult::Failed {
@@ -668,21 +717,32 @@ impl Worker {
         let Some(editor) = self.session.as_mut() else {
             return;
         };
-        if let Err(e) = editor.arrange(object, arrange) {
-            let _ = outbox.send(JobResult::Failed {
-                reason: e.to_string(),
-            });
-            return;
-        }
-        self.save_and_redraw(outbox, page, None);
+        let label = match editor.arrange(object, arrange) {
+            Ok(label) => label,
+            Err(e) => {
+                let _ = outbox.send(JobResult::Failed {
+                    reason: e.to_string(),
+                });
+                return;
+            }
+        };
+        self.save_and_redraw(outbox, page, None, label);
     }
 
     /// Save the session, then re-open what it wrote and draw *that*.
     ///
     /// Every mutating job ends here, and deliberately so: the canvas draws the file, not the
     /// model in memory, so the two cannot disagree. A save that failed is answered with its own
-    /// reason rather than silently falling back to the unsaved page.
-    fn save_and_redraw(&mut self, outbox: &Sender<JobResult>, page: usize, notice: Option<String>) {
+    /// reason rather than silently falling back to the unsaved page. The step is recorded only
+    /// after the saved file re-opens and the session is rebased onto it, because an undo entry
+    /// for a save that could not be read back is an undo entry that cannot be kept.
+    fn save_and_redraw(
+        &mut self,
+        outbox: &Sender<JobResult>,
+        page: usize,
+        notice: Option<String>,
+        label: String,
+    ) {
         let saved = match self.session.as_mut().map(mangle_edit::Editor::save) {
             Some(Ok(save)) => save,
             Some(Err(e)) => {
@@ -698,49 +758,126 @@ impl Worker {
             objects: saved.rewritten.len(),
             notice,
         });
-        self.reopen(saved.bytes, outbox);
-        self.page(outbox, page, 1.0);
-    }
-
-    /// Step the history of the page being edited, then draw what the history holds.
-    fn step(&mut self, outbox: &Sender<JobResult>, page: usize, undo: bool) {
-        let Some(editor) = self.session.as_mut() else {
-            let _ = outbox.send(JobResult::Failed {
-                reason: "nothing has been edited on this page yet".to_string(),
-            });
-            return;
-        };
-        let stepped = if undo { editor.undo() } else { editor.redo() };
-        if let Err(e) = stepped {
-            let _ = outbox.send(JobResult::Failed {
-                reason: e.to_string(),
-            });
-            return;
+        if self.reopen(saved.bytes, Some(page), outbox) {
+            self.push_step(Step::Page { label });
+            self.page(outbox, page, 1.0);
         }
-        let saved = match editor.save() {
-            Ok(save) => save,
-            Err(e) => {
-                let _ = outbox.send(JobResult::Failed {
-                    reason: e.to_string(),
-                });
-                return;
-            }
-        };
-        let _ = outbox.send(JobResult::Saved {
-            bytes: saved.bytes.len(),
-            objects: saved.rewritten.len(),
-            notice: None,
-        });
-        self.reopen(saved.bytes, outbox);
-        self.page(outbox, page, 1.0);
     }
 
-    /// Replace the open document with `bytes`, and throw the edit session away.
+    /// Step the operation history, then draw what it holds.
     ///
-    /// A session belongs to the document it was opened over: after a save the bytes have moved,
-    /// so its states no longer correspond to anything. The session is rebuilt when the next edit
-    /// arrives.
-    fn reopen(&mut self, bytes: Vec<u8>, outbox: &Sender<JobResult>) {
+    /// Page steps go through the edit session's own snapshot history; form steps restore the
+    /// file bytes they recorded. Both share one stack so an undo after a form edit reaches the
+    /// form edit rather than an earlier page edit.
+    fn step(&mut self, outbox: &Sender<JobResult>, page: usize, undo: bool) {
+        let index = if undo {
+            self.at.checked_sub(1)
+        } else {
+            (self.at < self.history.len()).then_some(self.at)
+        };
+        let Some(index) = index else {
+            let _ = outbox.send(JobResult::Failed {
+                reason: if undo {
+                    "there is nothing to undo".to_string()
+                } else {
+                    "there is nothing to redo".to_string()
+                },
+            });
+            return;
+        };
+        let Some(step) = self.history.get(index).cloned() else {
+            return;
+        };
+        match step {
+            Step::Page { label } => {
+                if !self.session_for(outbox, page) {
+                    return;
+                }
+                let Some(editor) = self.session.as_mut() else {
+                    return;
+                };
+                let stepped = if undo { editor.undo() } else { editor.redo() };
+                if let Err(e) = stepped {
+                    let _ = outbox.send(JobResult::Failed {
+                        reason: e.to_string(),
+                    });
+                    return;
+                }
+                let saved = match editor.save() {
+                    Ok(save) => save,
+                    Err(e) => {
+                        let _ = outbox.send(JobResult::Failed {
+                            reason: e.to_string(),
+                        });
+                        return;
+                    }
+                };
+                let bytes = saved.bytes.len();
+                let objects = saved.rewritten.len();
+                if self.reopen(saved.bytes, Some(page), outbox) {
+                    self.at = if undo { index } else { index + 1 };
+                    let _ = outbox.send(JobResult::Saved {
+                        bytes,
+                        objects,
+                        notice: Some(label),
+                    });
+                    self.page(outbox, page, 1.0);
+                }
+            }
+            Step::Form {
+                before,
+                after,
+                label,
+            } => {
+                let (bytes, len) = if undo {
+                    let len = before.len();
+                    (before, len)
+                } else {
+                    let len = after.len();
+                    (after, len)
+                };
+                if self.reopen(bytes, Some(page), outbox) {
+                    self.at = if undo { index } else { index + 1 };
+                    let _ = outbox.send(JobResult::Saved {
+                        bytes: len,
+                        objects: 0,
+                        notice: Some(label),
+                    });
+                    self.page(outbox, page, 1.0);
+                }
+            }
+        }
+    }
+
+    /// Record a step, dropping any redo future first.
+    fn push_step(&mut self, step: Step) {
+        self.history.truncate(self.at);
+        self.history.push(step);
+        self.at = self.history.len();
+        self.trim_history();
+    }
+
+    /// Keep the form-step bytes under the history ceiling.
+    ///
+    /// Dropping the oldest step only shortens how far back undo can reach; it does not change
+    /// the document or the session's current state.
+    fn trim_history(&mut self) {
+        let mut held: usize = self.history.iter().map(Step::held_bytes).sum();
+        while held > HISTORY_BYTES && self.history.len() > 1 {
+            let dropped = self.history.remove(0);
+            held -= dropped.held_bytes();
+            self.at = self.at.saturating_sub(1);
+        }
+    }
+
+    /// Replace the open document with `bytes`, rebasing the edit session onto it.
+    ///
+    /// The session is kept rather than thrown away: its history is page streams, and the save
+    /// just wrote those streams into this file. After a form edit it still describes the same
+    /// page bytes, which is what makes page edits undoable across the form revision. When there
+    /// is no session — an open, or a form edit on a page nobody was editing — only the document
+    /// changes.
+    fn reopen(&mut self, bytes: Vec<u8>, page: Option<usize>, outbox: &Sender<JobResult>) -> bool {
         match Document::open(bytes, OpenOptions::default()) {
             Ok(fresh) => {
                 self.doc = Arc::new(fresh);
@@ -754,17 +891,47 @@ impl Worker {
                         self.pages = pages;
                     }
                     Err(e) => {
+                        self.session = None;
                         let _ = outbox.send(JobResult::Failed {
                             reason: format!("the saved file would not reopen: {e}"),
                         });
+                        return false;
                     }
                 }
-                self.session = None;
+                if let Some(index) = page
+                    && let Some(mut editor) = self.session.take()
+                {
+                    let page_dict = self.pages.get(index).cloned();
+                    let resources = self.resources.get(index).cloned();
+                    match (page_dict, resources) {
+                        (Some(page_dict), Some(resources)) => {
+                            if let Err(e) =
+                                editor.rebase(Arc::clone(&self.doc), &page_dict, &resources)
+                            {
+                                let _ = outbox.send(JobResult::Failed {
+                                    reason: format!(
+                                        "the saved file no longer matches the edit session: {e}"
+                                    ),
+                                });
+                                return false;
+                            }
+                            self.session = Some(editor);
+                        }
+                        _ => {
+                            let _ = outbox.send(JobResult::Failed {
+                                reason: format!("this document has no page {}", index + 1),
+                            });
+                            return false;
+                        }
+                    }
+                }
+                true
             }
             Err(e) => {
                 let _ = outbox.send(JobResult::Failed {
                     reason: format!("the saved file would not reopen: {e}"),
                 });
+                false
             }
         }
     }
@@ -1268,15 +1435,21 @@ mod tests {
         std::fs::write(&path, &pdf).expect("writes the test file");
         let supervisor = Supervisor::start();
         supervisor.ask(Job::Open(path.clone()));
-        let at = collect(&supervisor, 2)
+        let objects = collect(&supervisor, 2)
             .into_iter()
             .find_map(|r| match r {
-                JobResult::Page { objects, .. } => objects
-                    .iter()
-                    .position(|o| o.form.as_deref() == Some("Fm0")),
+                JobResult::Page { objects, .. } => Some(objects),
                 _ => None,
             })
+            .expect("a page");
+        let at = objects
+            .iter()
+            .position(|o| o.form.as_deref() == Some("Fm0"))
             .expect("a form object");
+        let before = objects
+            .get(at)
+            .map(|o| o.bounds)
+            .expect("the form object has bounds");
         supervisor.ask(Job::Edit {
             page: 0,
             object: at,
@@ -1317,21 +1490,69 @@ mod tests {
         });
         let mut saved = false;
         let mut redrawn = false;
+        let mut moved = None;
         for result in collect(&supervisor, 2) {
             match result {
                 JobResult::Saved { notice, .. } => {
                     saved =
                         notice.is_some_and(|n| n.contains("Fm0") && n.contains("this page only"));
                 }
-                JobResult::Page { .. } => redrawn = true,
+                JobResult::Page { objects, .. } => {
+                    redrawn = true;
+                    moved = objects
+                        .iter()
+                        .find(|o| o.form.as_deref() == Some("Fm0"))
+                        .map(|o| o.bounds);
+                }
                 JobResult::Failed { reason } => panic!("the scoped edit failed: {reason}"),
                 JobResult::Opened { .. } => {}
                 JobResult::SharePrompt { .. } => panic!("a scoped edit does not prompt"),
             }
         }
-        std::fs::remove_file(&path).ok();
         assert!(saved, "the save names the form and its scope");
         assert!(redrawn, "the file is drawn as saved");
+        let moved = moved.expect("the form survives the edit");
+        assert!(
+            (moved.x0 - before.x0).abs() > 0.1,
+            "the form edit moved it, or the undo below would prove nothing: {before:?} -> {moved:?}"
+        );
+
+        // A form edit is a whole-file revision, and undo must step over it rather than reach
+        // past it into the page history.
+        supervisor.ask(Job::Undo(0));
+        let undone = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => objects
+                    .iter()
+                    .find(|o| o.form.as_deref() == Some("Fm0"))
+                    .map(|o| o.bounds),
+                JobResult::Failed { reason } => panic!("the form undo failed: {reason}"),
+                _ => None,
+            })
+            .expect("the undone page");
+        assert!(
+            (undone.x0 - before.x0).abs() < 1e-6 && (undone.y0 - before.y0).abs() < 1e-6,
+            "undo restores the form: {before:?} -> {undone:?}"
+        );
+
+        supervisor.ask(Job::Redo(0));
+        let redone = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => objects
+                    .iter()
+                    .find(|o| o.form.as_deref() == Some("Fm0"))
+                    .map(|o| o.bounds),
+                JobResult::Failed { reason } => panic!("the form redo failed: {reason}"),
+                _ => None,
+            })
+            .expect("the redone page");
+        assert!(
+            (redone.x0 - moved.x0).abs() < 1e-6 && (redone.y0 - moved.y0).abs() < 1e-6,
+            "redo puts the form edit back: {moved:?} -> {redone:?}"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     /// An edit on a real page is saved and the saved file is re-opened and drawn.
@@ -1402,6 +1623,75 @@ mod tests {
                     < 1e-6,
             "and it moved straight across, without changing size: {before_bounds:?} -> \
              {after_bounds:?}"
+        );
+    }
+
+    /// A saved edit stays undoable and redoable.
+    ///
+    /// The worker re-opens every save, and the session used to be discarded at that point:
+    /// Ctrl+Z after any edit answered "nothing has been edited yet". The session is now rebased
+    /// onto the file it wrote, so both directions reach the page bytes.
+    #[test]
+    fn an_edit_can_be_undone_and_redone_after_it_is_saved() {
+        let path = PathBuf::from("../../corpus/wild/gov__nist-sp800-88.pdf");
+        if !path.exists() {
+            eprintln!("skipped: the corpus file is not fetched");
+            return;
+        }
+        let supervisor = Supervisor::start();
+        supervisor.ask(Job::Open(path));
+        let before = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => objects.first().map(|o| o.bounds),
+                _ => None,
+            })
+            .expect("a page with an object");
+
+        supervisor.ask(Job::Edit {
+            page: 0,
+            object: 0,
+            request: EditRequest::Move { dx: 9.0, dy: 0.0 },
+        });
+        let moved = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => objects.first().map(|o| o.bounds),
+                JobResult::Failed { reason } => panic!("the edit failed: {reason}"),
+                _ => None,
+            })
+            .expect("the edited page");
+        assert!(
+            (moved.x0 - before.x0).abs() > 1.0,
+            "the edit moved the object, or the undo below would prove nothing"
+        );
+
+        supervisor.ask(Job::Undo(0));
+        let undone = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => objects.first().map(|o| o.bounds),
+                JobResult::Failed { reason } => panic!("the undo failed: {reason}"),
+                _ => None,
+            })
+            .expect("the undone page");
+        assert!(
+            (undone.x0 - before.x0).abs() < 1e-6 && (undone.y0 - before.y0).abs() < 1e-6,
+            "undo returns the object to where it was: {before:?} -> {undone:?}"
+        );
+
+        supervisor.ask(Job::Redo(0));
+        let redone = collect(&supervisor, 2)
+            .into_iter()
+            .find_map(|r| match r {
+                JobResult::Page { objects, .. } => objects.first().map(|o| o.bounds),
+                JobResult::Failed { reason } => panic!("the redo failed: {reason}"),
+                _ => None,
+            })
+            .expect("the redone page");
+        assert!(
+            (redone.x0 - moved.x0).abs() < 1e-6 && (redone.y0 - moved.y0).abs() < 1e-6,
+            "redo returns the edited position: {moved:?} -> {redone:?}"
         );
     }
 
