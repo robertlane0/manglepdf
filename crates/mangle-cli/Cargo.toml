@@ -19,5 +19,8 @@ mangle-content.workspace = true
 mangle-text.workspace = true
 mangle-edit.workspace = true
 
+[dev-dependencies]
+mangle-testkit.workspace = true
+
 [lints]
 workspace = true

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Shared test helpers: fixture and corpus discovery, PAM parsing, scratch directories, and byte-span invariants"
+description = "Shared test helpers: fixture and corpus discovery, PAM parsing, scratch directories, byte-span invariants, and one-page PDF assembly"
 
 [dependencies]
 

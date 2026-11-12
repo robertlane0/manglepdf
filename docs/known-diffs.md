@@ -853,3 +853,69 @@ falling through to `/BaseFont` name substitution ([archive](known-diffs-archive.
 ## D33 — tried and reverted: charging the image bound in bytes drew the corpus's worst page *worse*
 
 **Closed (reverted).** Recorded in [`docs/known-diffs-archive.md`](known-diffs-archive.md#d33--tried-and-reverted-charging-the-image-bound-in-bytes-drew-the-corpuss-worst-page-worse).
+
+## D34 — JBIG2 is not decoded, so a page that is only a JBIG2 image draws blank
+
+**Status: open.** The renderer reports `a JBIG2 image was found but no decoder exists yet` and draws
+nothing, and `mangle-cli render` prints that note rather than discarding it. Unlike JPEG 2000
+([D22](#d22--jpeg-2000-is-not-decoded-and-the-decision-to-leave-it-that-way-was-measured-rather-than-assumed)) no decoder was written and no decision was taken to leave it out: `PLAN.md` lists JBIG2
+in M3 and `FINISH.md` reserves fixture F17 for it, so this is a gap in a planned deliverable and not a
+scope statement.
+
+### What it costs, measured
+
+Four of the 77 corpus files carry `JBIG2Decode`, 69 streams in all, counted with `qpdf --qdf`:
+
+| File | Streams | What they are | Effect |
+|---|---|---|---|
+| `gov__nist-nistir7255.pdf` | 66 | the `/Mask` of one JPEG 2000 image on each page | none visible yet: the image they mask is refused first (W034, [D22](#d22--jpeg-2000-is-not-decoded-and-the-decision-to-leave-it-that-way-was-measured-rather-than-assumed)) |
+| `pdfjs__bitmap-composite-and-xnor-text.pdf` | 1 | the page's only content | the page draws blank |
+| `pdfjs__bitmap-composite-or-xor-replace-text.pdf` | 1 | the page's only content | the page draws blank |
+| `pdfjs__bitmap-halftone-10bpp.pdf` | 1 | the page's only content | the page draws blank |
+
+On each of the three pdf.js pages the share of pixels darker than 250 of 255 in a 72 dpi greyscale
+render is **0.000** here, against **0.069** for `mutool draw` and **0.073** for `pdftoppm`.
+
+The corpus is a poor measure of this. Apart from those three test pages its JBIG2 is a mask on a
+JPEG 2000 image, so nothing in it is a scanned document whose pages are JBIG2 bitmaps, which is what the
+codec is mostly used for. Such a document would draw as paper with one note.
+
+### What a decoder has to cover
+
+`FINISH.md` (F17) names the coverage: generic regions (arithmetic and MMR), symbol and text regions,
+halftone, refinement, and globals streams. It also names `jbig2enc` among the independent encoders
+fixtures may come from. The bar [D22](#d22--jpeg-2000-is-not-decoded-and-the-decision-to-leave-it-that-way-was-measured-rather-than-assumed) sets applies: a decoder that emits wrong pixels is worse
+than one that refuses, because wrong pixels are believed. The three pdf.js pages are the first
+comparison against an oracle.
+
+## D35 — a fill, stroke or text colour in a Cal, Lab or Indexed space is reported and not drawn
+
+**Status: open.** A content stream selects a colour space by resource name (`/Cs1 cs`), and the
+interpreter records the name as written. An `ICCBased` or tint (`Separation`, `DeviceN`) resource is
+recognised by what it carries, so it converts. A resource that is a `CalGray`, `CalRGB`, `Lab` or
+`Indexed` array, or a bare device name, carries nothing the conversion can use: `Colour::to_rgba` has no
+arm for the key, the shape is not drawn, and the page says `a fill colour in Cs1 could not be converted,
+so the shape was not drawn`. Strokes and text go through the same conversion. A `CalRGB` stroke says
+`a stroke colour in Cs1 could not be converted, so the outline was not drawn` and a `CalRGB` text run
+says `the colour text is painted in Cs1 could not be converted, so no text on the page in that colour
+was drawn`; the share of pixels darker than 250 of 255 is **0.000** here against **0.250** and
+**0.223** for `mutool draw`.
+
+Images are read by a different path, `image::read_space`, which converts all of these, so one resource
+draws as an image and not as a fill.
+
+Measured on a 32 by 32 point page at 36 dpi, the centre of a square filled through `/Cs1 cs`, with
+`mutool draw` as the oracle:
+
+| `/Cs1` is | Here | `mutool` |
+|---|---|---|
+| `[/CalGray << /WhitePoint [0.9505 1 1.089] /Gamma 2.2 >>]`, `0.5 sc` | paper | (127, 127, 127) |
+| `[/CalRGB …]` (sRGB matrix, gamma 1), `0.5 0.5 0.5 sc` | paper | (127, 127, 127) |
+| `[/Lab << /WhitePoint [0.9505 1 1.089] /Range [-100 100 -100 100] >>]`, `60 40 -40 sc` | paper | (171, 107, 211) |
+| `[/Indexed /DeviceRGB 1 <ff0000 00ff00>]`, `1 sc` | paper | (0, 255, 0) |
+| `/DeviceRGB`, a bare name, `1 0 0 sc` | paper | (255, 0, 0) |
+| `[/Separation /Spot /DeviceRGB …]`, `1 sc` (the control) | (255, 128, 0) | (255, 128, 0) |
+
+The conversions already exist for images (`image::domain_to_rgba`). The fill path would need the
+resource table to carry the family behind a key, as it already does for ICC profiles and tint
+transforms, which is the only reason those two convert.

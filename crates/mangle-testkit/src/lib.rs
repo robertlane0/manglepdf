@@ -3,8 +3,8 @@
 //! Holds pure helpers used across multiple crates' test suites — fixture and corpus
 //! path discovery, bundled test-font loading, hex formatting, PAM image parsing and
 //! alpha flattening for `mutool` oracle comparisons, temporary scratch directories,
-//! and surgical byte-insertion stripping — with zero dependencies so every crate can
-//! depend on `mangle-testkit` in `[dev-dependencies]`.
+//! surgical byte-insertion stripping, and one-page PDF assembly — with zero dependencies
+//! so every crate can depend on `mangle-testkit` in `[dev-dependencies]`.
 
 #![forbid(unsafe_code)]
 #![deny(
@@ -141,6 +141,53 @@ pub fn with_insertions_removed(after: &[u8], inserted: &[Vec<u8>]) -> Option<Vec
     Some(out)
 }
 
+/// A one-page PDF assembled from parts, with a cross-reference table that is correct.
+///
+/// The page is 100 by 100 points. `resources` is the body of its `/Resources` dictionary and
+/// `content` its content stream. Each of `streams` is the dictionary entries and the data of one
+/// more stream object, numbered from 5 in order so that a resource can name it as `5 0 R`;
+/// `/Length` is added.
+#[must_use]
+pub fn single_page_pdf(resources: &str, content: &[u8], streams: &[(&str, &[u8])]) -> Vec<u8> {
+    fn stream(entries: &str, data: &[u8]) -> Vec<u8> {
+        let mut body = format!("<< {entries} /Length {} >>\nstream\n", data.len()).into_bytes();
+        body.extend_from_slice(data);
+        body.extend_from_slice(b"\nendstream");
+        body
+    }
+
+    let mut bodies: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R \
+             /Resources << {resources} >> >>"
+        )
+        .into_bytes(),
+        stream("", content),
+    ];
+    bodies.extend(streams.iter().map(|(entries, data)| stream(entries, data)));
+
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::with_capacity(bodies.len());
+    for (index, body) in bodies.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    let size = bodies.len() + 1;
+    out.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
 /// A temporary scratch directory that removes itself when dropped.
 #[derive(Debug)]
 pub struct Scratch(PathBuf);
@@ -211,6 +258,47 @@ mod tests {
             with_insertions_removed(after, &[b" q 1 0 0 1 5 5 cm".to_vec(), b" Q".to_vec()])
                 .expect("insertions found");
         assert_eq!(stripped, b"AA BB CC");
+    }
+
+    #[test]
+    fn a_single_page_pdf_has_an_xref_that_points_at_each_object() {
+        let pdf = single_page_pdf(
+            "/XObject << /Im1 5 0 R >>",
+            b"q /Im1 Do Q",
+            &[("/Subtype /Image", b"abc")],
+        );
+        let text = String::from_utf8(pdf).expect("ascii throughout");
+        assert!(text.starts_with("%PDF-1.7\n"));
+        let start: usize = text
+            .rsplit("startxref\n")
+            .next()
+            .and_then(|tail| tail.lines().next())
+            .and_then(|line| line.parse().ok())
+            .expect("a startxref offset");
+        let table = text.get(start..).expect("the offset is inside the file");
+        assert!(
+            table.starts_with("xref\n0 6\n"),
+            "five objects and the free entry"
+        );
+        // Entry 0 is the free list head; entries 1 to 5 are the objects, in order.
+        for (number, entry) in table
+            .lines()
+            .skip(3)
+            .take(5)
+            .enumerate()
+            .map(|(i, e)| (i + 1, e))
+        {
+            let offset: usize = entry
+                .get(..10)
+                .and_then(|d| d.parse().ok())
+                .expect("an offset");
+            let at = text.get(offset..).expect("the offset is inside the file");
+            assert!(
+                at.starts_with(&format!("{number} 0 obj\n")),
+                "object {number} is at {offset}"
+            );
+        }
+        assert!(text.contains("/Length 3 >>\nstream\nabc\nendstream"));
     }
 
     #[test]

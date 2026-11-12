@@ -46,7 +46,7 @@ pub use edits::{
 };
 pub use embed::{EMBEDDED_OBJECTS, EmbedError, EmbeddedFont, embed_truetype};
 pub use export::{
-    ExtractedImage, ImageFormat, ImageInput, OptimizePreset, OptimizeReport, PageFit,
+    ExportedPage, ExtractedImage, ImageFormat, ImageInput, OptimizePreset, OptimizeReport, PageFit,
     create_pdf_from_images, encode_png, export_page_jpeg, export_page_png, extract_images,
     optimize_document,
 };

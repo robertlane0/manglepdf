@@ -74,9 +74,28 @@ fn crc32(tag: &[u8], data: &[u8]) -> u32 {
     !crc
 }
 
+/// A page exported as an image file, with what the renderer could not draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedPage {
+    /// The encoded file.
+    pub bytes: Vec<u8>,
+    /// What the picture left out or stood in for, one line each and each said once: an image in a
+    /// codec with no decoder, a colour space that could not be read, a font that was not embedded.
+    /// Empty means the page was drawn as the file asks.
+    pub notes: Vec<String>,
+}
+
 /// Export `page` to PNG at the requested `dpi` (`S10.1`).
+///
+/// The renderer's notes come back with the file, so a caller can tell a complete page from one
+/// with something left out.
 #[must_use]
-pub fn export_page_png(doc: &Document, page: &Page, resources: &Resources, dpi: f64) -> Vec<u8> {
+pub fn export_page_png(
+    doc: &Document,
+    page: &Page,
+    resources: &Resources,
+    dpi: f64,
+) -> ExportedPage {
     let scale = (dpi / 72.0).clamp(0.1, 16.0);
     let rendered = render_page(
         doc,
@@ -87,17 +106,22 @@ pub fn export_page_png(doc: &Document, page: &Page, resources: &Resources, dpi: 
             ..RenderOptions::default()
         },
     );
-    encode_png(&rendered.image)
+    ExportedPage {
+        bytes: encode_png(&rendered.image),
+        notes: rendered.notes,
+    }
 }
 
 /// Export `page` to JPEG at the requested `dpi` and `quality` (`1..=100`) (`S10.1`).
+///
+/// The renderer's notes come back with the file, as they do from [`export_page_png`].
 pub fn export_page_jpeg(
     doc: &Document,
     page: &Page,
     resources: &Resources,
     dpi: f64,
     quality: u8,
-) -> Result<Vec<u8>, String> {
+) -> Result<ExportedPage, String> {
     let scale = (dpi / 72.0).clamp(0.1, 16.0);
     let rendered = render_page(
         doc,
@@ -123,7 +147,10 @@ pub fn export_page_jpeg(
     encoder
         .encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb)
         .map_err(|e| e.to_string())?;
-    Ok(buf)
+    Ok(ExportedPage {
+        bytes: buf,
+        notes: rendered.notes,
+    })
 }
 
 /// Format of an extracted image XObject (`S10.2`, `S2.6`).
@@ -565,9 +592,68 @@ mod tests {
     use mangle_syntax::{Document, OpenOptions};
 
     use super::{
-        ImageFormat, ImageInput, OptimizePreset, PageFit, create_pdf_from_images, export_page_jpeg,
-        export_page_png, extract_images, optimize_document,
+        ExportedPage, ImageFormat, ImageInput, OptimizePreset, PageFit, create_pdf_from_images,
+        export_page_jpeg, export_page_png, extract_images, optimize_document,
     };
+
+    /// A page's resources, as the viewer resolves them.
+    fn page_resources(doc: &Document, page: &mangle_doc::Page) -> Resources {
+        page.inherited
+            .resources
+            .as_ref()
+            .and_then(|o| doc.resolve_object(o).or_else(|| Some(o.clone())))
+            .and_then(|o| o.as_dict().cloned())
+            .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
+            .unwrap_or_default()
+    }
+
+    /// A one-page document drawing one two-by-two image in `space`, exported both ways at 72 dpi.
+    fn exports_of_an_image_in(space: &str) -> (ExportedPage, ExportedPage) {
+        let entries = format!(
+            "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace {space} \
+             /BitsPerComponent 8"
+        );
+        let pdf = mangle_testkit::single_page_pdf(
+            "/XObject << /Im1 5 0 R >>",
+            b"q 60 0 0 60 20 20 cm /Im1 Do Q",
+            &[(entries.as_str(), &[40u8; 4])],
+        );
+        let doc = Document::open(pdf, OpenOptions::default()).expect("opens");
+        let cat = doc.catalog().expect("catalog");
+        let root = cat.get("Pages").and_then(Object::as_ref_id).expect("root");
+        let tree = PageTree::build(&doc, root).expect("tree");
+        let page = tree.get(0).expect("page");
+        let resources = page_resources(&doc, page);
+        (
+            export_page_png(&doc, page, &resources, 72.0),
+            export_page_jpeg(&doc, page, &resources, 72.0, 80).expect("exports jpeg"),
+        )
+    }
+
+    #[test]
+    fn an_export_carries_what_the_renderer_left_out() {
+        let (png, jpg) = exports_of_an_image_in("/NoSuchSpace");
+        for exported in [&png, &jpg] {
+            assert!(
+                exported
+                    .notes
+                    .iter()
+                    .any(|n| n.contains("colour space this cannot read")),
+                "the image that was not drawn is named: {:?}",
+                exported.notes
+            );
+        }
+        // The picture is still made, because a page with one thing missing is worth having.
+        assert!(png.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(jpg.bytes.starts_with(&[0xFF, 0xD8]));
+    }
+
+    #[test]
+    fn an_export_of_a_page_that_drew_completely_says_nothing() {
+        let (png, jpg) = exports_of_an_image_in("/DeviceGray");
+        assert!(png.notes.is_empty(), "{:?}", png.notes);
+        assert!(jpg.notes.is_empty(), "{:?}", jpg.notes);
+    }
 
     #[test]
     fn create_pdf_from_images_preserves_jpeg_hash_and_exports_png_and_jpeg() {
@@ -610,18 +696,11 @@ mod tests {
         assert_eq!(sha256(&extracted0[0].bytes), expected_hash);
 
         // Export page 0 to PNG and JPEG at 144 DPI:
-        let res0 = p0
-            .inherited
-            .resources
-            .as_ref()
-            .and_then(|o| doc.resolve_object(o).or_else(|| Some(o.clone())))
-            .and_then(|o| o.as_dict().cloned())
-            .map(|d| Resources::from_dict(&d, &|o| doc.resolve_object(o)))
-            .unwrap_or_default();
+        let res0 = page_resources(&doc, p0);
         let png = export_page_png(&doc, p0, &res0, 144.0);
-        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(png.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
         let jpg = export_page_jpeg(&doc, p0, &res0, 144.0, 85).expect("exports jpeg");
-        assert!(jpg.starts_with(&[0xFF, 0xD8]));
+        assert!(jpg.bytes.starts_with(&[0xFF, 0xD8]));
     }
 
     #[test]

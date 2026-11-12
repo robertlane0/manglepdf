@@ -52,7 +52,10 @@ manglepdf-cli <command> <file.pdf> [options]
   info      [-json]        what the file is: version, pages, encryption, repair
   pages                  one line per page: index, size, rotation
   check                  validate structure; exit 0 clean, 1 repaired, 2 unusable
-  render   -o FILE       rasterize a page to PNG or JPEG (by extension)
+  render   -o FILE       rasterize a page to PNG or JPEG (by extension); what was left out
+                         or stood in for is listed on stderr, one `note` line each
+                            --strict               fail with exit 1, after writing the file,
+                                                   if there is any
   extract  [-page N]     the text of a page
   save     [-o FILE] [--incremental] [--full] [--reset-prefs]
   edit     [options]     select and change a page object; save the result
@@ -783,12 +786,24 @@ fn render(args: &[String]) -> Result<(), String> {
     let is_jpeg = Path::new(&out_path)
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
-    let bytes = if is_jpeg {
+    let exported = if is_jpeg {
         mangle_edit::export_page_jpeg(&doc, page, &resources, dpi, 90)?
     } else {
         mangle_edit::export_page_png(&doc, page, &resources, dpi)
     };
-    std::fs::write(&out_path, &bytes).map_err(|e| format!("{out_path}: {e}"))?;
+    std::fs::write(&out_path, &exported.bytes).map_err(|e| format!("{out_path}: {e}"))?;
+    // The picture is written whatever the notes say, because a page with one thing missing is
+    // still worth having; `--strict` is how a script asks to be told.
+    for note in &exported.notes {
+        eprintln!("note     {note}");
+    }
+    if flag(args, "--strict") && !exported.notes.is_empty() {
+        return Err(format!(
+            "{out_path}: written, but with {} note(s): the page is not exactly as the file \
+             draws it",
+            exported.notes.len()
+        ));
+    }
     Ok(())
 }
 
