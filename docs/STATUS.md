@@ -41,19 +41,18 @@ write-back bugs live in [`docs/BUGS.md`](BUGS.md).
 The Tier-B wild corpus (`corpus/wild/`) holds 77 real-world PDFs from pdf.js, PDFBox, NIST,
 IRS, USGS, and arXiv, compared at 150 DPI against `mutool draw` and `pdftotext`:
 
-- **73 of 77 files open** without repair prompts (the remaining 4 are 2 fuzzed files `qpdf`
+- **73 of 77 files open** (9 of them after recovery; the remaining 4 are 2 fuzzed files `qpdf`
   also rejects and 2 encrypted files).
-- **740 pages compared**, **0 panics**, page median SSIM **0.96020**, page mean SSIM **0.94307**,
-  per-file worst-page median **0.97375**, and **164 pages below 0.95** (down from 254 across the
-  previous three runs).
-- Of the 164 pages below 0.95, 62 are JPEG 2000 images (`nistir7255`, `S2`) and about 38 are the
+- **655 pages compared**, **0 panics**, page median SSIM **0.96030**, page mean SSIM **0.94076**,
+  per-file worst-page median **0.97410**, and **163 pages below 0.95**.
+- Of the 163 pages below 0.95, 62 are JPEG 2000 images (`nistir7255` 61, `S2` 1) and 38 are the
   project's own font-substitution policy: unembedded fonts rendered in metric-compatible Liberation
   faces against `mutool`'s URW Nimbus faces ([D24](known-diffs.md): `fips197` 24, `nistir7657` 14).
-  The other 64 are itemised per file in [`docs/known-diffs.md`](known-diffs.md).
+  The other 63 are itemised per file in [`docs/known-diffs.md`](known-diffs.md).
 
 ## Tests
 
-Over 1,280 passing unit, round-trip, provenance, corpus, and oracle tests across 39 test
+Over 1,280 passing unit, round-trip, provenance, corpus, and oracle tests across 52 test
 binaries, with 0 failures and 1 sanctioned `#[ignore]`d test (`the_wild_corpus_is_measured_and_reported`,
 the full Tier-B corpus run, which takes hours).
 
